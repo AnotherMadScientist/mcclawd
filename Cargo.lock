@@ -1267,6 +1267,7 @@ dependencies = [
  "mcclawd-core",
  "mcclawd-tasks",
  "mcclawd-tools",
+ "rig-core",
  "serde",
  "serde_json",
  "tokio",
