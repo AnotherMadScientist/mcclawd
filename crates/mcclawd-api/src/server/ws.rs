@@ -45,14 +45,31 @@ pub async fn task_stream(
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState, task_id: TaskId) {
-    // Subscribe to the task's broadcast channel
+    // Replay any persisted event history first (fixes "history lost on revisit")
+    let history = state.get_task_events(&task_id).await;
+    for chunk in &history {
+        if let Ok(json) = serde_json::to_string(chunk) {
+            if socket.send(Message::Text(json.into())).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    // If history already contains Done, the task is finished — no need to subscribe
+    if history.iter().any(|c| matches!(c, OutboundChunk::Done)) {
+        return;
+    }
+
+    // Subscribe to the task's broadcast channel for live updates
     let mut rx = match state.subscribe_task_stream(&task_id).await {
         Some(rx) => rx,
         None => {
-            // Task doesn't have a stream (maybe already completed before WS connected)
-            let chunk = OutboundChunk::Error("Task stream not found".to_string());
-            if let Ok(json) = serde_json::to_string(&chunk) {
-                let _ = socket.send(Message::Text(json.into())).await;
+            // No active stream and no history — task may have been cleaned up
+            if history.is_empty() {
+                let chunk = OutboundChunk::Error("Task stream not found".to_string());
+                if let Ok(json) = serde_json::to_string(&chunk) {
+                    let _ = socket.send(Message::Text(json.into())).await;
+                }
             }
             let done = OutboundChunk::Done;
             if let Ok(json) = serde_json::to_string(&done) {

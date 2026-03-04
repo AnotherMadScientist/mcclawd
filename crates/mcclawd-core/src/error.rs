@@ -20,6 +20,9 @@ pub enum McclawdError {
     #[error("Channel error: {0}")]
     Channel(String),
 
+    #[error("Persistence error: {0}")]
+    Persistence(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

@@ -17,6 +17,8 @@ pub struct AppState {
     pub secrets: Arc<RwLock<Option<Arc<dyn SecretBackend>>>>,
     /// Per-task broadcast channels for streaming agent output to WebSocket clients.
     pub task_streams: Arc<RwLock<HashMap<TaskId, broadcast::Sender<OutboundChunk>>>>,
+    /// Persisted event history per task (survives broadcast channel drops).
+    pub task_events: Arc<RwLock<HashMap<TaskId, Vec<OutboundChunk>>>>,
     /// Agent supervisor for sandboxed execution (None if Docker unavailable).
     pub supervisor: Option<Arc<AgentSupervisor>>,
     /// WebAuthn verifier instance for passkey authentication.
@@ -46,6 +48,7 @@ impl AppState {
             jwt_secret: uuid::Uuid::new_v4().to_string(),
             secrets: Arc::new(RwLock::new(None)),
             task_streams: Arc::new(RwLock::new(HashMap::new())),
+            task_events: Arc::new(RwLock::new(HashMap::new())),
             supervisor,
             webauthn: Arc::new(webauthn),
             webauthn_reg_state: Arc::new(RwLock::new(None)),
@@ -68,5 +71,18 @@ impl AppState {
     ) -> Option<broadcast::Receiver<OutboundChunk>> {
         let streams = self.task_streams.read().await;
         streams.get(task_id).map(|tx| tx.subscribe())
+    }
+
+    /// Send a chunk on the broadcast channel AND persist it in task_events.
+    pub async fn send_and_persist(&self, task_id: &TaskId, tx: &broadcast::Sender<OutboundChunk>, chunk: OutboundChunk) {
+        let _ = tx.send(chunk.clone());
+        let mut events = self.task_events.write().await;
+        events.entry(task_id.clone()).or_default().push(chunk);
+    }
+
+    /// Get persisted event history for a task.
+    pub async fn get_task_events(&self, task_id: &TaskId) -> Vec<OutboundChunk> {
+        let events = self.task_events.read().await;
+        events.get(task_id).cloned().unwrap_or_default()
     }
 }

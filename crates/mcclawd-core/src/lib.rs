@@ -2,6 +2,7 @@ pub mod config;
 pub mod error;
 pub mod hooks;
 pub mod identity;
+pub mod persistence;
 pub mod sanitizer;
 pub mod secrets;
 pub mod skill_loader;
