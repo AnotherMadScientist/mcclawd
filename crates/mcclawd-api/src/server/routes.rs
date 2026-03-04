@@ -5,9 +5,11 @@ use axum::{
 };
 
 use super::auth;
+use super::channel_state;
 use super::channels;
 use super::config_routes;
 use super::mcp_routes;
+use super::providers;
 use super::secrets;
 use super::security;
 use super::state::AppState;
@@ -94,6 +96,20 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         // Security
         .route("/api/security/hooks", get(security::list_hooks))
         .route("/api/security/backends", get(security::list_backends))
+        // Channel state persistence
+        .route(
+            "/api/channels/state",
+            get(channel_state::list_channel_states),
+        )
+        .route(
+            "/api/channels/state/{kind}",
+            delete(channel_state::delete_channel_state),
+        )
+        // Providers
+        .route("/api/providers", get(providers::list_providers))
+        .route("/api/providers/usage", get(providers::provider_usage))
+        // Config reload
+        .route("/api/config/reload", post(providers::reload_config))
         // Apply JWT auth to all protected routes
         .route_layer(middleware::from_fn_with_state(state, auth::auth_middleware));
 

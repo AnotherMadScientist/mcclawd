@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use mcclawd_channels::envelope::{Envelope, Platform};
 use mcclawd_channels::registry::ChannelCapabilities;
 use mcclawd_channels::types::{ChannelKind, InboundMessage, OutboundChunk};
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing;
@@ -26,6 +28,18 @@ pub struct TelegramConfig {
     /// Optional allowlist of chat IDs. If set, messages from other chats are
     /// silently dropped.
     pub allowed_chat_ids: Option<Vec<i64>>,
+}
+
+// ---------------------------------------------------------------------------
+// State (for persistence)
+// ---------------------------------------------------------------------------
+
+/// Serializable snapshot of Telegram channel state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramState {
+    /// The last update_id successfully processed. Polling resumes from
+    /// `last_update_id + 1` to avoid re-processing.
+    pub last_update_id: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -48,6 +62,8 @@ pub struct TelegramChannel {
     outbound_tx: mpsc::Sender<OutboundChunk>,
     /// The teloxide send loop reads from here.
     outbound_rx: Option<mpsc::Receiver<OutboundChunk>>,
+    /// Last processed update ID (persisted across restarts).
+    last_update_id: AtomicI64,
 }
 
 impl TelegramChannel {
@@ -61,6 +77,7 @@ impl TelegramChannel {
             inbox_tx,
             outbound_tx,
             outbound_rx: Some(outbound_rx),
+            last_update_id: AtomicI64::new(0),
         }
     }
 
@@ -148,6 +165,29 @@ impl mcclawd_channels::Channel for TelegramChannel {
 
     fn platform(&self) -> Platform {
         Platform::Telegram
+    }
+
+    async fn save_state(&self) -> anyhow::Result<Option<Vec<u8>>> {
+        let state = TelegramState {
+            last_update_id: self.last_update_id.load(Ordering::Relaxed),
+        };
+        let bytes = serde_json::to_vec(&state)?;
+        Ok(Some(bytes))
+    }
+
+    async fn restore_state(&self, state: Option<Vec<u8>>) -> anyhow::Result<()> {
+        if let Some(data) = state {
+            match serde_json::from_slice::<TelegramState>(&data) {
+                Ok(s) => {
+                    self.last_update_id.store(s.last_update_id, Ordering::Relaxed);
+                    tracing::info!(last_update_id = s.last_update_id, "Telegram state restored");
+                }
+                Err(e) => {
+                    tracing::warn!("Corrupt Telegram state, starting fresh: {e}");
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -290,5 +330,34 @@ mod tests {
         // Both senders are functional (not closed).
         assert!(!s1.is_closed());
         assert!(!s2.is_closed());
+    }
+
+    #[tokio::test]
+    async fn save_restore_state_roundtrip() {
+        let channel = TelegramChannel::new(test_config());
+        channel.last_update_id.store(42, Ordering::Relaxed);
+
+        let saved = channel.save_state().await.unwrap().unwrap();
+        let state: TelegramState = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(state.last_update_id, 42);
+
+        // Restore into a fresh channel
+        let channel2 = TelegramChannel::new(test_config());
+        channel2.restore_state(Some(saved)).await.unwrap();
+        assert_eq!(channel2.last_update_id.load(Ordering::Relaxed), 42);
+    }
+
+    #[tokio::test]
+    async fn restore_none_state_is_ok() {
+        let channel = TelegramChannel::new(test_config());
+        channel.restore_state(None).await.unwrap();
+        assert_eq!(channel.last_update_id.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn restore_corrupt_state_is_ok() {
+        let channel = TelegramChannel::new(test_config());
+        channel.restore_state(Some(b"not json".to_vec())).await.unwrap();
+        assert_eq!(channel.last_update_id.load(Ordering::Relaxed), 0);
     }
 }

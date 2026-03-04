@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use mcclawd_channels::envelope::{Envelope, Platform};
 use mcclawd_channels::registry::ChannelCapabilities;
 use mcclawd_channels::types::{ChannelKind, InboundMessage, OutboundChunk};
-use tokio::sync::mpsc;
+use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing;
 
@@ -32,6 +33,17 @@ pub struct SlackConfig {
 }
 
 // ---------------------------------------------------------------------------
+// State (for persistence)
+// ---------------------------------------------------------------------------
+
+/// Serializable snapshot of Slack channel state.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SlackState {
+    /// Timestamp of the last processed event (Slack `event_ts`).
+    pub last_event_ts: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // SlackChannel
 // ---------------------------------------------------------------------------
 
@@ -52,6 +64,8 @@ pub struct SlackChannel {
     outbound_tx: mpsc::Sender<OutboundChunk>,
     /// The Slack send loop reads from here.
     outbound_rx: Option<mpsc::Receiver<OutboundChunk>>,
+    /// Persisted event state.
+    state: RwLock<SlackState>,
 }
 
 impl SlackChannel {
@@ -65,6 +79,7 @@ impl SlackChannel {
             inbox_tx,
             outbound_tx,
             outbound_rx: Some(outbound_rx),
+            state: RwLock::new(SlackState::default()),
         }
     }
 
@@ -154,6 +169,27 @@ impl mcclawd_channels::Channel for SlackChannel {
 
     fn platform(&self) -> Platform {
         Platform::Slack
+    }
+
+    async fn save_state(&self) -> anyhow::Result<Option<Vec<u8>>> {
+        let state = self.state.read().await.clone();
+        let bytes = serde_json::to_vec(&state)?;
+        Ok(Some(bytes))
+    }
+
+    async fn restore_state(&self, state: Option<Vec<u8>>) -> anyhow::Result<()> {
+        if let Some(data) = state {
+            match serde_json::from_slice::<SlackState>(&data) {
+                Ok(s) => {
+                    *self.state.write().await = s.clone();
+                    tracing::info!(last_event_ts = ?s.last_event_ts, "Slack state restored");
+                }
+                Err(e) => {
+                    tracing::warn!("Corrupt Slack state, starting fresh: {e}");
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -301,5 +337,39 @@ mod tests {
         // Both senders are functional (not closed).
         assert!(!s1.is_closed());
         assert!(!s2.is_closed());
+    }
+
+    #[tokio::test]
+    async fn save_restore_state_roundtrip() {
+        let channel = SlackChannel::new(test_config());
+        {
+            let mut state = channel.state.write().await;
+            state.last_event_ts = Some("1234567890.123456".into());
+        }
+
+        let saved = channel.save_state().await.unwrap().unwrap();
+        let state: SlackState = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(state.last_event_ts, Some("1234567890.123456".into()));
+
+        let channel2 = SlackChannel::new(test_config());
+        channel2.restore_state(Some(saved)).await.unwrap();
+        let restored = channel2.state.read().await;
+        assert_eq!(restored.last_event_ts, Some("1234567890.123456".into()));
+    }
+
+    #[tokio::test]
+    async fn restore_none_state_is_ok() {
+        let channel = SlackChannel::new(test_config());
+        channel.restore_state(None).await.unwrap();
+        let state = channel.state.read().await;
+        assert!(state.last_event_ts.is_none());
+    }
+
+    #[tokio::test]
+    async fn restore_corrupt_state_is_ok() {
+        let channel = SlackChannel::new(test_config());
+        channel.restore_state(Some(b"bad data".to_vec())).await.unwrap();
+        let state = channel.state.read().await;
+        assert!(state.last_event_ts.is_none());
     }
 }

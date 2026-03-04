@@ -6,6 +6,23 @@ use crate::envelope::{Envelope, Platform};
 use crate::registry::ChannelCapabilities;
 use crate::types::*;
 
+// ---------------------------------------------------------------------------
+// ChannelStartContext
+// ---------------------------------------------------------------------------
+
+/// Everything a channel needs to start. Bundles deps so adding new ones
+/// doesn't change the trait signature.
+pub struct ChannelStartContext {
+    /// Sender for inbound messages.
+    pub inbound_tx: mpsc::Sender<InboundMessage>,
+    /// Token to signal graceful shutdown.
+    pub shutdown: CancellationToken,
+}
+
+// ---------------------------------------------------------------------------
+// Channel trait
+// ---------------------------------------------------------------------------
+
 /// The core channel abstraction. Each communication platform implements this
 /// trait to provide inbound message reception and outbound chunk delivery.
 ///
@@ -13,6 +30,9 @@ use crate::types::*;
 /// `capabilities`) alongside the original Phase 0 methods for backward
 /// compatibility. Channels should override the new methods as they migrate
 /// to the normalized Envelope pipeline.
+///
+/// Phase 4 adds state persistence (`save_state`, `restore_state`) and
+/// `start_with_context` for bundled dependency injection.
 #[async_trait]
 pub trait Channel: Send + Sync + 'static {
     // -----------------------------------------------------------------------
@@ -66,5 +86,28 @@ pub trait Channel: Send + Sync + 'static {
             ChannelKind::Email => Platform::Email,
             ChannelKind::Custom(_) => Platform::Cli, // fallback
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4 methods (state persistence + context-based start)
+    // -----------------------------------------------------------------------
+
+    /// Save channel connection state (e.g. Discord sequence, IMAP UID cursor).
+    /// Returns `None` for stateless channels.
+    async fn save_state(&self) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Restore channel connection state from a previous run.
+    /// Called before `start()`. Corrupt/`None` state = fresh init.
+    async fn restore_state(&self, _state: Option<Vec<u8>>) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Start the channel using a context bundle. Default delegates to legacy `start()`.
+    async fn start_with_context(&self, ctx: ChannelStartContext) -> anyhow::Result<()> {
+        self.start(ctx.inbound_tx, ctx.shutdown)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
     }
 }

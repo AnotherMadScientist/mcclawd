@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use mcclawd_channels::envelope::{Envelope, Platform};
 use mcclawd_channels::registry::ChannelCapabilities;
 use mcclawd_channels::types::{ChannelKind, InboundMessage, OutboundChunk};
-use tokio::sync::mpsc;
+use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing;
 
@@ -33,6 +34,17 @@ pub struct WhatsAppConfig {
 }
 
 // ---------------------------------------------------------------------------
+// State (for persistence)
+// ---------------------------------------------------------------------------
+
+/// Serializable snapshot of WhatsApp channel state.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WhatsAppState {
+    /// Timestamp of the last processed webhook message.
+    pub last_message_ts: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // WhatsAppChannel
 // ---------------------------------------------------------------------------
 
@@ -52,6 +64,8 @@ pub struct WhatsAppChannel {
     outbound_tx: mpsc::Sender<OutboundChunk>,
     /// The Cloud API send loop reads from here.
     outbound_rx: Option<mpsc::Receiver<OutboundChunk>>,
+    /// Persisted webhook state.
+    state: RwLock<WhatsAppState>,
 }
 
 impl WhatsAppChannel {
@@ -65,6 +79,7 @@ impl WhatsAppChannel {
             inbox_tx,
             outbound_tx,
             outbound_rx: Some(outbound_rx),
+            state: RwLock::new(WhatsAppState::default()),
         }
     }
 
@@ -156,6 +171,27 @@ impl mcclawd_channels::Channel for WhatsAppChannel {
 
     fn platform(&self) -> Platform {
         Platform::WhatsApp
+    }
+
+    async fn save_state(&self) -> anyhow::Result<Option<Vec<u8>>> {
+        let state = self.state.read().await.clone();
+        let bytes = serde_json::to_vec(&state)?;
+        Ok(Some(bytes))
+    }
+
+    async fn restore_state(&self, state: Option<Vec<u8>>) -> anyhow::Result<()> {
+        if let Some(data) = state {
+            match serde_json::from_slice::<WhatsAppState>(&data) {
+                Ok(s) => {
+                    *self.state.write().await = s.clone();
+                    tracing::info!(last_message_ts = ?s.last_message_ts, "WhatsApp state restored");
+                }
+                Err(e) => {
+                    tracing::warn!("Corrupt WhatsApp state, starting fresh: {e}");
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -304,5 +340,39 @@ mod tests {
         // Both senders are functional (not closed).
         assert!(!s1.is_closed());
         assert!(!s2.is_closed());
+    }
+
+    #[tokio::test]
+    async fn save_restore_state_roundtrip() {
+        let channel = WhatsAppChannel::new(test_config());
+        {
+            let mut state = channel.state.write().await;
+            state.last_message_ts = Some("1709000000".into());
+        }
+
+        let saved = channel.save_state().await.unwrap().unwrap();
+        let state: WhatsAppState = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(state.last_message_ts, Some("1709000000".into()));
+
+        let channel2 = WhatsAppChannel::new(test_config());
+        channel2.restore_state(Some(saved)).await.unwrap();
+        let restored = channel2.state.read().await;
+        assert_eq!(restored.last_message_ts, Some("1709000000".into()));
+    }
+
+    #[tokio::test]
+    async fn restore_none_state_is_ok() {
+        let channel = WhatsAppChannel::new(test_config());
+        channel.restore_state(None).await.unwrap();
+        let state = channel.state.read().await;
+        assert!(state.last_message_ts.is_none());
+    }
+
+    #[tokio::test]
+    async fn restore_corrupt_state_is_ok() {
+        let channel = WhatsAppChannel::new(test_config());
+        channel.restore_state(Some(b"nope".to_vec())).await.unwrap();
+        let state = channel.state.read().await;
+        assert!(state.last_message_ts.is_none());
     }
 }

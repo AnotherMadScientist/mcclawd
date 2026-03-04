@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use mcclawd_channels::envelope::{Envelope, Platform};
 use mcclawd_channels::registry::ChannelCapabilities;
 use mcclawd_channels::types::{ChannelKind, InboundMessage, OutboundChunk};
-use tokio::sync::mpsc;
+use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing;
 
@@ -32,6 +33,19 @@ pub struct DiscordConfig {
 }
 
 // ---------------------------------------------------------------------------
+// State (for persistence)
+// ---------------------------------------------------------------------------
+
+/// Serializable snapshot of Discord channel state.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DiscordState {
+    /// Gateway session ID for resuming connections.
+    pub session_id: Option<String>,
+    /// Last received gateway sequence number.
+    pub sequence: u64,
+}
+
+// ---------------------------------------------------------------------------
 // DiscordChannel
 // ---------------------------------------------------------------------------
 
@@ -51,6 +65,8 @@ pub struct DiscordChannel {
     outbound_tx: mpsc::Sender<OutboundChunk>,
     /// The serenity send loop reads from here.
     outbound_rx: Option<mpsc::Receiver<OutboundChunk>>,
+    /// Persisted gateway state (session + sequence).
+    state: RwLock<DiscordState>,
 }
 
 impl DiscordChannel {
@@ -64,6 +80,7 @@ impl DiscordChannel {
             inbox_tx,
             outbound_tx,
             outbound_rx: Some(outbound_rx),
+            state: RwLock::new(DiscordState::default()),
         }
     }
 
@@ -151,6 +168,31 @@ impl mcclawd_channels::Channel for DiscordChannel {
 
     fn platform(&self) -> Platform {
         Platform::Discord
+    }
+
+    async fn save_state(&self) -> anyhow::Result<Option<Vec<u8>>> {
+        let state = self.state.read().await.clone();
+        let bytes = serde_json::to_vec(&state)?;
+        Ok(Some(bytes))
+    }
+
+    async fn restore_state(&self, state: Option<Vec<u8>>) -> anyhow::Result<()> {
+        if let Some(data) = state {
+            match serde_json::from_slice::<DiscordState>(&data) {
+                Ok(s) => {
+                    *self.state.write().await = s.clone();
+                    tracing::info!(
+                        session_id = ?s.session_id,
+                        sequence = s.sequence,
+                        "Discord state restored"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Corrupt Discord state, starting fresh: {e}");
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -298,5 +340,44 @@ mod tests {
         // Both senders are functional (not closed).
         assert!(!s1.is_closed());
         assert!(!s2.is_closed());
+    }
+
+    #[tokio::test]
+    async fn save_restore_state_roundtrip() {
+        let channel = DiscordChannel::new(test_config());
+        {
+            let mut state = channel.state.write().await;
+            state.session_id = Some("sess-123".into());
+            state.sequence = 99;
+        }
+
+        let saved = channel.save_state().await.unwrap().unwrap();
+        let state: DiscordState = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(state.session_id, Some("sess-123".into()));
+        assert_eq!(state.sequence, 99);
+
+        // Restore into a fresh channel
+        let channel2 = DiscordChannel::new(test_config());
+        channel2.restore_state(Some(saved)).await.unwrap();
+        let restored = channel2.state.read().await;
+        assert_eq!(restored.session_id, Some("sess-123".into()));
+        assert_eq!(restored.sequence, 99);
+    }
+
+    #[tokio::test]
+    async fn restore_none_state_is_ok() {
+        let channel = DiscordChannel::new(test_config());
+        channel.restore_state(None).await.unwrap();
+        let state = channel.state.read().await;
+        assert!(state.session_id.is_none());
+        assert_eq!(state.sequence, 0);
+    }
+
+    #[tokio::test]
+    async fn restore_corrupt_state_is_ok() {
+        let channel = DiscordChannel::new(test_config());
+        channel.restore_state(Some(b"garbage".to_vec())).await.unwrap();
+        let state = channel.state.read().await;
+        assert!(state.session_id.is_none());
     }
 }

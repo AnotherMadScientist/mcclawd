@@ -1,7 +1,9 @@
 pub mod auth;
+pub mod channel_state;
 pub mod channels;
 pub mod config_routes;
 pub mod mcp_routes;
+pub mod providers;
 pub mod routes;
 pub mod secrets;
 pub mod security;

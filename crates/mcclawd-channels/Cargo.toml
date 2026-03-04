@@ -16,6 +16,7 @@ tokio-util = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
+dashmap = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

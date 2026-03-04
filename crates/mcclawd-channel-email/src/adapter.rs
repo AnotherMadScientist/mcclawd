@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use mcclawd_channels::envelope::{Envelope, Platform};
 use mcclawd_channels::registry::ChannelCapabilities;
 use mcclawd_channels::types::{ChannelKind, InboundMessage, OutboundChunk};
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing;
@@ -43,6 +45,19 @@ pub struct EmailConfig {
 }
 
 // ---------------------------------------------------------------------------
+// State (for persistence)
+// ---------------------------------------------------------------------------
+
+/// Serializable snapshot of Email channel state (IMAP cursor).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailState {
+    /// IMAP UIDVALIDITY — changes when UIDs are no longer valid.
+    pub uid_validity: u32,
+    /// Last fetched IMAP UID. Polling resumes from `last_uid + 1`.
+    pub last_uid: u32,
+}
+
+// ---------------------------------------------------------------------------
 // EmailChannel
 // ---------------------------------------------------------------------------
 
@@ -62,6 +77,10 @@ pub struct EmailChannel {
     outbound_tx: mpsc::Sender<OutboundChunk>,
     /// The SMTP send loop reads from here.
     outbound_rx: Option<mpsc::Receiver<OutboundChunk>>,
+    /// IMAP UIDVALIDITY (persisted across restarts).
+    uid_validity: AtomicU32,
+    /// Last fetched IMAP UID (persisted across restarts).
+    last_uid: AtomicU32,
 }
 
 impl EmailChannel {
@@ -75,6 +94,8 @@ impl EmailChannel {
             inbox_tx,
             outbound_tx,
             outbound_rx: Some(outbound_rx),
+            uid_validity: AtomicU32::new(0),
+            last_uid: AtomicU32::new(0),
         }
     }
 
@@ -163,6 +184,35 @@ impl mcclawd_channels::Channel for EmailChannel {
 
     fn platform(&self) -> Platform {
         Platform::Email
+    }
+
+    async fn save_state(&self) -> anyhow::Result<Option<Vec<u8>>> {
+        let state = EmailState {
+            uid_validity: self.uid_validity.load(Ordering::Relaxed),
+            last_uid: self.last_uid.load(Ordering::Relaxed),
+        };
+        let bytes = serde_json::to_vec(&state)?;
+        Ok(Some(bytes))
+    }
+
+    async fn restore_state(&self, state: Option<Vec<u8>>) -> anyhow::Result<()> {
+        if let Some(data) = state {
+            match serde_json::from_slice::<EmailState>(&data) {
+                Ok(s) => {
+                    self.uid_validity.store(s.uid_validity, Ordering::Relaxed);
+                    self.last_uid.store(s.last_uid, Ordering::Relaxed);
+                    tracing::info!(
+                        uid_validity = s.uid_validity,
+                        last_uid = s.last_uid,
+                        "Email state restored"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Corrupt Email state, starting fresh: {e}");
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -333,5 +383,37 @@ mod tests {
         // Both senders are functional (not closed).
         assert!(!s1.is_closed());
         assert!(!s2.is_closed());
+    }
+
+    #[tokio::test]
+    async fn save_restore_state_roundtrip() {
+        let channel = EmailChannel::new(test_config());
+        channel.uid_validity.store(12345, Ordering::Relaxed);
+        channel.last_uid.store(678, Ordering::Relaxed);
+
+        let saved = channel.save_state().await.unwrap().unwrap();
+        let state: EmailState = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(state.uid_validity, 12345);
+        assert_eq!(state.last_uid, 678);
+
+        let channel2 = EmailChannel::new(test_config());
+        channel2.restore_state(Some(saved)).await.unwrap();
+        assert_eq!(channel2.uid_validity.load(Ordering::Relaxed), 12345);
+        assert_eq!(channel2.last_uid.load(Ordering::Relaxed), 678);
+    }
+
+    #[tokio::test]
+    async fn restore_none_state_is_ok() {
+        let channel = EmailChannel::new(test_config());
+        channel.restore_state(None).await.unwrap();
+        assert_eq!(channel.uid_validity.load(Ordering::Relaxed), 0);
+        assert_eq!(channel.last_uid.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn restore_corrupt_state_is_ok() {
+        let channel = EmailChannel::new(test_config());
+        channel.restore_state(Some(b"xxx".to_vec())).await.unwrap();
+        assert_eq!(channel.uid_validity.load(Ordering::Relaxed), 0);
     }
 }
