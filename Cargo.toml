@@ -6,6 +6,7 @@ members = [
     "crates/mcclawd-tools",
     "crates/mcclawd-channels",
     "crates/mcclawd-channel-telegram",
+    "crates/mcclawd-channel-discord",
     "crates/mcclawd-tasks",
     "crates/mcclawd-swarm",
     "crates/mcclawd-api",
@@ -107,4 +108,5 @@ mcclawd-channels = { path = "crates/mcclawd-channels" }
 mcclawd-tasks = { path = "crates/mcclawd-tasks" }
 mcclawd-swarm = { path = "crates/mcclawd-swarm" }
 mcclawd-channel-telegram = { path = "crates/mcclawd-channel-telegram" }
+mcclawd-channel-discord = { path = "crates/mcclawd-channel-discord" }
 mcclawd-api = { path = "crates/mcclawd-api" }
