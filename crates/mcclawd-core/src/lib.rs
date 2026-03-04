@@ -1,6 +1,7 @@
 pub mod config;
 pub mod error;
 pub mod hooks;
+pub mod secrets;
 pub mod types;
 
 pub use config::McclawdConfig;
