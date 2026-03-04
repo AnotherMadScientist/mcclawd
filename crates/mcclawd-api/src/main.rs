@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 
 mod commands;
+mod sandbox;
 mod server;
 
 #[derive(Parser)]
@@ -35,6 +36,11 @@ enum Commands {
         #[arg(short, long, default_value = "9090")]
         port: u16,
     },
+    /// Manage ClawHub skills
+    Skills {
+        #[command(subcommand)]
+        action: SkillsAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -47,6 +53,16 @@ enum SecretsAction {
     List,
     /// Delete a secret
     Delete { key: String },
+}
+
+#[derive(Subcommand)]
+enum SkillsAction {
+    /// List installed skills
+    List,
+    /// Show skill details
+    Info { name: String },
+    /// Install a skill from local path
+    Install { source: String },
 }
 
 #[derive(Subcommand)]
@@ -88,6 +104,11 @@ async fn main() -> anyhow::Result<()> {
         Commands::Serve { port } => {
             commands::serve::execute(port).await?;
         }
+        Commands::Skills { action } => match action {
+            SkillsAction::List => commands::skills::list().await?,
+            SkillsAction::Info { name } => commands::skills::info(&name).await?,
+            SkillsAction::Install { source } => commands::skills::install(&source).await?,
+        },
     }
 
     Ok(())
