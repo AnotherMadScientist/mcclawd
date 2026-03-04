@@ -2,7 +2,8 @@
 # Production: mc manages containers directly via bollard (Phase 1+)
 services:
   agentgateway:
-    image: ghcr.io/modelcontextprotocol/agentgateway:latest
+    image: ghcr.io/agentgateway/agentgateway:latest
+    command: ["-f", "/config/agentgateway.yaml"]
     ports:
       - "3000:3000"
     volumes:
@@ -15,12 +16,6 @@ services:
       mcp-filesystem:
         condition: service_started
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3000/ || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
 
   mcp-langextract:
     build:
@@ -28,23 +23,11 @@ services:
     environment:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/ || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
 
   mcp-scrapling:
     build:
       context: ./docker/mcp-scrapling
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/ || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
 
   mcp-filesystem:
     build:
@@ -52,12 +35,6 @@ services:
     volumes:
       - mcclawd-data:/data
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/ || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
 
 volumes:
   mcclawd-data:

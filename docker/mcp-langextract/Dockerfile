@@ -2,9 +2,9 @@
 # Wrapped with supergateway to expose HTTP endpoint.
 FROM python:3.12-slim
 
-# Install Node.js 22 (for supergateway)
+# Install Node.js 22 (for supergateway) and git (for cloning repo)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
+    && apt-get install -y --no-install-recommends curl ca-certificates gnupg git \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
@@ -17,9 +17,14 @@ RUN apt-get update \
 # Install supergateway (stdio → HTTP wrapper)
 RUN npm install -g supergateway
 
-# Install langextract-mcp
-RUN pip install uv && uv pip install --system langextract-mcp
+# Install uv and langextract-mcp from GitHub
+RUN pip install uv \
+    && git clone https://github.com/larsenweigle/langextract-mcp.git /opt/langextract-mcp \
+    && cd /opt/langextract-mcp \
+    && uv pip install --system fastmcp langextract
+
+WORKDIR /opt/langextract-mcp
 
 EXPOSE 8000
 
-CMD ["supergateway", "--stdio", "langextract-mcp", "--port", "8000", "--outputTransport", "streamableHttp"]
+CMD ["supergateway", "--stdio", "fastmcp run src/langextract_mcp/server.py", "--port", "8000", "--outputTransport", "streamableHttp", "--streamableHttpPath", "/"]

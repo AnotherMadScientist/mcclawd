@@ -7,4 +7,4 @@ VOLUME /data
 EXPOSE 8000
 
 # Scoped to /data — no access outside the mounted volume
-CMD ["supergateway", "--stdio", "mcp-server-filesystem /data", "--port", "8000", "--outputTransport", "streamableHttp"]
+CMD ["supergateway", "--stdio", "mcp-server-filesystem /data", "--port", "8000", "--outputTransport", "streamableHttp", "--streamableHttpPath", "/"]
