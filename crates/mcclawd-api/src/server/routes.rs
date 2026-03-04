@@ -9,6 +9,7 @@ use super::channels;
 use super::config_routes;
 use super::mcp_routes;
 use super::secrets;
+use super::security;
 use super::state::AppState;
 use super::swarms;
 use super::tasks;
@@ -49,6 +50,10 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             "/api/tasks/{id}",
             get(tasks::get_task).delete(tasks::delete_task),
         )
+        .route(
+            "/api/tasks/{id}/message",
+            post(tasks::send_message),
+        )
         // Workspace
         .route("/api/workspace", get(workspace::list_files))
         .route(
@@ -86,6 +91,9 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             "/api/channels/{id}/test",
             post(channels::test_channel),
         )
+        // Security
+        .route("/api/security/hooks", get(security::list_hooks))
+        .route("/api/security/backends", get(security::list_backends))
         // Apply JWT auth to all protected routes
         .route_layer(middleware::from_fn_with_state(state, auth::auth_middleware));
 

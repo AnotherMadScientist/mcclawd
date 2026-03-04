@@ -4,6 +4,7 @@ pub mod config_routes;
 pub mod mcp_routes;
 pub mod routes;
 pub mod secrets;
+pub mod security;
 pub mod state;
 pub mod swarms;
 pub mod tasks;
