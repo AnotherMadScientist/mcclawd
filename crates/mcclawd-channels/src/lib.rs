@@ -1,5 +1,7 @@
 pub mod cli;
+pub mod envelope;
 pub mod pipeline;
+pub mod registry;
 pub mod session;
 pub mod traits;
 pub mod types;
