@@ -2,8 +2,12 @@ use axum::extract::DefaultBodyLimit;
 use axum::http::{self, HeaderValue};
 use std::fs;
 use std::process;
+use std::sync::Arc;
 
+use crate::sandbox::{ImageBuilder, SandboxOrchestrator};
 use crate::server::{routes, state::AppState};
+use crate::supervisor::AgentSupervisor;
+use mcclawd_core::skills::SandboxConfig;
 use mcclawd_core::McclawdConfig;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -34,7 +38,35 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
         .join(".mcclawd")
         .join("config.toml");
     let config = McclawdConfig::load(&config_path)?;
-    let state = AppState::new(config);
+
+    // Initialize supervisor if Docker is available
+    let supervisor = match SandboxOrchestrator::new() {
+        Ok(orchestrator) => {
+            if orchestrator.health_check().await {
+                let docker = bollard::Docker::connect_with_local_defaults()
+                    .expect("Docker connection for ImageBuilder");
+                let image_builder = Arc::new(ImageBuilder::new(docker));
+                let sandbox_config = SandboxConfig::default();
+                let supervisor = AgentSupervisor::new(
+                    orchestrator,
+                    image_builder,
+                    sandbox_config,
+                    4, // max concurrent agents
+                );
+                tracing::info!("Docker sandbox available");
+                Some(Arc::new(supervisor))
+            } else {
+                tracing::warn!("Docker not available, running without sandbox");
+                None
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Docker not available: {e}");
+            None
+        }
+    };
+
+    let state = AppState::new(config, supervisor);
 
     let app = routes::api_router(state.clone())
         .with_state(state)
