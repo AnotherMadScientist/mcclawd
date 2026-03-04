@@ -2,22 +2,15 @@ import { BrowserRouter, Routes, Route } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider } from "./hooks/useAuth";
 import { Layout } from "./components/Layout";
-
-function Placeholder({ name }: { name: string }) {
-  return (
-    <div className="flex items-center justify-center h-64">
-      <p className="text-muted-foreground text-lg">{name} — coming soon</p>
-    </div>
-  );
-}
-
-function LoginPlaceholder() {
-  return (
-    <div className="flex items-center justify-center min-h-screen">
-      <p className="text-muted-foreground">Login page — coming in Task 11</p>
-    </div>
-  );
-}
+import { LoginPage } from "./pages/LoginPage";
+import { TasksPage } from "./pages/TasksPage";
+import { NewTaskPage } from "./pages/NewTaskPage";
+import { TaskDetailPage } from "./pages/TaskDetailPage";
+import { WorkspacePage } from "./pages/WorkspacePage";
+import { SkillsPage } from "./pages/SkillsPage";
+import { McpServersPage } from "./pages/McpServersPage";
+import { SecretsPage } from "./pages/SecretsPage";
+import { SettingsPage } from "./pages/SettingsPage";
 
 const queryClient = new QueryClient();
 
@@ -27,16 +20,16 @@ export default function App() {
       <AuthProvider>
         <BrowserRouter>
           <Routes>
-            <Route path="/login" element={<LoginPlaceholder />} />
+            <Route path="/login" element={<LoginPage />} />
             <Route element={<Layout />}>
-              <Route index element={<Placeholder name="Tasks" />} />
-              <Route path="tasks/new" element={<Placeholder name="New Task" />} />
-              <Route path="tasks/:id" element={<Placeholder name="Task Detail" />} />
-              <Route path="config/workspace" element={<Placeholder name="Workspace" />} />
-              <Route path="config/skills" element={<Placeholder name="Skills" />} />
-              <Route path="config/mcp" element={<Placeholder name="MCP Servers" />} />
-              <Route path="config/secrets" element={<Placeholder name="Secrets" />} />
-              <Route path="config/settings" element={<Placeholder name="Settings" />} />
+              <Route index element={<TasksPage />} />
+              <Route path="tasks/new" element={<NewTaskPage />} />
+              <Route path="tasks/:id" element={<TaskDetailPage />} />
+              <Route path="config/workspace" element={<WorkspacePage />} />
+              <Route path="config/skills" element={<SkillsPage />} />
+              <Route path="config/mcp" element={<McpServersPage />} />
+              <Route path="config/secrets" element={<SecretsPage />} />
+              <Route path="config/settings" element={<SettingsPage />} />
             </Route>
           </Routes>
         </BrowserRouter>
