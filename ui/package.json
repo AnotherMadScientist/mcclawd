@@ -1,0 +1,12 @@
+{
+  "name": "mcclawd-ui",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter @mcclawd/app dev",
+    "build": "pnpm --filter @mcclawd/app build",
+    "lint": "pnpm --filter @mcclawd/app lint"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}
