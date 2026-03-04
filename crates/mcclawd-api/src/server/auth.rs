@@ -29,18 +29,17 @@ pub struct LoginResponse {
     pub token: String,
 }
 
-/// POST /api/auth/login — accepts any non-empty password, unlocks SecretBackend
+/// POST /api/auth/login — validates password against vault passphrase, unlocks SecretBackend
 pub async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
-    if body.password.is_empty() {
+    // Phase 0: validate against hardcoded passphrase (same as CLI)
+    // Phase 1+: derive from keychain or stored hash
+    let passphrase = "mcclawd-local-dev";
+    if body.password != passphrase {
         return Err(StatusCode::UNAUTHORIZED);
     }
-
-    // Unlock the encrypted secrets vault with the same passphrase used by CLI
-    // Phase 1+: derive from login password or keychain
-    let passphrase = "mcclawd-local-dev";
     let secrets_path = {
         let config = state.config.read().await;
         config.secrets_path()
@@ -53,7 +52,11 @@ pub async fn login(
         }
         Err(e) => {
             tracing::warn!("Failed to unlock secrets vault: {e}");
-            let backend = EncryptedFileBackend::new_empty(&secrets_path, passphrase);
+            let backend = EncryptedFileBackend::new_empty(&secrets_path, passphrase)
+                .map_err(|e| {
+                    tracing::error!("Failed to create secrets vault: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
             let mut secrets = state.secrets.write().await;
             *secrets = Some(Arc::new(backend));
         }
@@ -76,8 +79,6 @@ pub async fn login(
 }
 
 /// Auth middleware — validates Bearer token from Authorization header.
-/// Available for route_layer integration in Phase 1.
-#[allow(dead_code)]
 pub async fn auth_middleware(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,

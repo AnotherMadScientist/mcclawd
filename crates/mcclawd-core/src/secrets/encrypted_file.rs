@@ -33,13 +33,13 @@ impl EncryptedFileBackend {
     }
 
     /// Create backend without loading from disk (for when vault doesn't exist yet).
-    pub fn new_empty(path: &Path, passphrase: &str) -> Self {
-        let key = derive_key(passphrase).unwrap_or([0u8; 32]);
-        Self {
+    pub fn new_empty(path: &Path, passphrase: &str) -> Result<Self> {
+        let key = derive_key(passphrase)?;
+        Ok(Self {
             path: path.to_path_buf(),
             key: Zeroizing::new(key),
             cache: RwLock::new(HashMap::new()),
-        }
+        })
     }
 
     fn load_from_disk(&mut self) -> Result<()> {
@@ -77,10 +77,12 @@ impl EncryptedFileBackend {
         output.extend_from_slice(&ciphertext);
 
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
+            tokio::fs::create_dir_all(parent)
+                .await
                 .map_err(|e| McclawdError::Secret(format!("Failed to create dir: {e}")))?;
         }
-        std::fs::write(&self.path, &output)
+        tokio::fs::write(&self.path, &output)
+            .await
             .map_err(|e| McclawdError::Secret(format!("Failed to write secrets: {e}")))?;
         Ok(())
     }

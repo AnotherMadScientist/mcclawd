@@ -1,4 +1,5 @@
 use axum::{
+    middleware,
     routing::{delete, get, post, put},
     Router,
 };
@@ -12,7 +13,7 @@ use super::tasks;
 use super::workspace;
 use super::ws;
 
-pub fn api_router() -> Router<AppState> {
+pub fn api_router(state: AppState) -> Router<AppState> {
     // Public routes (no auth required)
     let public = Router::new()
         .route("/api/health", get(health))
@@ -51,7 +52,9 @@ pub fn api_router() -> Router<AppState> {
             get(config_routes::get_config).put(config_routes::put_config),
         )
         // MCP
-        .route("/api/mcp/servers", get(mcp_routes::list_mcp_servers));
+        .route("/api/mcp/servers", get(mcp_routes::list_mcp_servers))
+        // Apply JWT auth to all protected routes
+        .route_layer(middleware::from_fn_with_state(state, auth::auth_middleware));
 
     public.merge(protected)
 }

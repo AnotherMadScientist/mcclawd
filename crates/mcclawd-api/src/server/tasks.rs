@@ -61,8 +61,19 @@ pub async fn create_task(
 
     let resp = {
         let mgr = state.tasks.read().await;
-        let task = mgr.get_task(&id).unwrap();
-        TaskResponse::from(task)
+        match mgr.get_task(&id) {
+            Some(task) => TaskResponse::from(task),
+            None => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(TaskResponse {
+                        id: id.0,
+                        prompt,
+                        status: TaskStatus::Failed("Task creation failed".to_string()),
+                    }),
+                );
+            }
+        }
     };
 
     // Create broadcast channel for streaming

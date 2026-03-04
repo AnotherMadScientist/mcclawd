@@ -30,14 +30,14 @@ test.describe("Login Page", () => {
   });
 
   test("successful login redirects to tasks page", async ({ page }) => {
-    await page.getByPlaceholder("Enter master password").fill("testpassword");
+    await page.getByPlaceholder("Enter master password").fill("mcclawd-local-dev");
     await page.getByRole("button", { name: "Unlock" }).click();
     await page.waitForURL("/");
     await expect(page.getByRole("heading", { name: "Tasks" })).toBeVisible();
   });
 
   test("token is stored in localStorage after login", async ({ page }) => {
-    await page.getByPlaceholder("Enter master password").fill("testpassword");
+    await page.getByPlaceholder("Enter master password").fill("mcclawd-local-dev");
     await page.getByRole("button", { name: "Unlock" }).click();
     await page.waitForURL("/");
     const token = await page.evaluate(() =>
@@ -51,7 +51,7 @@ test.describe("Login Page", () => {
     page,
   }) => {
     // Login first
-    await page.getByPlaceholder("Enter master password").fill("testpassword");
+    await page.getByPlaceholder("Enter master password").fill("mcclawd-local-dev");
     await page.getByRole("button", { name: "Unlock" }).click();
     await page.waitForURL("/");
     // Navigate back to login — should redirect to /
@@ -61,7 +61,7 @@ test.describe("Login Page", () => {
 
   test("sign out clears token and returns to login", async ({ page }) => {
     // Login
-    await page.getByPlaceholder("Enter master password").fill("testpassword");
+    await page.getByPlaceholder("Enter master password").fill("mcclawd-local-dev");
     await page.getByRole("button", { name: "Unlock" }).click();
     await page.waitForURL("/");
     // Sign Out

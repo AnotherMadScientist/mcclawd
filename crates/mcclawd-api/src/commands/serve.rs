@@ -1,6 +1,8 @@
+use axum::extract::DefaultBodyLimit;
+use axum::http::{self, HeaderValue};
 use crate::server::{routes, state::AppState};
 use mcclawd_core::McclawdConfig;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 pub async fn execute(port: u16) -> anyhow::Result<()> {
@@ -11,18 +13,27 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
     let config = McclawdConfig::load(&config_path)?;
     let state = AppState::new(config);
 
-    let app = routes::api_router()
+    let app = routes::api_router(state.clone())
         .with_state(state)
         .layer(
             CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
+                .allow_origin([
+                    "http://localhost:8080".parse::<HeaderValue>().unwrap(),
+                    "http://127.0.0.1:8080".parse::<HeaderValue>().unwrap(),
+                ])
+                .allow_methods([
+                    http::Method::GET,
+                    http::Method::POST,
+                    http::Method::PUT,
+                    http::Method::DELETE,
+                ])
+                .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION]),
         )
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+        .layer(DefaultBodyLimit::max(1024 * 1024)); // 1MB
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
-    tracing::info!("McClawd API server listening on :{port}");
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
+    tracing::info!("McClawd API server listening on 127.0.0.1:{port}");
     axum::serve(listener, app).await?;
     Ok(())
 }

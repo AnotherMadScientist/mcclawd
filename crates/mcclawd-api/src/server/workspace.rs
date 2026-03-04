@@ -38,6 +38,11 @@ pub async fn get_file(
     State(state): State<AppState>,
     Path(file): Path<String>,
 ) -> Result<Json<WorkspaceFile>, StatusCode> {
+    // Reject path traversal attempts
+    if file.contains("..") || file.contains('/') || file.contains('\\') {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let config = state.config.read().await;
     let workspace_dir = config.data_dir.join(&config.agent.default_workspace);
     let file_path = workspace_dir.join(&file);
@@ -60,6 +65,11 @@ pub async fn put_file(
     Path(file): Path<String>,
     Json(body): Json<WriteFileRequest>,
 ) -> StatusCode {
+    // Reject path traversal attempts
+    if file.contains("..") || file.contains('/') || file.contains('\\') {
+        return StatusCode::BAD_REQUEST;
+    }
+
     let config = state.config.read().await;
     let workspace_dir = config.data_dir.join(&config.agent.default_workspace);
 

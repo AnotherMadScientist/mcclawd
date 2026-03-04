@@ -6,7 +6,7 @@ import { type Page, expect } from "@playwright/test";
  */
 export async function login(page: Page) {
   await page.goto("/login");
-  await page.getByPlaceholder("Enter master password").fill("testpassword");
+  await page.getByPlaceholder("Enter master password").fill("mcclawd-local-dev");
   await page.getByRole("button", { name: "Unlock" }).click();
   await page.waitForURL("/");
   await expect(page.getByRole("heading", { name: "Tasks" })).toBeVisible();

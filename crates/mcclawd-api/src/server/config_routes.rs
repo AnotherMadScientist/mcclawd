@@ -13,10 +13,9 @@ pub async fn get_config(State(state): State<AppState>) -> Json<McclawdConfig> {
     Json(config.clone())
 }
 
-/// PUT /api/config — stub, logs and returns 204
+/// PUT /api/config — not yet implemented (Phase 1)
 pub async fn put_config(
-    Json(body): Json<serde_json::Value>,
+    Json(_body): Json<serde_json::Value>,
 ) -> StatusCode {
-    tracing::info!("Config update requested: {body}");
-    StatusCode::NO_CONTENT
+    StatusCode::NOT_IMPLEMENTED
 }

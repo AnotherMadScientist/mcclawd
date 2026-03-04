@@ -10,7 +10,7 @@ export default async function globalTeardown() {
     const loginRes = await fetch(`${baseURL}/api/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: "testpassword" }),
+      body: JSON.stringify({ password: "mcclawd-local-dev" }),
     });
     if (!loginRes.ok) return;
     const { token } = await loginRes.json();
