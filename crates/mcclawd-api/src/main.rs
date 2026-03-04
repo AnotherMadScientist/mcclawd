@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 
 mod commands;
+mod server;
 
 #[derive(Parser)]
 #[command(name = "mc", version, about = "McClawd Agent Platform")]
@@ -28,6 +29,11 @@ enum Commands {
     Workspace {
         #[command(subcommand)]
         action: WorkspaceAction,
+    },
+    /// Start the web server
+    Serve {
+        #[arg(short, long, default_value = "9090")]
+        port: u16,
     },
 }
 
@@ -79,6 +85,9 @@ async fn main() -> anyhow::Result<()> {
             WorkspaceAction::Init { name } => commands::workspace::init(&name).await?,
             WorkspaceAction::List => commands::workspace::list().await?,
         },
+        Commands::Serve { port } => {
+            commands::serve::execute(port).await?;
+        }
     }
 
     Ok(())
