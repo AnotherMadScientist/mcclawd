@@ -5,5 +5,6 @@ pub mod routes;
 pub mod secrets;
 pub mod state;
 pub mod tasks;
+pub mod webauthn_auth;
 pub mod workspace;
 pub mod ws;

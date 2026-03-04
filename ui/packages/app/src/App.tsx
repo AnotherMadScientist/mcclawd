@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider } from "./hooks/useAuth";
 import { Layout } from "./components/Layout";
 import { LoginPage } from "./pages/LoginPage";
+import { SetupPage } from "./pages/SetupPage";
 import { TasksPage } from "./pages/TasksPage";
 import { NewTaskPage } from "./pages/NewTaskPage";
 import { TaskDetailPage } from "./pages/TaskDetailPage";
@@ -21,6 +22,7 @@ export default function App() {
         <BrowserRouter>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/setup" element={<SetupPage />} />
             <Route element={<Layout />}>
               <Route index element={<TasksPage />} />
               <Route path="tasks/new" element={<NewTaskPage />} />

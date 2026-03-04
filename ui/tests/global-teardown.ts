@@ -6,11 +6,11 @@ export default async function globalTeardown() {
   const baseURL = "http://localhost:9090";
 
   try {
-    // Login to get token
+    // Use fallback login (accepts any password when vault.key exists)
     const loginRes = await fetch(`${baseURL}/api/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: "mcclawd-local-dev" }),
+      body: JSON.stringify({ password: "test" }),
     });
     if (!loginRes.ok) return;
     const { token } = await loginRes.json();
@@ -38,5 +38,14 @@ export default async function globalTeardown() {
     }
   } catch {
     // Server may not be running — ignore
+  }
+
+  // Clean up auth token file
+  try {
+    const { unlinkSync } = await import("fs");
+    const { join } = await import("path");
+    unlinkSync(join(__dirname, ".auth-token.json"));
+  } catch {
+    // ignore
   }
 }

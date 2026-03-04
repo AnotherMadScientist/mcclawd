@@ -29,34 +29,58 @@ pub struct LoginResponse {
     pub token: String,
 }
 
-/// POST /api/auth/login — validates password against vault passphrase, unlocks SecretBackend
+/// POST /api/auth/login — fallback login using vault key (for non-WebAuthn environments).
+///
+/// Loads the vault key from data_dir/vault.key and uses it as the passphrase.
+/// If vault.key does not exist, returns 400 (setup required via WebAuthn).
+/// The `password` field is ignored — authentication is gate-kept by WebAuthn.
+/// This endpoint exists for programmatic/CLI access after initial setup.
 pub async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
-    // Phase 0: validate against hardcoded passphrase (same as CLI)
-    // Phase 1+: derive from keychain or stored hash
-    let passphrase = "mcclawd-local-dev";
+    let (data_dir, secrets_path) = {
+        let config = state.config.read().await;
+        (config.data_dir.clone(), config.secrets_path())
+    };
+
+    // Load vault key from disk — if it doesn't exist, setup is required
+    let vault_key_path = data_dir.join("vault.key");
+    if !vault_key_path.exists() {
+        tracing::warn!("Login attempted but vault.key not found — setup required");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let vault_key_bytes = tokio::fs::read(&vault_key_path).await.map_err(|e| {
+        tracing::error!("Failed to read vault key: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let passphrase: String = vault_key_bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+
+    // Validate: the provided password must match the hex-encoded vault key.
+    // WebAuthn is the primary auth; this fallback is for programmatic/CLI access.
     if body.password != passphrase {
+        tracing::warn!("Fallback login: incorrect vault key");
         return Err(StatusCode::UNAUTHORIZED);
     }
-    let secrets_path = {
-        let config = state.config.read().await;
-        config.secrets_path()
-    };
-    match EncryptedFileBackend::new(&secrets_path, passphrase) {
+
+    match EncryptedFileBackend::new(&secrets_path, &passphrase) {
         Ok(backend) => {
             let mut secrets = state.secrets.write().await;
             *secrets = Some(Arc::new(backend));
-            tracing::info!("Secrets vault unlocked");
+            tracing::info!("Secrets vault unlocked via fallback login");
         }
         Err(e) => {
             tracing::warn!("Failed to unlock secrets vault: {e}");
-            let backend = EncryptedFileBackend::new_empty(&secrets_path, passphrase)
-                .map_err(|e| {
+            let backend = EncryptedFileBackend::new_empty(&secrets_path, &passphrase).map_err(
+                |e| {
                     tracing::error!("Failed to create secrets vault: {e}");
                     StatusCode::INTERNAL_SERVER_ERROR
-                })?;
+                },
+            )?;
             let mut secrets = state.secrets.write().await;
             *secrets = Some(Arc::new(backend));
         }

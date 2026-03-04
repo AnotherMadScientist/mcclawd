@@ -3,31 +3,31 @@ import { useNavigate, Navigate } from "react-router";
 import { Fingerprint } from "lucide-react";
 import { useAuth } from "../hooks/useAuth";
 
-export function LoginPage() {
+export function SetupPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const { login, isAuthenticated, setupComplete } = useAuth();
+  const { register, isAuthenticated, setupComplete } = useAuth();
   const navigate = useNavigate();
 
   if (isAuthenticated) {
     return <Navigate to="/" replace />;
   }
 
-  if (setupComplete === false) {
-    return <Navigate to="/setup" replace />;
+  if (setupComplete === true) {
+    return <Navigate to="/login" replace />;
   }
 
-  const handleUnlock = async () => {
+  const handleSetup = async () => {
     setError("");
     setLoading(true);
     try {
-      await login();
+      await register();
       navigate("/", { replace: true });
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Biometric authentication failed";
+      const message = err instanceof Error ? err.message : "Biometric setup failed";
       setError(message.includes("cancelled") || message.includes("NotAllowedError")
-        ? "Authentication was cancelled"
-        : "Biometric authentication failed");
+        ? "Setup was cancelled"
+        : "Failed to set up biometric authentication");
     } finally {
       setLoading(false);
     }
@@ -52,12 +52,17 @@ export function LoginPage() {
           />
         </div>
 
-        {/* Title */}
-        <h1 className="text-2xl font-light tracking-widest text-zinc-400 uppercase">
-          McClawd
-        </h1>
+        {/* Title + subtitle */}
+        <div className="flex flex-col items-center gap-2">
+          <h1 className="text-2xl font-light tracking-widest text-zinc-400 uppercase">
+            Welcome to McClawd
+          </h1>
+          <p className="text-sm text-zinc-600 tracking-wide">
+            Set up biometric authentication
+          </p>
+        </div>
 
-        {/* Unlock section */}
+        {/* Setup section */}
         <div className="flex flex-col items-center gap-4 w-72">
           {error && (
             <p className="text-sm text-destructive animate-in fade-in">{error}</p>
@@ -65,12 +70,12 @@ export function LoginPage() {
 
           <button
             type="button"
-            onClick={handleUnlock}
+            onClick={handleSetup}
             disabled={loading || setupComplete === null}
             className="w-full py-2.5 rounded-lg bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 disabled:opacity-40 transition-all text-sm font-medium flex items-center justify-center gap-2"
           >
             <Fingerprint className="w-4 h-4" />
-            {loading ? "Authenticating..." : "Unlock with Face ID"}
+            {loading ? "Setting up..." : "Set up Face ID"}
           </button>
         </div>
       </div>

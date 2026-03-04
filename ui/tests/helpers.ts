@@ -1,14 +1,24 @@
 import { type Page, expect } from "@playwright/test";
+import { readFileSync } from "fs";
+import { join } from "path";
+
+const AUTH_TOKEN_PATH = join(__dirname, ".auth-token.json");
 
 /**
- * Log in to McClawd by navigating to /login, entering a password,
- * and clicking the Unlock button. Waits for redirect to /.
+ * Log in to McClawd by injecting the saved auth token.
+ * The token was obtained during global-setup via WebAuthn registration.
  */
 export async function login(page: Page) {
+  // Read saved token from global setup
+  const { token } = JSON.parse(readFileSync(AUTH_TOKEN_PATH, "utf-8"));
+
+  // Navigate to app and inject token
   await page.goto("/login");
-  await page.getByPlaceholder("Enter master password").fill("mcclawd-local-dev");
-  await page.getByRole("button", { name: "Unlock" }).click();
-  await page.waitForURL("/");
+  await page.evaluate(
+    (t: string) => localStorage.setItem("mcclawd_token", t),
+    token
+  );
+  await page.goto("/");
   await expect(page.getByRole("heading", { name: "Tasks" })).toBeVisible();
 }
 

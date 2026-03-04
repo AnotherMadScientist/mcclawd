@@ -1,3 +1,9 @@
+import type {
+  PublicKeyCredentialCreationOptionsJSON,
+  PublicKeyCredentialRequestOptionsJSON,
+  RegistrationResponseJSON,
+  AuthenticationResponseJSON,
+} from "@simplewebauthn/browser";
 import type { McclawdConfig, McpServer, Task, WorkspaceFile } from "./types";
 
 const TOKEN_KEY = "mcclawd_token";
@@ -49,6 +55,26 @@ export const api = {
       apiFetch<{ token: string }>("/api/auth/login", {
         method: "POST",
         body: JSON.stringify({ password }),
+      }),
+    status: () =>
+      apiFetch<{ setup_complete: boolean }>("/api/auth/status"),
+    registerStart: () =>
+      apiFetch<PublicKeyCredentialCreationOptionsJSON>("/api/auth/register/start", {
+        method: "POST",
+      }),
+    registerFinish: (credential: RegistrationResponseJSON) =>
+      apiFetch<{ token: string }>("/api/auth/register/finish", {
+        method: "POST",
+        body: JSON.stringify(credential),
+      }),
+    loginStart: () =>
+      apiFetch<PublicKeyCredentialRequestOptionsJSON>("/api/auth/login/start", {
+        method: "POST",
+      }),
+    loginFinish: (credential: AuthenticationResponseJSON) =>
+      apiFetch<{ token: string }>("/api/auth/login/finish", {
+        method: "POST",
+        body: JSON.stringify(credential),
       }),
   },
   tasks: {

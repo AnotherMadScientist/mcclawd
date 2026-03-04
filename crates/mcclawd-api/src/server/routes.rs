@@ -10,6 +10,7 @@ use super::mcp_routes;
 use super::secrets;
 use super::state::AppState;
 use super::tasks;
+use super::webauthn_auth;
 use super::workspace;
 use super::ws;
 
@@ -17,7 +18,22 @@ pub fn api_router(state: AppState) -> Router<AppState> {
     // Public routes (no auth required)
     let public = Router::new()
         .route("/api/health", get(health))
-        .route("/api/auth/login", post(auth::login));
+        .route("/api/auth/login", post(auth::login))
+        // WebAuthn endpoints (public — they ARE the auth flow)
+        .route("/api/auth/status", get(webauthn_auth::auth_status))
+        .route(
+            "/api/auth/register/start",
+            post(webauthn_auth::register_start),
+        )
+        .route(
+            "/api/auth/register/finish",
+            post(webauthn_auth::register_finish),
+        )
+        .route("/api/auth/login/start", post(webauthn_auth::login_start))
+        .route(
+            "/api/auth/login/finish",
+            post(webauthn_auth::login_finish),
+        );
 
     // WebSocket routes — auth handled via query param (browsers can't send headers on WS)
     let ws_routes = Router::new()

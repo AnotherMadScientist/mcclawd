@@ -34,6 +34,10 @@ bollard = { workspace = true }
 tar = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { workspace = true }
+webauthn-rs = { workspace = true }
+webauthn-rs-proto = { workspace = true }
+url = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

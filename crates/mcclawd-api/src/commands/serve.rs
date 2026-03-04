@@ -66,7 +66,7 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
         }
     };
 
-    let state = AppState::new(config, supervisor);
+    let state = AppState::new(config, supervisor)?;
 
     let app = routes::api_router(state.clone())
         .with_state(state)
