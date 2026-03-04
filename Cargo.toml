@@ -69,6 +69,12 @@ uuid = { version = "1", features = ["v4"] }
 # Futures
 futures = "0.3"
 
+# Web server
+axum = { version = "0.8", features = ["ws"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
 # Platform dirs
 dirs = "6"
 
