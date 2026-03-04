@@ -3,6 +3,7 @@ pub mod error;
 pub mod hooks;
 pub mod identity;
 pub mod secrets;
+pub mod skill_parser;
 pub mod skills;
 pub mod types;
 
