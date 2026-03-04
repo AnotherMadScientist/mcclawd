@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod channels;
 pub mod config_routes;
 pub mod mcp_routes;
 pub mod routes;

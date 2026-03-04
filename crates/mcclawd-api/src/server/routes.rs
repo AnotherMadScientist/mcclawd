@@ -5,6 +5,7 @@ use axum::{
 };
 
 use super::auth;
+use super::channels;
 use super::config_routes;
 use super::mcp_routes;
 use super::secrets;
@@ -78,6 +79,13 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             get(swarms::list_swarms).post(swarms::create_swarm),
         )
         .route("/api/swarms/{id}", get(swarms::get_swarm))
+        // Channels
+        .route("/api/channels", get(channels::list_channels))
+        .route("/api/channels/{id}", get(channels::get_channel))
+        .route(
+            "/api/channels/{id}/test",
+            post(channels::test_channel),
+        )
         // Apply JWT auth to all protected routes
         .route_layer(middleware::from_fn_with_state(state, auth::auth_middleware));
 
