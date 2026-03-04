@@ -18,34 +18,57 @@ pub async fn task_stream(
     ws.on_upgrade(move |socket| handle_socket(socket, state, task_id))
 }
 
-async fn handle_socket(mut socket: WebSocket, _state: AppState, _task_id: TaskId) {
-    let chunks = vec![
-        OutboundChunk::TextDelta("Thinking about your request...".to_string()),
-        OutboundChunk::ToolStart {
-            name: "memory.recall".to_string(),
-        },
-        OutboundChunk::ToolEnd {
-            name: "memory.recall".to_string(),
-            summary: Some("No memories found".to_string()),
-        },
-        OutboundChunk::TextBlock("Based on my analysis, here is the result.".to_string()),
-        OutboundChunk::Done,
-    ];
+async fn handle_socket(mut socket: WebSocket, state: AppState, task_id: TaskId) {
+    // Subscribe to the task's broadcast channel
+    let mut rx = match state.subscribe_task_stream(&task_id).await {
+        Some(rx) => rx,
+        None => {
+            // Task doesn't have a stream (maybe already completed before WS connected)
+            let chunk = OutboundChunk::Error("Task stream not found".to_string());
+            if let Ok(json) = serde_json::to_string(&chunk) {
+                let _ = socket.send(Message::Text(json.into())).await;
+            }
+            let done = OutboundChunk::Done;
+            if let Ok(json) = serde_json::to_string(&done) {
+                let _ = socket.send(Message::Text(json.into())).await;
+            }
+            return;
+        }
+    };
 
-    for chunk in chunks {
-        let json = match serde_json::to_string(&chunk) {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::error!("Failed to serialize chunk: {e}");
+    // Forward all broadcast chunks to the WebSocket client
+    loop {
+        match rx.recv().await {
+            Ok(chunk) => {
+                let is_done = matches!(chunk, OutboundChunk::Done);
+                let json = match serde_json::to_string(&chunk) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        tracing::error!("Failed to serialize chunk: {e}");
+                        break;
+                    }
+                };
+
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    tracing::warn!("WebSocket client disconnected");
+                    break;
+                }
+
+                if is_done {
+                    break;
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!("WebSocket client lagged {n} messages");
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                // Sender dropped, send Done
+                let done = OutboundChunk::Done;
+                if let Ok(json) = serde_json::to_string(&done) {
+                    let _ = socket.send(Message::Text(json.into())).await;
+                }
                 break;
             }
-        };
-
-        if socket.send(Message::Text(json.into())).await.is_err() {
-            tracing::warn!("WebSocket client disconnected");
-            break;
         }
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 }

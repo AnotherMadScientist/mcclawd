@@ -4,6 +4,7 @@
 //! This module only *configures* the agent; it does not call any LLM APIs.
 
 use crate::context::ContextBuilder;
+use crate::mcp_integration::McpBundle;
 use crate::workspace::Workspace;
 use mcclawd_core::config::McclawdConfig;
 use mcclawd_tools::builtin::memory::{MemoryRecall, MemoryStore};
@@ -23,11 +24,14 @@ pub struct AgentEngine;
 
 impl AgentEngine {
     /// Create a Rig agent configured with workspace context, memory tools,
-    /// and optionally MCP tools from AgentGateway.
+    /// and MCP tools from directly-connected MCP servers.
     ///
     /// The returned `MemoryStore` shares its backing `DashMap` with the
     /// `MemoryRecall` tool already registered on the agent, so callers can
     /// inspect session memory after the run completes.
+    ///
+    /// The returned `Vec<McpBundle>` must be kept alive for the agent's
+    /// lifetime — dropping them closes the underlying MCP connections.
     ///
     /// # Errors
     /// Returns an error if the Anthropic client cannot be constructed
@@ -37,7 +41,7 @@ impl AgentEngine {
         api_key: &str,
         max_turns: usize,
         config: &McclawdConfig,
-    ) -> anyhow::Result<(McclawdAgent, MemoryStore)> {
+    ) -> anyhow::Result<(McclawdAgent, MemoryStore, Vec<McpBundle>)> {
         let context = ContextBuilder::new(workspace);
         let system_prompt = context.build_system_prompt();
 
@@ -53,14 +57,13 @@ impl AgentEngine {
             .tool(memory_store.clone())
             .tool(memory_recall);
 
-        // Wire in MCP tools from AgentGateway if available
-        if let Some((tools, peer)) =
-            crate::mcp_integration::connect_mcp_tools(config).await?
-        {
-            builder = builder.rmcp_tools(tools, peer);
+        // Wire in MCP tools from each directly-connected server
+        let bundles = crate::mcp_integration::connect_mcp_tools(config).await?;
+        for bundle in &bundles {
+            builder = builder.rmcp_tools(bundle.tools.clone(), bundle.peer.clone());
         }
 
         let agent = builder.build();
-        Ok((agent, memory_store))
+        Ok((agent, memory_store, bundles))
     }
 }

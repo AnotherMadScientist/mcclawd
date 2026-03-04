@@ -27,4 +27,4 @@ WORKDIR /opt/langextract-mcp
 
 EXPOSE 8000
 
-CMD ["supergateway", "--stdio", "fastmcp run src/langextract_mcp/server.py", "--port", "8000", "--outputTransport", "streamableHttp", "--streamableHttpPath", "/"]
+CMD ["supergateway", "--stdio", "fastmcp run src/langextract_mcp/server.py", "--port", "8000", "--outputTransport", "sse", "--healthEndpoint", "/healthz"]

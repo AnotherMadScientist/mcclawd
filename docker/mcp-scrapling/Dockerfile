@@ -23,4 +23,4 @@ RUN pip install uv \
 
 EXPOSE 8000
 
-CMD ["supergateway", "--stdio", "scrapling-fetch-mcp", "--port", "8000", "--outputTransport", "streamableHttp", "--streamableHttpPath", "/"]
+CMD ["supergateway", "--stdio", "scrapling-fetch-mcp", "--port", "8000", "--outputTransport", "sse", "--healthEndpoint", "/healthz"]

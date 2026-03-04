@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { FileText, Save } from "lucide-react";
 import { api } from "../api/client";
@@ -11,14 +11,16 @@ export function WorkspacePage() {
   const [content, setContent] = useState("");
   const queryClient = useQueryClient();
 
-  const { isLoading } = useQuery({
+  const { data, isLoading } = useQuery({
     queryKey: ["workspace", selected],
     queryFn: () => api.workspace.get(selected),
-    select: (data) => {
-      setContent(data.content || "");
-      return data;
-    },
   });
+
+  useEffect(() => {
+    if (data) {
+      setContent(data.content || "");
+    }
+  }, [data]);
 
   const save = useMutation({
     mutationFn: () => api.workspace.update(selected, content),

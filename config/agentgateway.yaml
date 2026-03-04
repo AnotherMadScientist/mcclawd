@@ -1,5 +1,5 @@
 # AgentGateway — multiplexes MCP tool calls to containerized MCP servers.
-# Each MCP server runs in its own Docker container with supergateway HTTP endpoint.
+# Each MCP server runs in its own Docker container with supergateway SSE endpoint.
 #
 # Phase 0: This file is static. Phase 1+: generated dynamically from mcp.toml.
 binds:
@@ -10,13 +10,13 @@ binds:
               - mcp:
                   targets:
                     - name: langextract
-                      mcp:
+                      sse:
                         host: http://mcp-langextract:8000
 
                     - name: scrapling
-                      mcp:
+                      sse:
                         host: http://mcp-scrapling:8000
 
                     - name: filesystem
-                      mcp:
+                      sse:
                         host: http://mcp-filesystem:8000

@@ -32,6 +32,16 @@ impl EncryptedFileBackend {
         Ok(backend)
     }
 
+    /// Create backend without loading from disk (for when vault doesn't exist yet).
+    pub fn new_empty(path: &Path, passphrase: &str) -> Self {
+        let key = derive_key(passphrase).unwrap_or([0u8; 32]);
+        Self {
+            path: path.to_path_buf(),
+            key: Zeroizing::new(key),
+            cache: RwLock::new(HashMap::new()),
+        }
+    }
+
     fn load_from_disk(&mut self) -> Result<()> {
         if !self.path.exists() {
             return Ok(());

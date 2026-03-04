@@ -97,6 +97,13 @@ pub struct McpServerConfig {
     pub volumes: Vec<String>,
 }
 
+impl McpServerConfig {
+    /// Direct connection URL for this MCP server (bypasses AgentGateway).
+    pub fn url(&self) -> String {
+        format!("http://localhost:{}", self.port)
+    }
+}
+
 impl Default for McpConfig {
     fn default() -> Self {
         Self {

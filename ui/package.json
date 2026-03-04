@@ -4,9 +4,17 @@
   "scripts": {
     "dev": "pnpm --filter @mcclawd/app dev",
     "build": "pnpm --filter @mcclawd/app build",
-    "lint": "pnpm --filter @mcclawd/app lint"
+    "lint": "pnpm --filter @mcclawd/app lint",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:ui": "playwright test --ui"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2"
   }
 }

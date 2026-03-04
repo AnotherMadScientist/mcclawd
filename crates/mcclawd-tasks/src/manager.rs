@@ -15,20 +15,21 @@ pub struct TaskRecord {
     pub status: TaskStatus,
 }
 
-/// Phase 0: single interactive task at a time.
-/// Phase 2: concurrent tasks with interactive + background modes.
+/// Task manager with history.
+/// Phase 0: in-memory only (lost on restart).
+/// Phase 1+: persist to disk.
 pub struct TaskManager {
-    current: Option<TaskRecord>,
+    tasks: Vec<TaskRecord>,
 }
 
 impl TaskManager {
     pub fn new() -> Self {
-        Self { current: None }
+        Self { tasks: Vec::new() }
     }
 
     pub fn start_task(&mut self, prompt: String) -> TaskId {
         let id = TaskId::new();
-        self.current = Some(TaskRecord {
+        self.tasks.push(TaskRecord {
             id: id.clone(),
             prompt,
             status: TaskStatus::Running,
@@ -37,33 +38,33 @@ impl TaskManager {
     }
 
     pub fn complete_task(&mut self, id: &TaskId) {
-        if let Some(ref mut task) = self.current {
-            if task.id == *id {
-                task.status = TaskStatus::Completed;
-            }
+        if let Some(task) = self.tasks.iter_mut().find(|t| t.id == *id) {
+            task.status = TaskStatus::Completed;
         }
     }
 
     pub fn fail_task(&mut self, id: &TaskId, error: String) {
-        if let Some(ref mut task) = self.current {
-            if task.id == *id {
-                task.status = TaskStatus::Failed(error);
-            }
+        if let Some(task) = self.tasks.iter_mut().find(|t| t.id == *id) {
+            task.status = TaskStatus::Failed(error);
         }
     }
 
+    pub fn delete_task(&mut self, id: &TaskId) -> bool {
+        let len = self.tasks.len();
+        self.tasks.retain(|t| t.id != *id);
+        self.tasks.len() < len
+    }
+
     pub fn current_task(&self) -> Option<&TaskRecord> {
-        self.current.as_ref()
+        self.tasks.iter().rev().find(|t| matches!(t.status, TaskStatus::Running))
     }
 
     pub fn all_tasks(&self) -> Vec<&TaskRecord> {
-        self.current.as_ref().into_iter().collect()
+        self.tasks.iter().collect()
     }
 
     pub fn get_task(&self, id: &TaskId) -> Option<&TaskRecord> {
-        self.current
-            .as_ref()
-            .filter(|t| t.id == *id)
+        self.tasks.iter().find(|t| t.id == *id)
     }
 }
 
@@ -83,8 +84,8 @@ mod tests {
         assert!(matches!(task.status, TaskStatus::Running));
 
         mgr.complete_task(&id);
-        let task = mgr.current_task().unwrap();
-        assert!(matches!(task.status, TaskStatus::Completed));
+        assert!(mgr.current_task().is_none()); // no running task
+        assert!(matches!(mgr.get_task(&id).unwrap().status, TaskStatus::Completed));
     }
 
     #[test]
@@ -93,11 +94,36 @@ mod tests {
         let id = mgr.start_task("will fail".to_string());
 
         mgr.fail_task(&id, "something broke".to_string());
-        let task = mgr.current_task().unwrap();
+        let task = mgr.get_task(&id).unwrap();
         assert!(matches!(task.status, TaskStatus::Failed(_)));
         if let TaskStatus::Failed(ref msg) = task.status {
             assert_eq!(msg, "something broke");
         }
+    }
+
+    #[test]
+    fn test_multiple_tasks() {
+        let mut mgr = TaskManager::new();
+        let id1 = mgr.start_task("task one".to_string());
+        let id2 = mgr.start_task("task two".to_string());
+
+        assert_eq!(mgr.all_tasks().len(), 2);
+        mgr.complete_task(&id1);
+        assert_eq!(mgr.all_tasks().len(), 2);
+        assert!(mgr.get_task(&id1).is_some());
+        assert!(mgr.get_task(&id2).is_some());
+    }
+
+    #[test]
+    fn test_delete_task() {
+        let mut mgr = TaskManager::new();
+        let id1 = mgr.start_task("task one".to_string());
+        let id2 = mgr.start_task("task two".to_string());
+
+        assert!(mgr.delete_task(&id1));
+        assert_eq!(mgr.all_tasks().len(), 1);
+        assert!(mgr.get_task(&id1).is_none());
+        assert!(mgr.get_task(&id2).is_some());
     }
 
     #[test]
@@ -107,11 +133,11 @@ mod tests {
         let wrong_id = TaskId::new();
 
         mgr.complete_task(&wrong_id);
-        let task = mgr.current_task().unwrap();
+        let task = mgr.get_task(&id).unwrap();
         assert!(matches!(task.status, TaskStatus::Running));
 
         mgr.complete_task(&id);
-        let task = mgr.current_task().unwrap();
+        let task = mgr.get_task(&id).unwrap();
         assert!(matches!(task.status, TaskStatus::Completed));
     }
 }

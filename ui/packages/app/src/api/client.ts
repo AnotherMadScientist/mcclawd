@@ -1,17 +1,17 @@
 import type { McclawdConfig, McpServer, Task, WorkspaceFile } from "./types";
 
-let authToken: string | null = null;
+const TOKEN_KEY = "mcclawd_token";
 
 export function setToken(token: string) {
-  authToken = token;
+  localStorage.setItem(TOKEN_KEY, token);
 }
 
 export function clearToken() {
-  authToken = null;
+  localStorage.removeItem(TOKEN_KEY);
 }
 
 export function getToken() {
-  return authToken;
+  return localStorage.getItem(TOKEN_KEY);
 }
 
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -20,11 +20,18 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
     ...((options.headers as Record<string, string>) || {}),
   };
 
-  if (authToken) {
-    headers["Authorization"] = `Bearer ${authToken}`;
+  const token = getToken();
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
   }
 
   const res = await fetch(path, { ...options, headers });
+
+  if (res.status === 401 && getToken()) {
+    clearToken();
+    window.location.href = "/login";
+    throw new Error("Session expired");
+  }
 
   if (!res.ok) {
     throw new Error(`API error: ${res.status} ${res.statusText}`);
