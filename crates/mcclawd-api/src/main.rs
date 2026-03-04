@@ -45,6 +45,11 @@ enum Commands {
         #[command(subcommand)]
         action: SkillsAction,
     },
+    /// Import config from external platforms
+    Import {
+        #[command(subcommand)]
+        action: ImportAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -65,8 +70,14 @@ enum SkillsAction {
     List,
     /// Show skill details
     Info { name: String },
-    /// Install a skill from local path
+    /// Install a skill from local path or ClawHub registry (name[@version])
     Install { source: String },
+    /// Search the ClawHub registry for skills
+    Search { query: String },
+    /// Upgrade an installed skill to the latest version
+    Upgrade { name: String },
+    /// Uninstall a skill by name
+    Uninstall { name: String },
 }
 
 #[derive(Subcommand)]
@@ -78,6 +89,15 @@ enum WorkspaceAction {
     },
     /// List all workspaces
     List,
+}
+
+#[derive(Subcommand)]
+enum ImportAction {
+    /// Import OpenClaw config (openclaw.json / .mcp.json)
+    Openclaw {
+        /// Path to openclaw.json (defaults to ~/.openclaw/openclaw.json)
+        path: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -116,6 +136,14 @@ async fn main() -> anyhow::Result<()> {
             SkillsAction::List => commands::skills::list().await?,
             SkillsAction::Info { name } => commands::skills::info(&name).await?,
             SkillsAction::Install { source } => commands::skills::install(&source).await?,
+            SkillsAction::Search { query } => commands::skills::search(&query).await?,
+            SkillsAction::Upgrade { name } => commands::skills::upgrade(&name).await?,
+            SkillsAction::Uninstall { name } => commands::skills::uninstall(&name).await?,
+        },
+        Commands::Import { action } => match action {
+            ImportAction::Openclaw { path } => {
+                commands::import::import_openclaw(path.as_deref()).await?
+            }
         },
     }
 

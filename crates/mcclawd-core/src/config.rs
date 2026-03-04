@@ -14,6 +14,12 @@ pub struct McclawdConfig {
 
     #[serde(default)]
     pub mcp: McpConfig,
+
+    #[serde(default)]
+    pub skills: SkillsConfig,
+
+    #[serde(default)]
+    pub compat: CompatConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +61,38 @@ pub struct ProviderConfig {
 pub struct OllamaConfig {
     #[serde(default = "default_ollama_url")]
     pub url: String,
+}
+
+/// Configuration for ClawHub skill management.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillsConfig {
+    /// Directory where managed (installed) skills are stored.
+    #[serde(default = "default_skills_managed_dir")]
+    pub managed_dir: PathBuf,
+
+    /// ClawHub registry API base URL.
+    #[serde(default = "default_clawhub_api")]
+    pub clawhub_api: String,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            managed_dir: default_skills_managed_dir(),
+            clawhub_api: default_clawhub_api(),
+        }
+    }
+}
+
+fn default_skills_managed_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".mcclawd")
+        .join("skills")
+}
+
+fn default_clawhub_api() -> String {
+    "https://api.clawhub.com".to_string()
 }
 
 fn default_data_dir() -> PathBuf {
@@ -147,6 +185,47 @@ fn default_mcp_servers() -> Vec<McpServerConfig> {
     ]
 }
 
+/// OpenClaw compatibility settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompatConfig {
+    /// Auto-detect and offer to import `openclaw.json` / `.mcp.json` on startup.
+    #[serde(default = "default_true")]
+    pub openclaw_config: bool,
+}
+
+impl Default for CompatConfig {
+    fn default() -> Self {
+        Self {
+            openclaw_config: default_true(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Detect an OpenClaw config file in well-known locations.
+///
+/// Checks (in order):
+/// 1. `~/.openclaw/openclaw.json`
+/// 2. `.mcp.json` in the current directory
+///
+/// Returns the first path found, or `None`.
+pub fn detect_openclaw_config() -> Option<PathBuf> {
+    if let Some(home) = dirs::home_dir() {
+        let path = home.join(".openclaw").join("openclaw.json");
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    let mcp_path = PathBuf::from(".mcp.json");
+    if mcp_path.exists() {
+        return Some(mcp_path);
+    }
+    None
+}
+
 impl McclawdConfig {
     pub fn load(path: &Path) -> crate::Result<Self> {
         if path.exists() {
@@ -178,6 +257,91 @@ impl Default for McclawdConfig {
             agent: AgentConfig::default(),
             providers: ProvidersConfig::default(),
             mcp: McpConfig::default(),
+            skills: SkillsConfig::default(),
+            compat: CompatConfig::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_default_has_skills() {
+        let config = McclawdConfig::default();
+        assert_eq!(config.skills.clawhub_api, "https://api.clawhub.com");
+        assert!(config.skills.managed_dir.ends_with("skills"));
+    }
+
+    #[test]
+    fn test_config_with_skills_section_parsed() {
+        let toml_str = r#"
+[skills]
+managed_dir = "/custom/skills"
+clawhub_api = "https://custom.registry.io"
+"#;
+        let config: McclawdConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.skills.managed_dir, PathBuf::from("/custom/skills"));
+        assert_eq!(config.skills.clawhub_api, "https://custom.registry.io");
+    }
+
+    #[test]
+    fn test_config_skills_defaults_applied_when_missing() {
+        let toml_str = r#"
+[agent]
+max_turns = 10
+"#;
+        let config: McclawdConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.skills.clawhub_api, "https://api.clawhub.com");
+        assert!(config.skills.managed_dir.ends_with("skills"));
+    }
+
+    #[test]
+    fn test_skills_config_serde_roundtrip() {
+        let config = SkillsConfig {
+            managed_dir: PathBuf::from("/tmp/skills"),
+            clawhub_api: "https://test.clawhub.com".to_string(),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: SkillsConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.managed_dir, PathBuf::from("/tmp/skills"));
+        assert_eq!(parsed.clawhub_api, "https://test.clawhub.com");
+    }
+
+    #[test]
+    fn compat_config_defaults_to_enabled() {
+        let compat = CompatConfig::default();
+        assert!(compat.openclaw_config);
+    }
+
+    #[test]
+    fn mcclawd_config_default_includes_compat() {
+        let config = McclawdConfig::default();
+        assert!(config.compat.openclaw_config);
+    }
+
+    #[test]
+    fn compat_config_deserializes_from_empty_toml() {
+        let toml_str = "";
+        let config: McclawdConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.compat.openclaw_config);
+    }
+
+    #[test]
+    fn compat_config_deserializes_disabled() {
+        let toml_str = r#"
+[compat]
+openclaw_config = false
+"#;
+        let config: McclawdConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.compat.openclaw_config);
+    }
+
+    #[test]
+    fn detect_openclaw_config_does_not_panic() {
+        // Verifies the function runs without panicking.
+        // Actual file presence depends on the environment.
+        let _result = detect_openclaw_config();
     }
 }

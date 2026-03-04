@@ -1,8 +1,12 @@
+pub mod clawhub;
+pub mod compat;
 pub mod config;
+pub mod config_watcher;
 pub mod error;
 pub mod hooks;
 pub mod identity;
 pub mod persistence;
+pub mod providers;
 pub mod sanitizer;
 pub mod secrets;
 pub mod skill_loader;
@@ -10,6 +14,7 @@ pub mod skill_parser;
 pub mod skills;
 pub mod types;
 
+pub use clawhub::{ClawHubClient, ClawHubSearchResult, ClawHubSkillMeta, InstalledSkillInfo, SkillInstaller, SkillSource};
 pub use config::McclawdConfig;
 pub use error::{McclawdError, Result};
 pub use sanitizer::sanitize_prompt;
