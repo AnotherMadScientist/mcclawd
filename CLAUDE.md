@@ -37,6 +37,22 @@ cargo test -p mcclawd-core -- secrets    # filter by test name
 ./target/release/mc run "your prompt"
 ```
 
+## UI Development
+
+```bash
+cd ui && pnpm install                   # install frontend deps
+cd ui && pnpm dev                       # start Vite dev server (:8080)
+cargo run -p mcclawd-api -- serve       # start Axum API server (:9090)
+```
+
+The Vite dev server proxies `/api` requests to the Axum backend.
+
+### UI Tech Stack
+- React 19 + TypeScript + Vite + Tailwind CSS + shadcn/ui
+- Located in `ui/packages/app/`
+- API client: `ui/packages/app/src/api/client.ts`
+- Pages: `ui/packages/app/src/pages/`
+
 ## Docker (MCP Infrastructure)
 
 ```bash
