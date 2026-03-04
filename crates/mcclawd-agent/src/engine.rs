@@ -5,6 +5,7 @@
 
 use crate::context::ContextBuilder;
 use crate::workspace::Workspace;
+use mcclawd_core::config::McclawdConfig;
 use mcclawd_tools::builtin::memory::{MemoryRecall, MemoryStore};
 use rig::agent::Agent;
 use rig::client::CompletionClient;
@@ -21,7 +22,8 @@ pub type McclawdAgent = Agent<AnthropicModel>;
 pub struct AgentEngine;
 
 impl AgentEngine {
-    /// Create a Rig agent configured with workspace context and memory tools.
+    /// Create a Rig agent configured with workspace context, memory tools,
+    /// and optionally MCP tools from AgentGateway.
     ///
     /// The returned `MemoryStore` shares its backing `DashMap` with the
     /// `MemoryRecall` tool already registered on the agent, so callers can
@@ -30,10 +32,11 @@ impl AgentEngine {
     /// # Errors
     /// Returns an error if the Anthropic client cannot be constructed
     /// (e.g. the API key contains invalid header characters).
-    pub fn build(
+    pub async fn build(
         workspace: Workspace,
         api_key: &str,
         max_turns: usize,
+        config: &McclawdConfig,
     ) -> anyhow::Result<(McclawdAgent, MemoryStore)> {
         let context = ContextBuilder::new(workspace);
         let system_prompt = context.build_system_prompt();
@@ -42,15 +45,22 @@ impl AgentEngine {
         let memory_store = MemoryStore::new_shared();
         let memory_recall = MemoryRecall::from_shared(&memory_store);
 
-        let agent = client
+        let mut builder = client
             .agent(CLAUDE_4_SONNET)
             .preamble(&system_prompt)
             .max_tokens(8192)
             .default_max_turns(max_turns)
             .tool(memory_store.clone())
-            .tool(memory_recall)
-            .build();
+            .tool(memory_recall);
 
+        // Wire in MCP tools from AgentGateway if available
+        if let Some((tools, peer)) =
+            crate::mcp_integration::connect_mcp_tools(config).await?
+        {
+            builder = builder.rmcp_tools(tools, peer);
+        }
+
+        let agent = builder.build();
         Ok((agent, memory_store))
     }
 }

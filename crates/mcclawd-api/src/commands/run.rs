@@ -25,7 +25,7 @@ pub async fn execute(prompt: &str, workspace_name: &str) -> anyhow::Result<()> {
 
     // 3. Build agent via Rig
     let max_turns = config.agent.max_turns;
-    let (agent, _memory) = AgentEngine::build(workspace, &api_key, max_turns)?;
+    let (agent, _memory) = AgentEngine::build(workspace, &api_key, max_turns, &config).await?;
     tracing::info!(max_turns, "Agent built");
 
     // 4. Run prompt (non-streaming for Phase 0 simplicity)

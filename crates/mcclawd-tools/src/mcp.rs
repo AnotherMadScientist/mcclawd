@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 use rmcp::{
-    model::{CallToolRequestParams, CallToolResult, Tool as McpToolDef},
+    model::{CallToolRequestParam, CallToolResult, Tool as McpToolDef},
     service::{Peer, RoleClient, RunningService, ServiceExt},
     transport::StreamableHttpClientTransport,
 };
@@ -86,10 +86,10 @@ impl McpConnection {
 
     /// Call a tool by name with JSON arguments.
     pub async fn call_tool(&self, name: &str, args: serde_json::Value) -> Result<String> {
-        let params = if let Some(obj) = args.as_object() {
-            CallToolRequestParams::new(name.to_string()).with_arguments(obj.clone())
-        } else {
-            CallToolRequestParams::new(name.to_string())
+        let params = CallToolRequestParam {
+            name: name.to_string().into(),
+            arguments: args.as_object().cloned(),
+            task: None,
         };
 
         let result: CallToolResult = self
@@ -102,7 +102,13 @@ impl McpConnection {
         let text: String = result
             .content
             .iter()
-            .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
+            .filter_map(|c| {
+                if let rmcp::model::RawContent::Text(t) = &c.raw {
+                    Some(t.text.as_str())
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n");
 
