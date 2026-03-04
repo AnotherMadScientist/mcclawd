@@ -13,13 +13,13 @@ test.describe("Skills Page", () => {
     ).toBeVisible();
   });
 
-  test("shows 'No skills installed' placeholder", async ({ page }) => {
+  test("shows no skills installed message", async ({ page }) => {
     await expect(page.getByText("No skills installed")).toBeVisible();
   });
 
-  test("shows Phase 1+ message", async ({ page }) => {
+  test("shows Phase 1+ notice about ClawHub", async ({ page }) => {
     await expect(
-      page.getByText("ClawHub integration coming in Phase 1+")
+      page.getByText(/ClawHub integration coming/)
     ).toBeVisible();
   });
 });

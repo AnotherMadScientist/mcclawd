@@ -51,6 +51,7 @@ export function SecretsPage() {
         <button
           onClick={() => add.mutate()}
           disabled={!name || !value}
+          aria-label="Add secret"
           className="px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40 text-sm"
         >
           <Plus className="w-4 h-4" />
