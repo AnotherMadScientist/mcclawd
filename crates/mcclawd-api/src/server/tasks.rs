@@ -50,7 +50,15 @@ pub async fn create_task(
     State(state): State<AppState>,
     Json(body): Json<CreateTaskRequest>,
 ) -> (StatusCode, Json<TaskResponse>) {
-    let prompt = body.prompt.clone();
+    // Sanitize user prompt to strip known injection patterns
+    let sanitized = mcclawd_core::sanitize_prompt(&body.prompt);
+    if sanitized.was_modified {
+        tracing::warn!(
+            patterns = ?sanitized.detected_patterns,
+            "Prompt injection patterns detected and stripped from user input"
+        );
+    }
+    let prompt = sanitized.text;
     let workspace_name = body.workspace.clone().unwrap_or_else(|| "default".to_string());
 
     // Create task record

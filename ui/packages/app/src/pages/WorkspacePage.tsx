@@ -9,6 +9,7 @@ const files = ["SOUL.md", "AGENTS.md", "USER.md"];
 export function WorkspacePage() {
   const [selected, setSelected] = useState("SOUL.md");
   const [content, setContent] = useState("");
+  const [dirty, setDirty] = useState(false);
   const queryClient = useQueryClient();
 
   const { data, isLoading } = useQuery({
@@ -17,15 +18,33 @@ export function WorkspacePage() {
   });
 
   useEffect(() => {
-    if (data) {
+    if (data && !dirty) {
       setContent(data.content || "");
     }
-  }, [data]);
+  }, [data, dirty]);
 
   const save = useMutation({
-    mutationFn: () => api.workspace.update(selected, content),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["workspace", selected] }),
+    mutationFn: (params: { file: string; content: string }) =>
+      api.workspace.update(params.file, params.content),
+    onSuccess: () => {
+      setDirty(false);
+      queryClient.invalidateQueries({ queryKey: ["workspace", selected] });
+    },
   });
+
+  const handleChange = (value: string) => {
+    setContent(value);
+    setDirty(true);
+  };
+
+  const handleSave = () => {
+    save.mutate({ file: selected, content });
+  };
+
+  const handleTabSwitch = (file: string) => {
+    setDirty(false);
+    setSelected(file);
+  };
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
@@ -35,7 +54,7 @@ export function WorkspacePage() {
         {files.map((f) => (
           <button
             key={f}
-            onClick={() => setSelected(f)}
+            onClick={() => handleTabSwitch(f)}
             className={cn(
               "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors",
               selected === f
@@ -52,12 +71,12 @@ export function WorkspacePage() {
       <div className="relative">
         <textarea
           value={content}
-          onChange={(e) => setContent(e.target.value)}
+          onChange={(e) => handleChange(e.target.value)}
           className="w-full h-96 p-4 rounded-xl bg-card border border-border font-mono text-sm resize-none focus:outline-none focus:ring-2 focus:ring-primary/30"
           disabled={isLoading}
         />
         <button
-          onClick={() => save.mutate()}
+          onClick={handleSave}
           disabled={save.isPending}
           className="absolute top-3 right-3 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-primary/10 text-primary hover:bg-primary/20 text-sm transition-colors"
         >
