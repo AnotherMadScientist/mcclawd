@@ -6,6 +6,11 @@ pub struct McclawdConfig {
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
 
+    /// PostgreSQL connection URL. When set, tasks/events/chat_history are persisted.
+    /// Example: `postgres://postgres:mcclawd@localhost:5432/mcclawd`
+    #[serde(default)]
+    pub database_url: Option<String>,
+
     #[serde(default)]
     pub agent: AgentConfig,
 
@@ -266,6 +271,7 @@ impl Default for McclawdConfig {
     fn default() -> Self {
         Self {
             data_dir: default_data_dir(),
+            database_url: None,
             agent: AgentConfig::default(),
             providers: ProvidersConfig::default(),
             mcp: McpConfig::default(),

@@ -1,3 +1,4 @@
+use crate::server::pg_store::PgTaskStore;
 use crate::supervisor::AgentSupervisor;
 use mcclawd_channels::OutboundChunk;
 use mcclawd_core::providers::{ProviderPool, ProviderPoolConfig};
@@ -38,6 +39,8 @@ pub struct AppState {
     pub config_path: Option<PathBuf>,
     /// Per-task LLM conversation history for multi-turn follow-ups.
     pub task_chat_history: Arc<RwLock<HashMap<TaskId, Vec<Message>>>>,
+    /// Optional PostgreSQL store for durable persistence (None = in-memory only).
+    pub pg_store: Option<PgTaskStore>,
 }
 
 impl AppState {
@@ -68,6 +71,7 @@ impl AppState {
             provider_pool: Arc::new(RwLock::new(provider_pool)),
             config_path: None,
             task_chat_history: Arc::new(RwLock::new(HashMap::new())),
+            pg_store: None,
         })
     }
 
@@ -93,40 +97,168 @@ impl AppState {
     /// so the streaming loop is never blocked by the write lock.
     pub async fn send_and_persist(&self, task_id: &TaskId, tx: &broadcast::Sender<OutboundChunk>, chunk: OutboundChunk) {
         let _ = tx.send(chunk.clone());
+        // In-memory persistence
         let events = self.task_events.clone();
         let tid = task_id.clone();
+        let chunk_clone = chunk.clone();
         tokio::spawn(async move {
             let mut guard = events.write().await;
-            guard.entry(tid).or_default().push(chunk);
+            guard.entry(tid).or_default().push(chunk_clone);
         });
+        // PostgreSQL persistence (fire-and-forget)
+        if let Some(ref store) = self.pg_store {
+            let store = store.clone();
+            let tid = task_id.0.clone();
+            tokio::spawn(async move {
+                if let Err(e) = store.append_event(&tid, &chunk).await {
+                    tracing::warn!(task_id = %tid, error = %e, "Failed to persist event to postgres");
+                }
+            });
+        }
     }
 
     /// Persist a chunk to task_events only (no broadcast). Used for complete TextBlocks at turn end.
     pub async fn persist_only(&self, task_id: &TaskId, chunk: OutboundChunk) {
+        // In-memory
         let events = self.task_events.clone();
         let tid = task_id.clone();
+        let chunk_clone = chunk.clone();
         tokio::spawn(async move {
             let mut guard = events.write().await;
-            guard.entry(tid).or_default().push(chunk);
+            guard.entry(tid).or_default().push(chunk_clone);
         });
+        // PostgreSQL
+        if let Some(ref store) = self.pg_store {
+            let store = store.clone();
+            let tid = task_id.0.clone();
+            tokio::spawn(async move {
+                if let Err(e) = store.append_event(&tid, &chunk).await {
+                    tracing::warn!(task_id = %tid, error = %e, "Failed to persist event to postgres");
+                }
+            });
+        }
     }
 
     /// Get the LLM conversation history for a task (for multi-turn follow-ups).
     pub async fn get_chat_history(&self, task_id: &TaskId) -> Vec<Message> {
+        // Try in-memory first
         let history = self.task_chat_history.read().await;
-        history.get(task_id).cloned().unwrap_or_default()
+        if let Some(msgs) = history.get(task_id) {
+            if !msgs.is_empty() {
+                return msgs.clone();
+            }
+        }
+        drop(history);
+
+        // Fall back to postgres if available
+        if let Some(ref store) = self.pg_store {
+            match store.get_chat_history(&task_id.0).await {
+                Ok(msgs) if !msgs.is_empty() => {
+                    // Hydrate in-memory cache
+                    let mut history = self.task_chat_history.write().await;
+                    history.insert(task_id.clone(), msgs.clone());
+                    return msgs;
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = %task_id.0, error = %e, "Failed to load chat history from postgres");
+                }
+                _ => {}
+            }
+        }
+
+        Vec::new()
     }
 
     /// Replace the LLM conversation history for a task with the full history from FinalResponse.
     pub async fn set_chat_history(&self, task_id: &TaskId, messages: Vec<Message>) {
+        // In-memory
         let mut history = self.task_chat_history.write().await;
-        history.insert(task_id.clone(), messages);
+        history.insert(task_id.clone(), messages.clone());
+        drop(history);
+
+        // PostgreSQL
+        if let Some(ref store) = self.pg_store {
+            let store = store.clone();
+            let tid = task_id.0.clone();
+            tokio::spawn(async move {
+                if let Err(e) = store.set_chat_history(&tid, &messages).await {
+                    tracing::warn!(task_id = %tid, error = %e, "Failed to persist chat history to postgres");
+                }
+            });
+        }
     }
 
     /// Get persisted event history for a task.
     pub async fn get_task_events(&self, task_id: &TaskId) -> Vec<OutboundChunk> {
+        // Try in-memory first
         let events = self.task_events.read().await;
-        events.get(task_id).cloned().unwrap_or_default()
+        if let Some(evts) = events.get(task_id) {
+            if !evts.is_empty() {
+                return evts.clone();
+            }
+        }
+        drop(events);
+
+        // Fall back to postgres if available
+        if let Some(ref store) = self.pg_store {
+            match store.get_events(&task_id.0).await {
+                Ok(evts) if !evts.is_empty() => {
+                    // Hydrate in-memory cache
+                    let mut events = self.task_events.write().await;
+                    events.insert(task_id.clone(), evts.clone());
+                    return evts;
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = %task_id.0, error = %e, "Failed to load events from postgres");
+                }
+                _ => {}
+            }
+        }
+
+        Vec::new()
+    }
+
+    /// Persist a new task to postgres (called after TaskManager::start_task).
+    pub async fn pg_save_task(&self, task_id: &TaskId, prompt: &str, status: &str) {
+        if let Some(ref store) = self.pg_store {
+            let store = store.clone();
+            let tid = task_id.0.clone();
+            let prompt = prompt.to_string();
+            let status = status.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = store.save_task(&tid, &prompt, &status, None).await {
+                    tracing::warn!(task_id = %tid, error = %e, "Failed to save task to postgres");
+                }
+            });
+        }
+    }
+
+    /// Update task status in postgres.
+    pub async fn pg_update_status(&self, task_id: &TaskId, status: &str, error_message: Option<&str>) {
+        if let Some(ref store) = self.pg_store {
+            let store = store.clone();
+            let tid = task_id.0.clone();
+            let status = status.to_string();
+            let err_msg = error_message.map(|s| s.to_string());
+            tokio::spawn(async move {
+                if let Err(e) = store.update_status(&tid, &status, err_msg.as_deref()).await {
+                    tracing::warn!(task_id = %tid, error = %e, "Failed to update task status in postgres");
+                }
+            });
+        }
+    }
+
+    /// Delete task from postgres.
+    pub async fn pg_delete_task(&self, task_id: &TaskId) {
+        if let Some(ref store) = self.pg_store {
+            let store = store.clone();
+            let tid = task_id.0.clone();
+            tokio::spawn(async move {
+                if let Err(e) = store.delete_task(&tid).await {
+                    tracing::warn!(task_id = %tid, error = %e, "Failed to delete task from postgres");
+                }
+            });
+        }
     }
 
     /// Build a ProviderPoolConfig from the current McclawdConfig.

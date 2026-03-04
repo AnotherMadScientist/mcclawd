@@ -39,6 +39,7 @@ webauthn-rs = { workspace = true }
 webauthn-rs-proto = { workspace = true }
 url = { workspace = true }
 rand = { workspace = true }
+sqlx = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

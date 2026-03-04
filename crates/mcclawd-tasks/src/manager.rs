@@ -113,6 +113,16 @@ impl TaskManager {
     pub fn get_task(&self, id: &TaskId) -> Option<&TaskRecord> {
         self.tasks.iter().find(|t| t.id == *id)
     }
+
+    /// Restore a task from persistent storage (e.g. postgres hydration on startup).
+    /// Inserts with the given ID — does NOT generate a new one.
+    pub fn restore_task(&mut self, id: TaskId, prompt: String, status: TaskStatus) {
+        // Avoid duplicates
+        if self.tasks.iter().any(|t| t.id == id) {
+            return;
+        }
+        self.tasks.push(TaskRecord { id, prompt, status });
+    }
 }
 
 #[cfg(test)]

@@ -5,10 +5,13 @@ use std::process;
 use std::sync::Arc;
 
 use crate::sandbox::{ImageBuilder, SandboxOrchestrator};
+use crate::server::pg_store::PgTaskStore;
 use crate::server::{routes, state::AppState};
 use crate::supervisor::AgentSupervisor;
 use mcclawd_core::skills::SandboxConfig;
+use mcclawd_core::types::TaskId;
 use mcclawd_core::McclawdConfig;
+use mcclawd_tasks::manager::TaskStatus;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -32,12 +35,44 @@ fn remove_pid_file() {
     let _ = fs::remove_file(pid_file_path());
 }
 
+/// Map a postgres task row (status string + error_message) to a TaskStatus enum.
+fn row_to_status(status: &str, error_message: Option<&str>) -> TaskStatus {
+    match status {
+        "Pending" => TaskStatus::Pending,
+        "Building" => TaskStatus::Building,
+        "Running" => TaskStatus::Running,
+        "Completed" => TaskStatus::Completed,
+        "Failed" => TaskStatus::Failed(error_message.unwrap_or("unknown error").to_string()),
+        _ => TaskStatus::Running, // default for unknown statuses
+    }
+}
+
 pub async fn execute(port: u16) -> anyhow::Result<()> {
     let config_path = dirs::home_dir()
         .unwrap_or_default()
         .join(".mcclawd")
         .join("config.toml");
     let config = McclawdConfig::load(&config_path)?;
+
+    // Initialize postgres if database_url is configured
+    let pg_store = if let Some(ref database_url) = config.database_url {
+        tracing::info!("Connecting to PostgreSQL...");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(10)
+            .connect(database_url)
+            .await?;
+
+        // Run migrations
+        sqlx::migrate!("../mcclawd-core/migrations")
+            .run(&pool)
+            .await?;
+        tracing::info!("PostgreSQL connected, migrations applied");
+
+        Some(PgTaskStore::new(pool))
+    } else {
+        tracing::info!("No database_url configured — running in-memory only");
+        None
+    };
 
     // Initialize supervisor if Docker is available
     let supervisor = match SandboxOrchestrator::new() {
@@ -66,7 +101,26 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
         }
     };
 
-    let state = AppState::new(config, supervisor)?;
+    let mut state = AppState::new(config, supervisor)?;
+    state.pg_store = pg_store.clone();
+
+    // Hydrate in-memory TaskManager from postgres on startup
+    if let Some(ref store) = pg_store {
+        match store.list_tasks().await {
+            Ok(rows) => {
+                let mut mgr = state.tasks.write().await;
+                for (id, prompt, status, error_message) in &rows {
+                    let task_id = TaskId(id.clone());
+                    let task_status = row_to_status(status, error_message.as_deref());
+                    mgr.restore_task(task_id, prompt.clone(), task_status);
+                }
+                tracing::info!(count = rows.len(), "Restored {} tasks from postgres", rows.len());
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to load tasks from postgres");
+            }
+        }
+    }
 
     let app = routes::api_router(state.clone())
         .with_state(state)

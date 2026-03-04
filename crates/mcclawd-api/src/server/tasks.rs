@@ -70,6 +70,9 @@ pub async fn create_task(
         mgr.start_task(prompt.clone())
     };
 
+    // Persist to postgres
+    state.pg_save_task(&id, &prompt, "Running").await;
+
     let resp = {
         let mgr = state.tasks.read().await;
         match mgr.get_task(&id) {
@@ -128,7 +131,8 @@ async fn run_agent(
             state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
             state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
             let mut mgr = state.tasks.write().await;
-            mgr.fail_task(&task_id, msg);
+            mgr.fail_task(&task_id, msg.clone());
+            state.pg_update_status(&task_id, "Failed", Some(&msg)).await;
             return;
         }
     };
@@ -145,7 +149,8 @@ async fn run_agent(
                     state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
                     state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
                     let mut mgr = state.tasks.write().await;
-                    mgr.fail_task(&task_id, msg);
+                    mgr.fail_task(&task_id, msg.clone());
+                    state.pg_update_status(&task_id, "Failed", Some(&msg)).await;
                     return;
                 }
                 Err(e) => {
@@ -153,7 +158,8 @@ async fn run_agent(
                     state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
                     state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
                     let mut mgr = state.tasks.write().await;
-                    mgr.fail_task(&task_id, msg);
+                    mgr.fail_task(&task_id, msg.clone());
+                    state.pg_update_status(&task_id, "Failed", Some(&msg)).await;
                     return;
                 }
             },
@@ -162,7 +168,8 @@ async fn run_agent(
                 state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
                 state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
                 let mut mgr = state.tasks.write().await;
-                mgr.fail_task(&task_id, msg);
+                mgr.fail_task(&task_id, msg.clone());
+                state.pg_update_status(&task_id, "Failed", Some(&msg)).await;
                 return;
             }
         }
@@ -178,7 +185,8 @@ async fn run_agent(
             state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
             state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
             let mut mgr = state.tasks.write().await;
-            mgr.fail_task(&task_id, msg);
+            mgr.fail_task(&task_id, msg.clone());
+            state.pg_update_status(&task_id, "Failed", Some(&msg)).await;
             return;
         }
     };
@@ -246,13 +254,15 @@ async fn run_agent(
                 state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
                 let mut mgr = state.tasks.write().await;
                 mgr.complete_task(&task_id);
+                state.pg_update_status(&task_id, "Completed", None).await;
             }
             Err(e) => {
                 let msg = format!("Streaming error: {e}");
                 state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
                 state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
                 let mut mgr = state.tasks.write().await;
-                mgr.fail_task(&task_id, msg);
+                mgr.fail_task(&task_id, msg.clone());
+                state.pg_update_status(&task_id, "Failed", Some(&msg)).await;
                 return;
             }
             _ => {} // non_exhaustive guard
@@ -317,6 +327,7 @@ pub async fn send_message(
         let mut mgr = state.tasks.write().await;
         mgr.running(&task_id);
     }
+    state.pg_update_status(&task_id, "Running", None).await;
 
     // Spawn agent execution for the follow-up message
     let workspace_name = "default".to_string();
@@ -344,5 +355,10 @@ pub async fn delete_task(
     }
 
     mgr.delete_task(&task_id);
+    drop(mgr);
+
+    // Also delete from postgres (cascades to events + chat history)
+    state.pg_delete_task(&task_id).await;
+
     StatusCode::NO_CONTENT
 }
