@@ -6,14 +6,17 @@ export default async function globalTeardown() {
   const baseURL = "http://localhost:9090";
 
   try {
-    // Use fallback login (accepts any password when vault.key exists)
-    const loginRes = await fetch(`${baseURL}/api/auth/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: "test" }),
-    });
-    if (!loginRes.ok) return;
-    const { token } = await loginRes.json();
+    // Read the saved auth token from global-setup (avoids needing vault key)
+    const { readFileSync } = await import("fs");
+    const { join } = await import("path");
+    let token: string;
+    try {
+      const data = JSON.parse(readFileSync(join(__dirname, ".auth-token.json"), "utf-8"));
+      token = data.token;
+    } catch {
+      // No token file — can't clean up
+      return;
+    }
 
     // List all secrets
     const listRes = await fetch(`${baseURL}/api/secrets`, {

@@ -7,16 +7,16 @@ test.describe("Login Page", () => {
     await page.goto("/login");
   });
 
-  test("renders login page with Face ID button", async ({ page }) => {
+  test("renders login page with Biometric ID button", async ({ page }) => {
     await expect(page.getByText("McClawd")).toBeVisible();
     await expect(
-      page.getByRole("button", { name: /Unlock with Face ID/i })
+      page.getByRole("button", { name: /Unlock with Biometric ID/i })
     ).toBeVisible();
   });
 
   test("shows fingerprint icon on unlock button", async ({ page }) => {
     // The button should contain the fingerprint icon (SVG)
-    const button = page.getByRole("button", { name: /Unlock with Face ID/i });
+    const button = page.getByRole("button", { name: /Unlock with Biometric ID/i });
     await expect(button).toBeVisible();
     await expect(button.locator("svg")).toBeVisible();
   });

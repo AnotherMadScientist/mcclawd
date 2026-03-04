@@ -75,7 +75,7 @@ export function SetupPage() {
             className="w-full py-2.5 rounded-lg bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 disabled:opacity-40 transition-all text-sm font-medium flex items-center justify-center gap-2"
           >
             <Fingerprint className="w-4 h-4" />
-            {loading ? "Setting up..." : "Set up Face ID"}
+            {loading ? "Setting up..." : "Set up Biometric ID"}
           </button>
         </div>
       </div>
