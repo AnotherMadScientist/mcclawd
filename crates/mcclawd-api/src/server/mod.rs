@@ -1,2 +1,9 @@
+pub mod auth;
+pub mod config_routes;
+pub mod mcp_routes;
 pub mod routes;
+pub mod secrets;
 pub mod state;
+pub mod tasks;
+pub mod workspace;
+pub mod ws;
