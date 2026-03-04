@@ -1,0 +1,23 @@
+[package]
+name = "mcclawd-channel-telegram"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+mcclawd-core = { workspace = true }
+mcclawd-channels = { workspace = true }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tokio-util = { workspace = true }
+teloxide = { version = "0.13", features = ["macros"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

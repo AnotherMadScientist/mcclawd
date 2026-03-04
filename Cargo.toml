@@ -5,6 +5,7 @@ members = [
     "crates/mcclawd-agent",
     "crates/mcclawd-tools",
     "crates/mcclawd-channels",
+    "crates/mcclawd-channel-telegram",
     "crates/mcclawd-tasks",
     "crates/mcclawd-swarm",
     "crates/mcclawd-api",
@@ -85,6 +86,9 @@ axum-extra = { version = "0.10", features = ["typed-header"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
+# Telegram
+teloxide = { version = "0.13", features = ["macros"] }
+
 # Docker / sandbox
 bollard = "0.18"
 tar = "0.4"
@@ -102,4 +106,5 @@ mcclawd-tools = { path = "crates/mcclawd-tools" }
 mcclawd-channels = { path = "crates/mcclawd-channels" }
 mcclawd-tasks = { path = "crates/mcclawd-tasks" }
 mcclawd-swarm = { path = "crates/mcclawd-swarm" }
+mcclawd-channel-telegram = { path = "crates/mcclawd-channel-telegram" }
 mcclawd-api = { path = "crates/mcclawd-api" }
