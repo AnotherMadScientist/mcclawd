@@ -11,6 +11,9 @@ pub struct McclawdConfig {
 
     #[serde(default)]
     pub providers: ProvidersConfig,
+
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +76,70 @@ fn default_ollama_url() -> String {
     "http://localhost:11434".to_string()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpConfig {
+    #[serde(default = "default_agentgateway_url")]
+    pub agentgateway_url: String,
+
+    #[serde(default = "default_mcp_servers")]
+    pub servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub image: String,
+    #[serde(default = "default_mcp_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub volumes: Vec<String>,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            agentgateway_url: default_agentgateway_url(),
+            servers: default_mcp_servers(),
+        }
+    }
+}
+
+fn default_agentgateway_url() -> String {
+    "http://localhost:3000".to_string()
+}
+
+fn default_mcp_port() -> u16 {
+    8000
+}
+
+fn default_mcp_servers() -> Vec<McpServerConfig> {
+    vec![
+        McpServerConfig {
+            name: "langextract".to_string(),
+            image: "ghcr.io/macleodlabs/mcp-langextract:latest".to_string(),
+            port: 8001,
+            env: vec!["GOOGLE_API_KEY".to_string()],
+            volumes: vec![],
+        },
+        McpServerConfig {
+            name: "scrapling".to_string(),
+            image: "ghcr.io/macleodlabs/mcp-scrapling:latest".to_string(),
+            port: 8002,
+            env: vec![],
+            volumes: vec![],
+        },
+        McpServerConfig {
+            name: "filesystem".to_string(),
+            image: "ghcr.io/macleodlabs/mcp-filesystem:latest".to_string(),
+            port: 8003,
+            env: vec![],
+            volumes: vec!["/data:/data".to_string()],
+        },
+    ]
+}
+
 impl McclawdConfig {
     pub fn load(path: &Path) -> crate::Result<Self> {
         if path.exists() {
@@ -103,6 +170,7 @@ impl Default for McclawdConfig {
             data_dir: default_data_dir(),
             agent: AgentConfig::default(),
             providers: ProvidersConfig::default(),
+            mcp: McpConfig::default(),
         }
     }
 }
