@@ -28,6 +28,8 @@ pub enum MessageContent {
 /// Phase 2 variants: `Media`, `Buttons`, `StatusIndicator`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OutboundChunk {
+    /// User message (persisted for history replay — keeps human/assistant turns separated).
+    UserMessage(String),
     /// Streaming text token (Phase 0).
     TextDelta(String),
     /// Complete text block (Phase 0).

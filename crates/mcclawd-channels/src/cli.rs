@@ -71,6 +71,9 @@ impl crate::traits::Channel for CliChannel {
 
     async fn send_chunk(&self, chunk: OutboundChunk) -> mcclawd_core::Result<()> {
         match chunk {
+            OutboundChunk::UserMessage(text) => {
+                eprintln!("You: {}", text);
+            }
             OutboundChunk::TextDelta(text) => {
                 print!("{}", text);
                 io::stdout().flush().ok();

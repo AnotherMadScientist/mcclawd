@@ -35,6 +35,9 @@ impl ContextBuilder {
             sections.push(format!("\n---\n\n{}", agents));
         }
 
+        // 4. Response formatting instructions
+        sections.push("\n---\n\n## Response Guidelines\n\nAlways include source links in your responses when referencing external information. Format sources as a \"Sources\" section at the end of your response with clickable markdown links:\n\n**Sources:**\n- [Title](URL)\n\nIf you used tools to retrieve information, cite the source URL. If no external sources were used, omit the Sources section.".to_string());
+
         sections.join("\n")
     }
 }

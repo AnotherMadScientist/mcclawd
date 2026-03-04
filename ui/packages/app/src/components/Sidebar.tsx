@@ -29,9 +29,7 @@ export function Sidebar() {
     <aside className="flex flex-col w-64 border-r border-border bg-zinc-950 h-screen">
       {/* Logo */}
       <div className="flex items-center gap-3 px-6 py-5 border-b border-border">
-        <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center text-sm font-bold">
-          M
-        </div>
+        <img src="/macleod.jpg" alt="McClawd" className="w-8 h-8 rounded-full object-cover" />
         <span className="text-lg font-semibold tracking-tight">McClawd</span>
       </div>
 

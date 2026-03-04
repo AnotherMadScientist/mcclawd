@@ -344,7 +344,7 @@ pub fn format_outbound(
             "text": { "body": format!("Error: {}", msg) },
             "_phone_number_id": phone_number_id,
         })),
-        OutboundChunk::ToolStart { .. } | OutboundChunk::ToolEnd { .. } | OutboundChunk::Done => {
+        OutboundChunk::UserMessage(_) | OutboundChunk::ToolStart { .. } | OutboundChunk::ToolEnd { .. } | OutboundChunk::Done => {
             None
         }
     }

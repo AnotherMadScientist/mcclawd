@@ -5,6 +5,7 @@ use mcclawd_core::secrets::SecretBackend;
 use mcclawd_core::types::TaskId;
 use mcclawd_core::McclawdConfig;
 use mcclawd_tasks::TaskManager;
+use rig::completion::message::Message;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,6 +36,8 @@ pub struct AppState {
     pub provider_pool: Arc<RwLock<ProviderPool>>,
     /// Path to config file on disk (for hot-reload).
     pub config_path: Option<PathBuf>,
+    /// Per-task LLM conversation history for multi-turn follow-ups.
+    pub task_chat_history: Arc<RwLock<HashMap<TaskId, Vec<Message>>>>,
 }
 
 impl AppState {
@@ -64,6 +67,7 @@ impl AppState {
             webauthn_auth_state: Arc::new(RwLock::new(None)),
             provider_pool: Arc::new(RwLock::new(provider_pool)),
             config_path: None,
+            task_chat_history: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -85,10 +89,38 @@ impl AppState {
     }
 
     /// Send a chunk on the broadcast channel AND persist it in task_events.
+    /// Broadcast is immediate (non-blocking); persistence happens in a spawned task
+    /// so the streaming loop is never blocked by the write lock.
     pub async fn send_and_persist(&self, task_id: &TaskId, tx: &broadcast::Sender<OutboundChunk>, chunk: OutboundChunk) {
         let _ = tx.send(chunk.clone());
-        let mut events = self.task_events.write().await;
-        events.entry(task_id.clone()).or_default().push(chunk);
+        let events = self.task_events.clone();
+        let tid = task_id.clone();
+        tokio::spawn(async move {
+            let mut guard = events.write().await;
+            guard.entry(tid).or_default().push(chunk);
+        });
+    }
+
+    /// Persist a chunk to task_events only (no broadcast). Used for complete TextBlocks at turn end.
+    pub async fn persist_only(&self, task_id: &TaskId, chunk: OutboundChunk) {
+        let events = self.task_events.clone();
+        let tid = task_id.clone();
+        tokio::spawn(async move {
+            let mut guard = events.write().await;
+            guard.entry(tid).or_default().push(chunk);
+        });
+    }
+
+    /// Get the LLM conversation history for a task (for multi-turn follow-ups).
+    pub async fn get_chat_history(&self, task_id: &TaskId) -> Vec<Message> {
+        let history = self.task_chat_history.read().await;
+        history.get(task_id).cloned().unwrap_or_default()
+    }
+
+    /// Replace the LLM conversation history for a task with the full history from FinalResponse.
+    pub async fn set_chat_history(&self, task_id: &TaskId, messages: Vec<Message>) {
+        let mut history = self.task_chat_history.write().await;
+        history.insert(task_id.clone(), messages);
     }
 
     /// Get persisted event history for a task.

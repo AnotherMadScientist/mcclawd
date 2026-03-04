@@ -8,7 +8,10 @@ use mcclawd_agent::workspace::WorkspaceLoader;
 use mcclawd_channels::{ChannelStatus, OutboundChunk};
 use mcclawd_core::types::TaskId;
 use mcclawd_tasks::manager::{TaskRecord, TaskStatus};
-use rig::completion::Prompt;
+use futures::StreamExt;
+use rig::agent::MultiTurnStreamItem;
+use rig::completion::message::Message as RigMessage;
+use rig::streaming::{StreamedAssistantContent, StreamingChat};
 use serde::{Deserialize, Serialize};
 
 use super::state::AppState;
@@ -105,7 +108,15 @@ async fn run_agent(
     workspace_name: &str,
     tx: tokio::sync::broadcast::Sender<OutboundChunk>,
 ) {
-    state.send_and_persist(&task_id, &tx, OutboundChunk::TextDelta("Starting agent...".to_string())).await;
+    // Persist the user message for history replay (human/assistant turn separation)
+    state.send_and_persist(&task_id, &tx, OutboundChunk::UserMessage(prompt.to_string())).await;
+
+    // Helper: broadcast-only (transient status, not persisted to history)
+    let broadcast = |tx: &tokio::sync::broadcast::Sender<OutboundChunk>, chunk: OutboundChunk| {
+        let _ = tx.send(chunk);
+    };
+
+    broadcast(&tx, OutboundChunk::TextDelta("Starting agent...".to_string()));
 
     // 1. Load workspace
     let config = state.config.read().await.clone();
@@ -121,7 +132,7 @@ async fn run_agent(
             return;
         }
     };
-    state.send_and_persist(&task_id, &tx, OutboundChunk::TextDelta("Workspace loaded".to_string())).await;
+    broadcast(&tx, OutboundChunk::TextDelta("Workspace loaded".to_string()));
 
     // 2. Get API key from secrets backend
     let api_key = {
@@ -156,10 +167,10 @@ async fn run_agent(
             }
         }
     };
-    state.send_and_persist(&task_id, &tx, OutboundChunk::TextDelta("Credentials verified".to_string())).await;
+    broadcast(&tx, OutboundChunk::TextDelta("Credentials verified".to_string()));
 
     // 3. Build the agent
-    state.send_and_persist(&task_id, &tx, OutboundChunk::TextDelta("Building agent...".to_string())).await;
+    broadcast(&tx, OutboundChunk::TextDelta("Building agent...".to_string()));
     let (agent, _memory, _mcp_conns) = match AgentEngine::build(workspace, &api_key, config.agent.max_turns, &config).await {
         Ok(result) => result,
         Err(e) => {
@@ -172,24 +183,79 @@ async fn run_agent(
         }
     };
 
-    // 4. Run the prompt (non-streaming — Rig returns full response)
-    state.send_and_persist(&task_id, &tx, OutboundChunk::StatusIndicator(ChannelStatus::Processing)).await;
+    // Report MCP tool availability
+    let tool_count = _mcp_conns.iter().map(|b| b.tools.len()).sum::<usize>();
+    if tool_count > 0 {
+        broadcast(&tx, OutboundChunk::TextDelta(format!("{tool_count} MCP tools available")));
+    } else {
+        broadcast(&tx, OutboundChunk::TextDelta("No MCP tools connected (is AgentGateway running?)".to_string()));
+    }
 
-    match agent.prompt(prompt).await {
-        Ok(response) => {
-            state.send_and_persist(&task_id, &tx, OutboundChunk::StatusIndicator(ChannelStatus::Done)).await;
-            state.send_and_persist(&task_id, &tx, OutboundChunk::TextBlock(response)).await;
-            state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
-            let mut mgr = state.tasks.write().await;
-            mgr.complete_task(&task_id);
-        }
-        Err(e) => {
-            let msg = format!("Agent error: {e}");
-            state.send_and_persist(&task_id, &tx, OutboundChunk::StatusIndicator(ChannelStatus::Done)).await;
-            state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
-            state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
-            let mut mgr = state.tasks.write().await;
-            mgr.fail_task(&task_id, msg);
+    // 4. Stream with conversation history — enables multi-turn follow-ups
+    broadcast(&tx, OutboundChunk::StatusIndicator(ChannelStatus::Processing));
+
+    let chat_history = state.get_chat_history(&task_id).await;
+    if !chat_history.is_empty() {
+        tracing::info!(task_id = %task_id.0, turns = chat_history.len(), "Resuming with conversation history");
+    }
+
+    let mut stream = agent.stream_chat(prompt, chat_history.clone()).await;
+
+    // Accumulate full response text for clean history persistence
+    let mut accumulated_text = String::new();
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => {
+                match content {
+                    StreamedAssistantContent::Text(text) => {
+                        // Broadcast delta for live streaming UX (not persisted)
+                        broadcast(&tx, OutboundChunk::TextDelta(text.text.clone()));
+                        accumulated_text.push_str(&text.text);
+                    }
+                    StreamedAssistantContent::ToolCall { tool_call, .. } => {
+                        // Persist tool calls so history shows them
+                        state.send_and_persist(&task_id, &tx, OutboundChunk::ToolStart { name: tool_call.function.name.clone() }).await;
+                    }
+                    _ => {} // Reasoning, ToolCallDelta, Final, non_exhaustive
+                }
+            }
+            Ok(MultiTurnStreamItem::StreamUserItem(_)) => {
+                // Tool results auto-injected by Rig
+            }
+            Ok(MultiTurnStreamItem::FinalResponse(final_resp)) => {
+                // Persist the complete response as a TextBlock for clean history replay
+                if !accumulated_text.is_empty() {
+                    state.persist_only(&task_id, OutboundChunk::TextBlock(accumulated_text.clone())).await;
+                }
+
+                // Persist conversation history for follow-ups
+                if let Some(history) = final_resp.history() {
+                    state.set_chat_history(&task_id, history.to_vec()).await;
+                    tracing::debug!(task_id = %task_id.0, messages = history.len(), "Chat history persisted");
+                } else {
+                    // Fallback: manually append user + assistant messages
+                    let mut history = chat_history.clone();
+                    history.push(RigMessage::user(prompt));
+                    history.push(RigMessage::assistant(&accumulated_text));
+                    state.set_chat_history(&task_id, history).await;
+                    tracing::debug!(task_id = %task_id.0, "Chat history persisted (manual fallback)");
+                }
+
+                broadcast(&tx, OutboundChunk::StatusIndicator(ChannelStatus::Done));
+                state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
+                let mut mgr = state.tasks.write().await;
+                mgr.complete_task(&task_id);
+            }
+            Err(e) => {
+                let msg = format!("Streaming error: {e}");
+                state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
+                state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
+                let mut mgr = state.tasks.write().await;
+                mgr.fail_task(&task_id, msg);
+                return;
+            }
+            _ => {} // non_exhaustive guard
         }
     }
 }

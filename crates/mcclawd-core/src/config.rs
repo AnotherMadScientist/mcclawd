@@ -73,6 +73,10 @@ pub struct SkillsConfig {
     /// ClawHub registry API base URL.
     #[serde(default = "default_clawhub_api")]
     pub clawhub_api: String,
+
+    /// Directory for local skill catalog cache.
+    #[serde(default = "default_skills_cache_dir")]
+    pub cache_dir: PathBuf,
 }
 
 impl Default for SkillsConfig {
@@ -80,6 +84,7 @@ impl Default for SkillsConfig {
         Self {
             managed_dir: default_skills_managed_dir(),
             clawhub_api: default_clawhub_api(),
+            cache_dir: default_skills_cache_dir(),
         }
     }
 }
@@ -93,6 +98,13 @@ fn default_skills_managed_dir() -> PathBuf {
 
 fn default_clawhub_api() -> String {
     "https://api.clawhub.com".to_string()
+}
+
+fn default_skills_cache_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".mcclawd")
+        .join("cache")
 }
 
 fn default_data_dir() -> PathBuf {
@@ -280,10 +292,12 @@ mod tests {
 [skills]
 managed_dir = "/custom/skills"
 clawhub_api = "https://custom.registry.io"
+cache_dir = "/custom/cache"
 "#;
         let config: McclawdConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.skills.managed_dir, PathBuf::from("/custom/skills"));
         assert_eq!(config.skills.clawhub_api, "https://custom.registry.io");
+        assert_eq!(config.skills.cache_dir, PathBuf::from("/custom/cache"));
     }
 
     #[test]
@@ -295,6 +309,7 @@ max_turns = 10
         let config: McclawdConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.skills.clawhub_api, "https://api.clawhub.com");
         assert!(config.skills.managed_dir.ends_with("skills"));
+        assert!(config.skills.cache_dir.ends_with("cache"));
     }
 
     #[test]
@@ -302,11 +317,13 @@ max_turns = 10
         let config = SkillsConfig {
             managed_dir: PathBuf::from("/tmp/skills"),
             clawhub_api: "https://test.clawhub.com".to_string(),
+            cache_dir: PathBuf::from("/tmp/cache"),
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: SkillsConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.managed_dir, PathBuf::from("/tmp/skills"));
         assert_eq!(parsed.clawhub_api, "https://test.clawhub.com");
+        assert_eq!(parsed.cache_dir, PathBuf::from("/tmp/cache"));
     }
 
     #[test]

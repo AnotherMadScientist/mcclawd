@@ -12,6 +12,7 @@ use super::mcp_routes;
 use super::providers;
 use super::secrets;
 use super::security;
+use super::skills_routes;
 use super::state::AppState;
 use super::swarms;
 use super::tasks;
@@ -105,6 +106,18 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             "/api/channels/state/{kind}",
             delete(channel_state::delete_channel_state),
         )
+        // Skills
+        .route("/api/skills", get(skills_routes::list_installed))
+        .route("/api/skills/search", get(skills_routes::search_clawhub))
+        .route("/api/skills/install", post(skills_routes::install_skill))
+        // Catalog cache endpoints (must be before /api/skills/{name} to avoid capture)
+        .route("/api/skills/catalog", get(skills_routes::browse_catalog))
+        .route(
+            "/api/skills/catalog/{name}",
+            get(skills_routes::skill_detail),
+        )
+        .route("/api/skills/refresh", post(skills_routes::refresh_catalog))
+        .route("/api/skills/{name}", delete(skills_routes::uninstall_skill))
         // Providers
         .route("/api/providers", get(providers::list_providers))
         .route("/api/providers/usage", get(providers::provider_usage))

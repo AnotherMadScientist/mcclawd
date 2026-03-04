@@ -34,9 +34,48 @@ export interface McclawdConfig {
 }
 
 export type StreamChunk =
+  | { UserMessage: string }
   | { TextDelta: string }
   | { TextBlock: string }
   | { ToolStart: { name: string } }
   | { ToolEnd: { name: string; summary: string | null } }
+  | { StatusIndicator: "Typing" | "Processing" | "UploadingMedia" | "Done" }
   | "Done"
   | { Error: string };
+
+export interface InstalledSkill {
+  name: string;
+  version: string;
+  source: { Local: string } | { Registry: { registry_url: string } };
+  installed_at: string;
+}
+
+export interface ClawHubSkillMeta {
+  name: string;
+  version: string;
+  author: string;
+  description: string;
+  downloads: number;
+  tags: string[];
+  updated_at: string;
+}
+
+export interface ClawHubSearchResult {
+  skills: ClawHubSkillMeta[];
+  total: number;
+  page: number;
+}
+
+export interface CachedSearchResult {
+  skills: ClawHubSkillMeta[];
+  total: number;
+  page: number;
+  cached: boolean;
+  last_refreshed: string | null;
+}
+
+export interface CacheStats {
+  skill_count: number;
+  last_refreshed: string | null;
+  cache_path: string;
+}

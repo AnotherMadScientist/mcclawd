@@ -7,6 +7,7 @@ pub mod providers;
 pub mod routes;
 pub mod secrets;
 pub mod security;
+pub mod skills_routes;
 pub mod state;
 pub mod swarms;
 pub mod tasks;

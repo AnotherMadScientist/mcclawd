@@ -4,7 +4,7 @@ import type {
   RegistrationResponseJSON,
   AuthenticationResponseJSON,
 } from "@simplewebauthn/browser";
-import type { McclawdConfig, McpServer, Task, WorkspaceFile } from "./types";
+import type { McclawdConfig, McpServer, Task, WorkspaceFile, InstalledSkill, CachedSearchResult, ClawHubSkillMeta } from "./types";
 
 const TOKEN_KEY = "mcclawd_token";
 
@@ -86,6 +86,11 @@ export const api = {
       }),
     get: (id: string) => apiFetch<Task>(`/api/tasks/${id}`),
     cancel: (id: string) => apiFetch<void>(`/api/tasks/${id}`, { method: "DELETE" }),
+    sendMessage: (id: string, message: string) =>
+      apiFetch<void>(`/api/tasks/${id}/message`, {
+        method: "POST",
+        body: JSON.stringify({ message }),
+      }),
   },
   workspace: {
     list: () => apiFetch<WorkspaceFile[]>("/api/workspace"),
@@ -121,5 +126,23 @@ export const api = {
   },
   mcp: {
     servers: () => apiFetch<McpServer[]>("/api/mcp/servers"),
+  },
+  skills: {
+    list: () => apiFetch<InstalledSkill[]>("/api/skills"),
+    catalog: (query = "", page = 0, perPage = 50) =>
+      apiFetch<CachedSearchResult>(
+        `/api/skills/catalog?q=${encodeURIComponent(query)}&page=${page}&per_page=${perPage}`,
+      ),
+    detail: (name: string) =>
+      apiFetch<ClawHubSkillMeta>(`/api/skills/catalog/${encodeURIComponent(name)}`),
+    refresh: () =>
+      apiFetch<{ refreshed: number }>("/api/skills/refresh", { method: "POST" }),
+    install: (name: string, version?: string) =>
+      apiFetch<InstalledSkill>("/api/skills/install", {
+        method: "POST",
+        body: JSON.stringify({ name, version }),
+      }),
+    uninstall: (name: string) =>
+      apiFetch<void>(`/api/skills/${encodeURIComponent(name)}`, { method: "DELETE" }),
   },
 };

@@ -15,6 +15,8 @@ use super::state::AppState;
 #[derive(Debug, Deserialize)]
 pub struct WsQuery {
     pub token: Option<String>,
+    /// When set to "1", skip replaying persisted history (used on follow-up reconnects).
+    pub skip_history: Option<String>,
 }
 
 /// GET /api/tasks/{id}/stream?token=JWT — WebSocket upgrade for task streaming
@@ -41,23 +43,27 @@ pub async fn task_stream(
     }
 
     let task_id = TaskId(id);
-    ws.on_upgrade(move |socket| handle_socket(socket, state, task_id))
+    let skip_history = query.skip_history.as_deref() == Some("1");
+    ws.on_upgrade(move |socket| handle_socket(socket, state, task_id, skip_history))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: AppState, task_id: TaskId) {
+async fn handle_socket(mut socket: WebSocket, state: AppState, task_id: TaskId, skip_history: bool) {
     // Replay any persisted event history first (fixes "history lost on revisit")
+    // Skipped on follow-up reconnects where the client already has the history.
     let history = state.get_task_events(&task_id).await;
-    for chunk in &history {
-        if let Ok(json) = serde_json::to_string(chunk) {
-            if socket.send(Message::Text(json.into())).await.is_err() {
-                return;
+    if !skip_history {
+        for chunk in &history {
+            if let Ok(json) = serde_json::to_string(chunk) {
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    return;
+                }
             }
         }
-    }
 
-    // If history already contains Done, the task is finished — no need to subscribe
-    if history.iter().any(|c| matches!(c, OutboundChunk::Done)) {
-        return;
+        // If history already contains Done, the task is finished — no need to subscribe
+        if history.iter().any(|c| matches!(c, OutboundChunk::Done)) {
+            return;
+        }
     }
 
     // Subscribe to the task's broadcast channel for live updates

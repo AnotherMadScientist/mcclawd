@@ -46,9 +46,9 @@ export function LoginPage() {
         <div className="relative">
           <div className="absolute inset-0 rounded-full bg-primary/20 blur-xl animate-pulse" />
           <img
-            src="/mcclawd-logo.svg"
+            src="/macleod.jpg"
             alt="McClawd"
-            className="relative w-32 h-32 rounded-full"
+            className="relative w-32 h-32 rounded-full object-cover"
           />
         </div>
 
