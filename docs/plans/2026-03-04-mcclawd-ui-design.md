@@ -66,30 +66,46 @@ Left sidebar with sections and sub-menus. Dark theme default.
 
 ### 1. Login Page (`/login`)
 
-- McClawd logo centered
-- Password field (unlocks the encrypted secrets vault — the master key)
-- No user accounts — single-user tool
+Beautiful, minimal full-screen page:
+- Dark gradient background with subtle animated particles/glow
+- Single circular McClawd logo (large, centered, with soft glow ring)
+- Password field below the logo — minimal, borderless, with subtle underline
+- No user accounts — single-user tool, the password is the secrets master key
 - After login, JWT stored in memory (not localStorage)
-- Redirects to Tasks page on success
+- Smooth transition/fade to Tasks page on success
 
 ### 2. Tasks Page (`/` — home)
 
-- **Running Tasks** — cards showing active agent executions with live status badges
-- **Scheduled Tasks** — placeholder section for Phase 2 (queued/scheduled tasks)
-- **Recent Tasks** — completed/failed tasks with timestamps and duration
-- Click any task card → Task Detail page
-- "New Task" button → opens dialog with prompt input and model selector
+Beautiful graphical dashboard:
+- Hero section with greeting + quick stats (running tasks, completed today, available tools)
+- **Running Tasks** — large animated cards with pulsing status indicator, model badge, elapsed time
+- **Recent Tasks** — clean list with status icons, duration, token count
+- **Scheduled Tasks** — placeholder section for Phase 2 (subtle "coming soon" styling)
+- "New Task" prominent CTA button — opens the New Task page
 
-### 3. Task Detail Page (`/tasks/:id`)
+### 3. New Task Page (`/tasks/new`)
+
+Visual, layman-friendly task creation:
+- Large prompt textarea with placeholder guidance ("What would you like me to do?")
+- **Resource Panel** — graphical cards showing what the agent has access to:
+  - **Skills** — icons + names of installed SKILL.md files with descriptions
+  - **MCP Servers** — status badges (green=running, gray=stopped), tool names exposed by each
+  - **Builtin Tools** — memory.store, memory.recall shown as capability cards
+  - **Model** — dropdown with model description/capability summary
+  - **Workspace** — which workspace files (SOUL/AGENTS/USER) are loaded
+- Each resource card is clickable for a tooltip/popover with details
+- "Run Task" button starts execution and navigates to Task Detail
+
+### 4. Task Detail Page (`/tasks/:id`)
 
 Streaming terminal-like view with structured timeline:
 
-- `Thinking...` — agent reasoning (collapsible)
-- `Tool: memory.store(...)` → result (expandable card)
-- `Tool: mcp.langextract(...)` → result (expandable card)
-- `Response: ...` — final answer (full display)
+- `Thinking...` — agent reasoning (collapsible, subtle animation)
+- `Tool: memory.store(...)` → result (expandable card with tool icon)
+- `Tool: mcp.langextract(...)` → result (expandable card with tool icon)
+- `Response: ...` — final answer (full display, markdown rendered)
 
-Each entry is an expandable card (collapsed by default). Cancel button sends interrupt. Metadata sidebar shows: model, workspace, start time, token usage.
+Each entry is an expandable card (collapsed by default). Cancel button sends interrupt. Metadata sidebar shows: model, workspace, start time, token usage, resources used.
 
 ### 4. Configuration Section (sidebar sub-navigation)
 
