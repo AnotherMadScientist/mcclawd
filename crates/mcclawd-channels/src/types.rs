@@ -22,14 +22,65 @@ pub enum MessageContent {
     Command { name: String, args: String },
 }
 
+/// An outbound message chunk from the agent pipeline.
+///
+/// Phase 0 variants: `TextDelta`, `TextBlock`, `ToolStart`, `ToolEnd`, `Done`, `Error`.
+/// Phase 2 variants: `Media`, `Buttons`, `StatusIndicator`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OutboundChunk {
+    /// Streaming text token (Phase 0).
     TextDelta(String),
+    /// Complete text block (Phase 0).
     TextBlock(String),
+    /// Tool call started (Phase 0).
     ToolStart { name: String },
+    /// Tool call ended (Phase 0).
     ToolEnd { name: String, summary: Option<String> },
+    /// Final done signal (Phase 0).
     Done,
+    /// Error message to display to user (Phase 0).
     Error(String),
+
+    // -------------------------------------------------------------------
+    // Phase 2 variants
+    // -------------------------------------------------------------------
+    /// Media attachment (image, file, audio, etc.).
+    Media {
+        mime_type: String,
+        data: Vec<u8>,
+        caption: Option<String>,
+    },
+    /// Inline buttons / keyboard (for Telegram, Discord, etc.).
+    Buttons {
+        text: String,
+        buttons: Vec<Vec<InlineButton>>,
+    },
+    /// Status indicator (typing, processing, etc.).
+    StatusIndicator(ChannelStatus),
+}
+
+/// A single inline button for rich-channel keyboards.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InlineButton {
+    /// Display label.
+    pub label: String,
+    /// Callback data sent back when the button is pressed.
+    pub callback_data: Option<String>,
+    /// URL to open when the button is pressed.
+    pub url: Option<String>,
+}
+
+/// Channel status indicators sent to platform adapters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ChannelStatus {
+    /// "Typing…" indicator.
+    Typing,
+    /// "Processing…" indicator.
+    Processing,
+    /// "Uploading media…" indicator.
+    UploadingMedia,
+    /// Done / clear status.
+    Done,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -50,5 +101,183 @@ impl std::fmt::Display for ChannelKind {
             ChannelKind::Discord => write!(f, "discord"),
             ChannelKind::Custom(name) => write!(f, "{}", name),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Phase 0 variant round-trips ----------------------------------------
+
+    #[test]
+    fn outbound_chunk_text_delta_serde() {
+        let chunk = OutboundChunk::TextDelta("hello".into());
+        let json = serde_json::to_string(&chunk).unwrap();
+        let back: OutboundChunk = serde_json::from_str(&json).unwrap();
+        if let OutboundChunk::TextDelta(t) = back {
+            assert_eq!(t, "hello");
+        } else {
+            panic!("Expected TextDelta variant");
+        }
+    }
+
+    #[test]
+    fn outbound_chunk_tool_start_serde() {
+        let chunk = OutboundChunk::ToolStart {
+            name: "memory.store".into(),
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        let back: OutboundChunk = serde_json::from_str(&json).unwrap();
+        if let OutboundChunk::ToolStart { name } = back {
+            assert_eq!(name, "memory.store");
+        } else {
+            panic!("Expected ToolStart variant");
+        }
+    }
+
+    // Phase 2 variant round-trips ----------------------------------------
+
+    #[test]
+    fn outbound_chunk_media_serde() {
+        let chunk = OutboundChunk::Media {
+            mime_type: "image/png".into(),
+            data: vec![1, 2, 3],
+            caption: Some("A chart".into()),
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        let back: OutboundChunk = serde_json::from_str(&json).unwrap();
+        if let OutboundChunk::Media {
+            mime_type,
+            data,
+            caption,
+        } = back
+        {
+            assert_eq!(mime_type, "image/png");
+            assert_eq!(data, vec![1, 2, 3]);
+            assert_eq!(caption.as_deref(), Some("A chart"));
+        } else {
+            panic!("Expected Media variant");
+        }
+    }
+
+    #[test]
+    fn outbound_chunk_media_no_caption() {
+        let chunk = OutboundChunk::Media {
+            mime_type: "application/pdf".into(),
+            data: vec![0xFF],
+            caption: None,
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        let back: OutboundChunk = serde_json::from_str(&json).unwrap();
+        if let OutboundChunk::Media { caption, .. } = back {
+            assert!(caption.is_none());
+        } else {
+            panic!("Expected Media variant");
+        }
+    }
+
+    #[test]
+    fn outbound_chunk_buttons_serde() {
+        let chunk = OutboundChunk::Buttons {
+            text: "Choose an option:".into(),
+            buttons: vec![vec![
+                InlineButton {
+                    label: "Yes".into(),
+                    callback_data: Some("yes".into()),
+                    url: None,
+                },
+                InlineButton {
+                    label: "No".into(),
+                    callback_data: Some("no".into()),
+                    url: None,
+                },
+            ]],
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        let deserialized: OutboundChunk = serde_json::from_str(&json).unwrap();
+        if let OutboundChunk::Buttons { text, buttons } = deserialized {
+            assert_eq!(text, "Choose an option:");
+            assert_eq!(buttons.len(), 1);
+            assert_eq!(buttons[0].len(), 2);
+            assert_eq!(buttons[0][0].label, "Yes");
+            assert_eq!(buttons[0][1].label, "No");
+        } else {
+            panic!("Expected Buttons variant");
+        }
+    }
+
+    #[test]
+    fn outbound_chunk_buttons_with_url() {
+        let chunk = OutboundChunk::Buttons {
+            text: "Links:".into(),
+            buttons: vec![vec![InlineButton {
+                label: "Docs".into(),
+                callback_data: None,
+                url: Some("https://docs.example.com".into()),
+            }]],
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        let back: OutboundChunk = serde_json::from_str(&json).unwrap();
+        if let OutboundChunk::Buttons { buttons, .. } = back {
+            assert!(buttons[0][0].url.is_some());
+            assert!(buttons[0][0].callback_data.is_none());
+        } else {
+            panic!("Expected Buttons variant");
+        }
+    }
+
+    #[test]
+    fn channel_status_variants_serde() {
+        let statuses = vec![
+            ChannelStatus::Typing,
+            ChannelStatus::Processing,
+            ChannelStatus::UploadingMedia,
+            ChannelStatus::Done,
+        ];
+        for s in statuses {
+            let json = serde_json::to_string(&s).unwrap();
+            let _: ChannelStatus = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn outbound_chunk_status_indicator_serde() {
+        let chunk = OutboundChunk::StatusIndicator(ChannelStatus::Processing);
+        let json = serde_json::to_string(&chunk).unwrap();
+        let back: OutboundChunk = serde_json::from_str(&json).unwrap();
+        if let OutboundChunk::StatusIndicator(status) = back {
+            let status_json = serde_json::to_string(&status).unwrap();
+            assert!(status_json.contains("Processing"));
+        } else {
+            panic!("Expected StatusIndicator variant");
+        }
+    }
+
+    #[test]
+    fn inline_button_serde() {
+        let btn = InlineButton {
+            label: "Click me".into(),
+            callback_data: Some("action_1".into()),
+            url: None,
+        };
+        let json = serde_json::to_string(&btn).unwrap();
+        let back: InlineButton = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.label, "Click me");
+        assert_eq!(back.callback_data.as_deref(), Some("action_1"));
+        assert!(back.url.is_none());
+    }
+
+    #[test]
+    fn channel_kind_display() {
+        assert_eq!(ChannelKind::Cli.to_string(), "cli");
+        assert_eq!(ChannelKind::Web.to_string(), "web");
+        assert_eq!(ChannelKind::Telegram.to_string(), "telegram");
+        assert_eq!(ChannelKind::Discord.to_string(), "discord");
+        assert_eq!(ChannelKind::Custom("slack".into()).to_string(), "slack");
     }
 }
