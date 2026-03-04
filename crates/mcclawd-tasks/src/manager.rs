@@ -1,9 +1,12 @@
 use mcclawd_core::types::TaskId;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TaskStatus {
+    Pending,
+    Building,
     Running,
+    Restarting { attempt: u32, next_retry_secs: u64 },
     Completed,
     Failed(String),
 }
@@ -35,6 +38,34 @@ impl TaskManager {
             status: TaskStatus::Running,
         });
         id
+    }
+
+    pub fn create_task(&mut self, prompt: String) -> TaskId {
+        let id = TaskId::new();
+        self.tasks.push(TaskRecord {
+            id: id.clone(),
+            prompt,
+            status: TaskStatus::Pending,
+        });
+        id
+    }
+
+    pub fn building(&mut self, id: &TaskId) {
+        self.set_status(id, TaskStatus::Building);
+    }
+
+    pub fn running(&mut self, id: &TaskId) {
+        self.set_status(id, TaskStatus::Running);
+    }
+
+    pub fn restarting(&mut self, id: &TaskId, attempt: u32, next_retry_secs: u64) {
+        self.set_status(id, TaskStatus::Restarting { attempt, next_retry_secs });
+    }
+
+    fn set_status(&mut self, id: &TaskId, status: TaskStatus) {
+        if let Some(task) = self.tasks.iter_mut().find(|t| t.id == *id) {
+            task.status = status;
+        }
     }
 
     pub fn complete_task(&mut self, id: &TaskId) {
@@ -139,5 +170,37 @@ mod tests {
         mgr.complete_task(&id);
         let task = mgr.get_task(&id).unwrap();
         assert!(matches!(task.status, TaskStatus::Completed));
+    }
+
+    #[test]
+    fn test_task_state_machine() {
+        let mut mgr = TaskManager::new();
+        let id = mgr.create_task("build something".to_string());
+        assert!(matches!(mgr.get_task(&id).unwrap().status, TaskStatus::Pending));
+        mgr.building(&id);
+        assert!(matches!(mgr.get_task(&id).unwrap().status, TaskStatus::Building));
+        mgr.running(&id);
+        assert!(matches!(mgr.get_task(&id).unwrap().status, TaskStatus::Running));
+        mgr.complete_task(&id);
+        assert!(matches!(mgr.get_task(&id).unwrap().status, TaskStatus::Completed));
+    }
+
+    #[test]
+    fn test_restarting_state() {
+        let mut mgr = TaskManager::new();
+        let id = mgr.create_task("crashy task".to_string());
+        mgr.running(&id);
+        mgr.restarting(&id, 1, 2);
+        match &mgr.get_task(&id).unwrap().status {
+            TaskStatus::Restarting { attempt, next_retry_secs } => {
+                assert_eq!(*attempt, 1);
+                assert_eq!(*next_retry_secs, 2);
+            }
+            other => panic!("expected Restarting, got {:?}", other),
+        }
+        mgr.running(&id);
+        mgr.restarting(&id, 2, 4);
+        mgr.fail_task(&id, "max retries exceeded".to_string());
+        assert!(matches!(mgr.get_task(&id).unwrap().status, TaskStatus::Failed(_)));
     }
 }
