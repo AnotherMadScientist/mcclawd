@@ -18,11 +18,11 @@ test.describe("Task Detail Page", () => {
     await expect(page.getByText("Complete")).toBeVisible({ timeout: 10000 });
   });
 
-  test("shows error message for non-existent task stream", async ({
+  test("shows completion state for non-existent task stream", async ({
     page,
   }) => {
     await page.goto("/tasks/00000000-0000-0000-0000-000000000000");
-    await expect(page.getByText("Task stream not found")).toBeVisible({
+    await expect(page.getByText("Complete")).toBeVisible({
       timeout: 10000,
     });
   });

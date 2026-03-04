@@ -18,7 +18,8 @@ export function useTaskStream(taskId: string | undefined) {
     if (!taskId) return;
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${window.location.host}/api/tasks/${taskId}/stream`;
+    const token = localStorage.getItem("mcclawd_token") || "";
+    const wsUrl = `${protocol}//${window.location.host}/api/tasks/${taskId}/stream?token=${encodeURIComponent(token)}`;
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 

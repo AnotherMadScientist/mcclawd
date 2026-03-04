@@ -19,6 +19,10 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/api/health", get(health))
         .route("/api/auth/login", post(auth::login));
 
+    // WebSocket routes — auth handled via query param (browsers can't send headers on WS)
+    let ws_routes = Router::new()
+        .route("/api/tasks/{id}/stream", get(ws::task_stream));
+
     // Protected routes — all require valid JWT
     let protected = Router::new()
         // Tasks
@@ -27,8 +31,6 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             "/api/tasks/{id}",
             get(tasks::get_task).delete(tasks::delete_task),
         )
-        // WebSocket streaming
-        .route("/api/tasks/{id}/stream", get(ws::task_stream))
         // Workspace
         .route("/api/workspace", get(workspace::list_files))
         .route(
@@ -56,7 +58,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         // Apply JWT auth to all protected routes
         .route_layer(middleware::from_fn_with_state(state, auth::auth_middleware));
 
-    public.merge(protected)
+    public.merge(ws_routes).merge(protected)
 }
 
 async fn health() -> &'static str {

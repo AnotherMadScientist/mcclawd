@@ -1,19 +1,45 @@
 use axum::{
-    extract::{Path, State, WebSocketUpgrade},
-    response::Response,
+    extract::{Path, Query, State, WebSocketUpgrade},
+    http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use axum::extract::ws::{Message, WebSocket};
+use jsonwebtoken::{decode, DecodingKey, Validation};
 use mcclawd_channels::OutboundChunk;
 use mcclawd_core::types::TaskId;
+use serde::Deserialize;
 
+use super::auth::Claims;
 use super::state::AppState;
 
-/// GET /api/tasks/{id}/stream — WebSocket upgrade for task streaming
+#[derive(Debug, Deserialize)]
+pub struct WsQuery {
+    pub token: Option<String>,
+}
+
+/// GET /api/tasks/{id}/stream?token=JWT — WebSocket upgrade for task streaming
 pub async fn task_stream(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<WsQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
+    // Validate JWT from query param (browsers can't send headers on WS)
+    if let Some(token) = &query.token {
+        let validation = Validation::default();
+        if decode::<Claims>(
+            token,
+            &DecodingKey::from_secret(state.jwt_secret.as_bytes()),
+            &validation,
+        )
+        .is_err()
+        {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+    } else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
     let task_id = TaskId(id);
     ws.on_upgrade(move |socket| handle_socket(socket, state, task_id))
 }
