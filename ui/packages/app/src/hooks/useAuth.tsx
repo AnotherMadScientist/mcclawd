@@ -31,7 +31,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const register = useCallback(async () => {
-    const options = await api.auth.registerStart();
+    const raw = await api.auth.registerStart();
+    // webauthn-rs wraps options in { publicKey: {...} } — unwrap for @simplewebauthn/browser
+    const options = (raw as any).publicKey ?? raw;
     const credential = await startRegistration({ optionsJSON: options });
     const { token } = await api.auth.registerFinish(credential);
     setToken(token);
@@ -40,7 +42,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = useCallback(async () => {
-    const options = await api.auth.loginStart();
+    const raw = await api.auth.loginStart();
+    // webauthn-rs wraps options in { publicKey: {...} } — unwrap for @simplewebauthn/browser
+    const options = (raw as any).publicKey ?? raw;
     const credential = await startAuthentication({ optionsJSON: options });
     const { token } = await api.auth.loginFinish(credential);
     setToken(token);

@@ -1,18 +1,33 @@
 import { chromium, expect } from "@playwright/test";
-import { writeFileSync } from "fs";
+import { unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
+import { homedir } from "os";
 
 const AUTH_TOKEN_PATH = join(__dirname, ".auth-token.json");
 
 export default async function globalSetup() {
+  // Clean server-side WebAuthn state so we always register fresh.
+  // The virtual authenticator is per-browser-session — stale server credentials
+  // would cause login to fail (authenticator has no matching credential).
+  const dataDir = join(homedir(), ".mcclawd");
+  for (const f of ["webauthn_credentials.json", "vault.key", "secrets.enc"]) {
+    try {
+      unlinkSync(join(dataDir, f));
+    } catch {
+      /* ignore if missing */
+    }
+  }
+
   const browser = await chromium.launch();
   const context = await browser.newContext();
   const page = await context.newPage();
 
-  // Set up virtual authenticator via CDP
+  // Navigate first so the page target exists, then attach CDP and enable WebAuthn.
+  await page.goto("http://localhost:8080");
+
   const cdp = await context.newCDPSession(page);
-  await cdp.send("WebAuthn.enable");
-  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+  await cdp.send("WebAuthn.enable", { enableUI: true });
+  const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", {
     options: {
       protocol: "ctap2",
       transport: "internal",
@@ -21,29 +36,20 @@ export default async function globalSetup() {
       isUserVerified: true,
     },
   });
+  void authenticatorId;
 
-  // Navigate — redirects to /setup (first run) or /login (subsequent runs)
-  await page.goto("http://localhost:8080");
-  // Wait for the app to resolve auth status and redirect (10s max)
-  await page.waitForURL((u) => u.pathname === "/setup" || u.pathname === "/login", {
-    timeout: 10000,
+  // After cleanup, auth status is setup_complete: false → app redirects to /setup.
+  await page.reload();
+  await page.waitForURL("**/setup", { timeout: 10000 });
+
+  const setupBtn = page.getByRole("button", {
+    name: /Set up/i,
   });
+  await setupBtn.waitFor({ state: "visible", timeout: 10000 });
+  await expect(setupBtn).toBeEnabled({ timeout: 10000 });
+  await setupBtn.click();
 
-  const url = page.url();
-  if (url.includes("/setup")) {
-    // First run: register biometric
-    const setupBtn = page.getByRole("button", { name: "Set up Face ID" });
-    await setupBtn.waitFor({ state: "visible", timeout: 10000 });
-    await expect(setupBtn).toBeEnabled({ timeout: 10000 });
-    await setupBtn.click();
-  } else if (url.includes("/login")) {
-    // Subsequent run: authenticate with existing credential
-    const loginBtn = page.getByRole("button", { name: /Unlock with Face ID/i });
-    await loginBtn.waitFor({ state: "visible", timeout: 10000 });
-    await loginBtn.click();
-  }
-
-  // Wait for token to be written to localStorage
+  // Wait for token to be written to localStorage (set by register/login in useAuth).
   await page.waitForFunction(
     () => localStorage.getItem("mcclawd_token") !== null,
     { timeout: 15000 }
@@ -54,6 +60,16 @@ export default async function globalSetup() {
     localStorage.getItem("mcclawd_token")
   );
   writeFileSync(AUTH_TOKEN_PATH, JSON.stringify({ token }));
+
+  // Seed ANTHROPIC_API_KEY into the fresh vault so secrets tests can find it.
+  await fetch("http://localhost:9090/api/secrets", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ name: "ANTHROPIC_API_KEY", value: "test-key-for-e2e" }),
+  });
 
   await browser.close();
 }
