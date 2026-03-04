@@ -1715,6 +1715,7 @@ dependencies = [
  "mcclawd-core",
  "mcclawd-tools",
  "petgraph",
+ "rig-core",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
