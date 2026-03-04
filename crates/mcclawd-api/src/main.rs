@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 
 mod commands;
 mod sandbox;
+mod supervisor;
 mod server;
 
 #[derive(Parser)]
