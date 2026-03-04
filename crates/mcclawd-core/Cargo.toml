@@ -22,6 +22,10 @@ dashmap = { workspace = true }
 dirs = { workspace = true }
 tokio = { workspace = true }
 regex = { workspace = true }
+notify = { workspace = true }
+reqwest = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

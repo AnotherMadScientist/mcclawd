@@ -96,9 +96,13 @@ teloxide = { version = "0.13", features = ["macros"] }
 # Docker / sandbox
 bollard = "0.18"
 tar = "0.4"
+flate2 = "1"
 
 # Platform dirs
 dirs = "6"
+
+# File watcher (config hot-reload)
+notify = "7"
 
 # Regex (DLP patterns)
 regex = "1"

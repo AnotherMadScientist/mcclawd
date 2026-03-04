@@ -3,10 +3,12 @@ use async_trait::async_trait;
 pub mod aws;
 pub mod encrypted_file;
 pub mod env;
+pub mod vault;
 
 pub use aws::AwsSecretBackend;
 pub use encrypted_file::EncryptedFileBackend;
 pub use env::EnvSecretBackend;
+pub use vault::VaultSecretBackend;
 
 /// Trait for secret storage backends.
 /// Phase 0: EncryptedFileBackend (AES-256-GCM-SIV + argon2).
