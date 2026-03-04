@@ -8,7 +8,7 @@ pub enum TaskStatus {
     Failed(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRecord {
     pub id: TaskId,
     pub prompt: String,
@@ -54,6 +54,16 @@ impl TaskManager {
 
     pub fn current_task(&self) -> Option<&TaskRecord> {
         self.current.as_ref()
+    }
+
+    pub fn all_tasks(&self) -> Vec<&TaskRecord> {
+        self.current.as_ref().into_iter().collect()
+    }
+
+    pub fn get_task(&self, id: &TaskId) -> Option<&TaskRecord> {
+        self.current
+            .as_ref()
+            .filter(|t| t.id == *id)
     }
 }
 
