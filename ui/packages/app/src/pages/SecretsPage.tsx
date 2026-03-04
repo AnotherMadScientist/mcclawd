@@ -14,6 +14,8 @@ export function SecretsPage() {
   const { data: secrets = [] } = useQuery({
     queryKey: ["secrets"],
     queryFn: api.secrets.list,
+    select: (data) =>
+      [...data].sort((a, b) => a.name.localeCompare(b.name)),
   });
 
   const add = useMutation({
