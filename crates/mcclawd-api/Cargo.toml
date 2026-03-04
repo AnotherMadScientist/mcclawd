@@ -33,3 +33,4 @@ jsonwebtoken = { workspace = true }
 bollard = { workspace = true }
 tar = { workspace = true }
 futures-util = { workspace = true }
+reqwest = { workspace = true }
