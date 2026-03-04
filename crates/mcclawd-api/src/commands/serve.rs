@@ -1,9 +1,32 @@
 use axum::extract::DefaultBodyLimit;
 use axum::http::{self, HeaderValue};
+use std::fs;
+use std::process;
+
 use crate::server::{routes, state::AppState};
 use mcclawd_core::McclawdConfig;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
+
+fn pid_file_path() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".mcclawd")
+        .join("daemon.pid")
+}
+
+fn write_pid_file() -> anyhow::Result<()> {
+    let path = pid_file_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, process::id().to_string())?;
+    Ok(())
+}
+
+fn remove_pid_file() {
+    let _ = fs::remove_file(pid_file_path());
+}
 
 pub async fn execute(port: u16) -> anyhow::Result<()> {
     let config_path = dirs::home_dir()
@@ -33,7 +56,16 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
         .layer(DefaultBodyLimit::max(1024 * 1024)); // 1MB
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
-    tracing::info!("McClawd API server listening on 127.0.0.1:{port}");
-    axum::serve(listener, app).await?;
+
+    write_pid_file()?;
+    tracing::info!(
+        "McClawd daemon PID {} listening on 127.0.0.1:{port}",
+        process::id()
+    );
+
+    let result = axum::serve(listener, app).await;
+
+    remove_pid_file();
+    result?;
     Ok(())
 }
