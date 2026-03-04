@@ -21,6 +21,9 @@ enum Commands {
         /// Workspace to use
         #[arg(short, long, default_value = "default")]
         workspace: String,
+        /// Run as a coordinated swarm instead of a single agent
+        #[arg(long)]
+        swarm: bool,
     },
     /// Manage encrypted secrets
     Secrets {
@@ -89,8 +92,12 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { prompt, workspace } => {
-            commands::run::execute(&prompt, &workspace).await?;
+        Commands::Run {
+            prompt,
+            workspace,
+            swarm,
+        } => {
+            commands::run::execute(&prompt, &workspace, swarm).await?;
         }
         Commands::Secrets { action } => match action {
             SecretsAction::Set { key } => commands::secrets::set(&key).await?,

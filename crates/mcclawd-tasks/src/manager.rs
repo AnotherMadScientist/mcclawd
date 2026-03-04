@@ -7,6 +7,11 @@ pub enum TaskStatus {
     Building,
     Running,
     Restarting { attempt: u32, next_retry_secs: u64 },
+    SwarmRunning {
+        swarm_id: String,
+        wave: usize,
+        total_waves: usize,
+    },
     Completed,
     Failed(String),
 }
@@ -60,6 +65,17 @@ impl TaskManager {
 
     pub fn restarting(&mut self, id: &TaskId, attempt: u32, next_retry_secs: u64) {
         self.set_status(id, TaskStatus::Restarting { attempt, next_retry_secs });
+    }
+
+    pub fn swarm_running(&mut self, id: &TaskId, swarm_id: String, wave: usize, total_waves: usize) {
+        self.set_status(
+            id,
+            TaskStatus::SwarmRunning {
+                swarm_id,
+                wave,
+                total_waves,
+            },
+        );
     }
 
     fn set_status(&mut self, id: &TaskId, status: TaskStatus) {
@@ -202,5 +218,36 @@ mod tests {
         mgr.restarting(&id, 2, 4);
         mgr.fail_task(&id, "max retries exceeded".to_string());
         assert!(matches!(mgr.get_task(&id).unwrap().status, TaskStatus::Failed(_)));
+    }
+
+    #[test]
+    fn test_swarm_running_state() {
+        let mut mgr = TaskManager::new();
+        let id = mgr.create_task("swarm task".to_string());
+        mgr.swarm_running(&id, "swarm-abc".to_string(), 1, 3);
+        match &mgr.get_task(&id).unwrap().status {
+            TaskStatus::SwarmRunning {
+                swarm_id,
+                wave,
+                total_waves,
+            } => {
+                assert_eq!(swarm_id, "swarm-abc");
+                assert_eq!(*wave, 1);
+                assert_eq!(*total_waves, 3);
+            }
+            other => panic!("expected SwarmRunning, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_swarm_running_serde_roundtrip() {
+        let status = TaskStatus::SwarmRunning {
+            swarm_id: "swarm-123".to_string(),
+            wave: 2,
+            total_waves: 5,
+        };
+        let json = serde_json::to_string(&status).expect("serialize");
+        let deserialized: TaskStatus = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(status, deserialized);
     }
 }

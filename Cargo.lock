@@ -1853,6 +1853,7 @@ dependencies = [
  "mcclawd-agent",
  "mcclawd-channels",
  "mcclawd-core",
+ "mcclawd-swarm",
  "mcclawd-tasks",
  "mcclawd-tools",
  "rand 0.8.5",

@@ -4,6 +4,7 @@ use crate::sandbox::{ImageBuilder, SandboxOrchestrator};
 use mcclawd_channels::OutboundChunk;
 use mcclawd_core::skills::{LoadedSkill, SandboxConfig};
 use mcclawd_core::types::TaskId;
+use mcclawd_swarm::{SubtaskNode, SwarmConfig, SwarmCoordinator, SwarmResult, TaskDag};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
@@ -143,5 +144,47 @@ impl AgentSupervisor {
     /// Number of currently running agents.
     pub async fn running_count(&self) -> usize {
         self.running.read().await.len()
+    }
+
+    /// Spawn a swarm execution with a placeholder 2-node test DAG.
+    ///
+    /// This is a Phase 2 placeholder — real wiring connects to the planner LLM
+    /// which decomposes the prompt into a proper DAG.
+    pub async fn spawn_swarm(&self, prompt: &str) -> anyhow::Result<SwarmResult> {
+        tracing::info!(prompt, "Spawning swarm execution");
+
+        let coordinator = SwarmCoordinator::new(SwarmConfig::default());
+
+        // Build a simple 2-node test DAG: research → synthesize
+        let mut dag = TaskDag::new();
+        dag.add_subtask(SubtaskNode {
+            id: "research".into(),
+            prompt: format!("Research: {prompt}"),
+            agent_role: "researcher".into(),
+            input_keys: vec![],
+            output_key: "research_out".into(),
+        });
+        dag.add_subtask(SubtaskNode {
+            id: "synthesize".into(),
+            prompt: format!("Synthesize research into answer for: {prompt}"),
+            agent_role: "writer".into(),
+            input_keys: vec!["research_out".into()],
+            output_key: "synthesize_out".into(),
+        });
+        dag.add_dependency("research", "synthesize")
+            .map_err(|e| anyhow::anyhow!("DAG error: {e}"))?;
+
+        let result = coordinator
+            .execute(prompt, &dag)
+            .await
+            .map_err(|e| anyhow::anyhow!("Swarm execution failed: {e}"))?;
+
+        tracing::info!(
+            duration_ms = result.total_duration_ms,
+            subtasks = result.subtask_results.len(),
+            "Swarm execution completed"
+        );
+
+        Ok(result)
     }
 }

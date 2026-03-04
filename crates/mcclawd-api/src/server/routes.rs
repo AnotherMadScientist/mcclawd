@@ -9,6 +9,7 @@ use super::config_routes;
 use super::mcp_routes;
 use super::secrets;
 use super::state::AppState;
+use super::swarms;
 use super::tasks;
 use super::webauthn_auth;
 use super::workspace;
@@ -71,6 +72,12 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         )
         // MCP
         .route("/api/mcp/servers", get(mcp_routes::list_mcp_servers))
+        // Swarms
+        .route(
+            "/api/swarms",
+            get(swarms::list_swarms).post(swarms::create_swarm),
+        )
+        .route("/api/swarms/{id}", get(swarms::get_swarm))
         // Apply JWT auth to all protected routes
         .route_layer(middleware::from_fn_with_state(state, auth::auth_middleware));
 

@@ -4,8 +4,14 @@ use mcclawd_core::config::McclawdConfig;
 use mcclawd_core::secrets::{EncryptedFileBackend, SecretBackend};
 use rig::completion::Prompt;
 
-pub async fn execute(prompt: &str, workspace_name: &str) -> anyhow::Result<()> {
+pub async fn execute(prompt: &str, workspace_name: &str, swarm: bool) -> anyhow::Result<()> {
     let config = McclawdConfig::default();
+
+    if swarm {
+        tracing::info!(prompt, "Swarm mode requested — will decompose task into subtasks");
+        // TODO: Wire up SwarmCoordinator for CLI swarm execution
+        eprintln!("McClawd v0.5.0 — swarm mode (not yet fully wired)\n");
+    }
 
     // Try daemon mode first
     let daemon_port = 9090;

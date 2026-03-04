@@ -4,6 +4,7 @@ pub mod mcp_routes;
 pub mod routes;
 pub mod secrets;
 pub mod state;
+pub mod swarms;
 pub mod tasks;
 pub mod webauthn_auth;
 pub mod workspace;
