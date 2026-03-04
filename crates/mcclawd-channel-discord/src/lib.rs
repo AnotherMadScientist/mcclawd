@@ -22,6 +22,8 @@
 
 pub mod adapter;
 pub mod error;
+pub mod gateway_handler;
 pub mod normalize;
 
 pub use adapter::{DiscordChannel, DiscordConfig};
+pub use gateway_handler::{format_outbound, is_message_allowed, parse_discord_event};

@@ -22,6 +22,10 @@
 
 pub mod adapter;
 pub mod error;
+pub mod event_handler;
 pub mod normalize;
 
 pub use adapter::{SlackChannel, SlackConfig};
+pub use event_handler::{
+    format_outbound, is_channel_allowed, parse_slack_event, parse_url_verification,
+};

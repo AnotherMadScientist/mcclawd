@@ -29,5 +29,7 @@
 pub mod adapter;
 pub mod error;
 pub mod normalize;
+pub mod parser;
 
 pub use adapter::{EmailChannel, EmailConfig};
+pub use parser::{build_outbound_email, format_outbound, parse_raw_email};

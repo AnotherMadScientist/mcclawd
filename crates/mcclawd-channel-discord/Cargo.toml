@@ -3,6 +3,10 @@ name = "mcclawd-channel-discord"
 edition.workspace = true
 version.workspace = true
 
+[features]
+default = []
+live = ["serenity"]
+
 [dependencies]
 mcclawd-core = { workspace = true }
 mcclawd-channels = { workspace = true }
@@ -17,7 +21,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tokio-util = { workspace = true }
-# serenity is NOT added yet — just placeholder types for now
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "rustls_backend"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

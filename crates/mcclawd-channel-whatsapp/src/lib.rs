@@ -23,5 +23,10 @@
 pub mod adapter;
 pub mod error;
 pub mod normalize;
+pub mod webhook_handler;
 
 pub use adapter::{WhatsAppChannel, WhatsAppConfig};
+pub use webhook_handler::{
+    format_outbound, is_number_allowed, parse_verification_request, parse_webhook_payload,
+    verify_webhook_signature,
+};

@@ -23,5 +23,7 @@
 pub mod adapter;
 pub mod error;
 pub mod normalize;
+pub mod teloxide_handler;
 
 pub use adapter::{TelegramChannel, TelegramConfig};
+pub use teloxide_handler::{format_outbound, is_chat_allowed, parse_telegram_update};

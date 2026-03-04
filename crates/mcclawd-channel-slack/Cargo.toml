@@ -3,6 +3,10 @@ name = "mcclawd-channel-slack"
 edition.workspace = true
 version.workspace = true
 
+[features]
+default = []
+live = ["slack-morphism"]
+
 [dependencies]
 mcclawd-core = { workspace = true }
 mcclawd-channels = { workspace = true }
@@ -17,7 +21,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tokio-util = { workspace = true }
-# slack-morphism NOT added yet - just placeholder types for Phase 3
+slack-morphism = { version = "2", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

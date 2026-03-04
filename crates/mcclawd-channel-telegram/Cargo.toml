@@ -3,6 +3,10 @@ name = "mcclawd-channel-telegram"
 edition.workspace = true
 version.workspace = true
 
+[features]
+default = []
+live = ["teloxide"]
+
 [dependencies]
 mcclawd-core = { workspace = true }
 mcclawd-channels = { workspace = true }
@@ -17,7 +21,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tokio-util = { workspace = true }
-teloxide = { version = "0.13", features = ["macros"] }
+teloxide = { version = "0.13", features = ["macros"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
