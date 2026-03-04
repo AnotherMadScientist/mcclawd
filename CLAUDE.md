@@ -37,6 +37,20 @@ cargo test -p mcclawd-core -- secrets    # filter by test name
 ./target/release/mc run "your prompt"
 ```
 
+## Docker (MCP Infrastructure)
+
+```bash
+docker compose build --no-cache          # build MCP server images
+docker compose up -d                     # start AgentGateway + 3 MCP containers
+docker compose logs -f agentgateway      # watch MCP tool discovery
+docker compose down                      # stop everything
+cargo test -p mcclawd-tools --test mcp_integration -- --ignored  # E2E test
+```
+
+Three core MCP servers run as separate Docker containers with supergateway (stdio→HTTP). AgentGateway (unmodified official image) routes tool calls to each container. The `mc` binary connects to AgentGateway at `http://localhost:3000` via rmcp 0.13 StreamableHttp.
+
+MCP servers are config-driven (`McpConfig` in `mcclawd-core`). Phase 1+ adds `mc mcp add/remove` CLI and ClawHub registry.
+
 ## Crate Structure
 
 - `mcclawd-core` — types, config, secrets (AES-256-GCM-SIV + argon2), identity (JWT), hooks
