@@ -8,26 +8,19 @@ McClawd v5 — a Rust agent platform that runs single agents or coordinated swar
 
 ## Current State
 
-Pre-implementation. The architecture is defined in `mcclawd-v5-architecture.md`. The Phase 0 implementation plan is at `docs/plans/2026-03-04-phase0-one-agent-completes-task.md`.
+Phase 0 implemented. The binary `mc` supports `run`, `secrets`, and `workspace` commands.
 
 ## Architecture (v5)
 
 - **Design doc:** `mcclawd-v5-architecture.md` — the source of truth for all design decisions
-- **Rig provides the agent loop** — no manual ReAct loop. Use Rig's `.prompt().max_turns(N)` with streaming
+- **Rig provides the agent loop** — no manual ReAct loop. Use Rig's agent builder with `.tool()` and default_max_turns
 - **rmcp** for MCP client connections (stdio + SSE transports)
 - **6 crates:** mcclawd-core, mcclawd-agent, mcclawd-tools, mcclawd-channels, mcclawd-tasks, mcclawd-api
 - **Binary name:** `mc` (not `mcclawd`)
 - **Workspace files:** SOUL.md, AGENTS.md, USER.md (OpenClaw compatible)
 - **Secrets:** AES-256-GCM-SIV + argon2, never in LLM context, never in env vars
 
-## Build Phases
-
-- **Phase 0:** One agent completes a task (CLI only, no sandbox, no skills)
-- **Phase 1:** Sandboxed + skills + daemon + web channel
-- **Phase 2:** Swarms + Telegram + multi-channel
-- **Phase 3:** Full channel ecosystem (Discord, Slack, WhatsApp, Email, Matrix)
-
-## Build & Test (once scaffolded)
+## Build & Test
 
 ```bash
 cargo build --release -p mcclawd-api    # build mc binary
@@ -36,13 +29,29 @@ cargo test -p mcclawd-core               # single crate
 cargo test -p mcclawd-core -- secrets    # filter by test name
 ```
 
-## Run (once Phase 0 is implemented)
+## Run
 
 ```bash
 ./target/release/mc workspace init
 ./target/release/mc secrets set ANTHROPIC_API_KEY
 ./target/release/mc run "your prompt"
 ```
+
+## Crate Structure
+
+- `mcclawd-core` — types, config, secrets (AES-256-GCM-SIV + argon2), identity (JWT), hooks
+- `mcclawd-agent` — workspace loader, AGENTS.md parser, context assembly, Rig agent builder
+- `mcclawd-tools` — builtin tools (memory.store/recall), MCP client stub
+- `mcclawd-channels` — Channel trait, InboundPipeline, CLI adapter
+- `mcclawd-tasks` — task lifecycle (Phase 0: single interactive)
+- `mcclawd-api` — `mc` binary (CLI entrypoint with clap)
+
+## Build Phases
+
+- **Phase 0:** One agent completes a task (CLI only, no sandbox, no skills) ✓
+- **Phase 1:** Sandboxed + skills + daemon + web channel
+- **Phase 2:** Swarms + Telegram + multi-channel
+- **Phase 3:** Full channel ecosystem (Discord, Slack, WhatsApp, Email, Matrix)
 
 ## Key Decisions
 
