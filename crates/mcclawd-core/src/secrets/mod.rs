@@ -1,11 +1,16 @@
 use async_trait::async_trait;
 
+pub mod aws;
 pub mod encrypted_file;
+pub mod env;
+
+pub use aws::AwsSecretBackend;
 pub use encrypted_file::EncryptedFileBackend;
+pub use env::EnvSecretBackend;
 
 /// Trait for secret storage backends.
 /// Phase 0: EncryptedFileBackend (AES-256-GCM-SIV + argon2).
-/// Future: VaultBackend, KeychainBackend.
+/// Phase 3: EnvSecretBackend (read-only), AwsSecretBackend (stub).
 #[async_trait]
 pub trait SecretBackend: Send + Sync {
     async fn get(&self, key: &str) -> crate::Result<Option<String>>;

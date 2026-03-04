@@ -18,8 +18,10 @@ argon2 = { workspace = true }
 zeroize = { workspace = true }
 rand = { workspace = true }
 jsonwebtoken = { workspace = true }
+dashmap = { workspace = true }
 dirs = { workspace = true }
 tokio = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
