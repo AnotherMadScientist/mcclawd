@@ -1346,7 +1346,7 @@ dependencies = [
  "gray_matter",
  "mcclawd-core",
  "rig-core",
- "rmcp",
+ "rmcp 1.1.0",
  "serde",
  "serde_json",
  "tempfile",
@@ -1923,6 +1923,7 @@ dependencies = [
  "ordered-float",
  "pin-project-lite",
  "reqwest",
+ "rmcp 0.13.0",
  "schemars",
  "serde",
  "serde_json",
@@ -1949,6 +1950,29 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1815dbc06c414d720f8bc1951eccd66bc99efc6376331f1e7093a119b3eb508"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "futures",
+ "pastey",
+ "pin-project-lite",
+ "rmcp-macros 0.13.0",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "rmcp"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2cb14cb9278a12eae884c9f3c0cfeca2cc28f361211206424a1d7abed95f090"
@@ -1962,7 +1986,7 @@ dependencies = [
  "pin-project-lite",
  "process-wrap",
  "reqwest",
- "rmcp-macros",
+ "rmcp-macros 1.1.0",
  "schemars",
  "serde",
  "serde_json",
@@ -1972,6 +1996,19 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "rmcp-macros"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11f0bc7008fa102e771a76c6d2c9b253be3f2baa5964e060464d038ae1cbc573"
+dependencies = [
+ "darling",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn",
 ]
 
 [[package]]

@@ -16,7 +16,7 @@ license = "MIT"
 
 [workspace.dependencies]
 # LLM layer
-rig-core = "0.31"
+rig-core = { version = "0.31", features = ["rmcp"] }
 
 # MCP
 rmcp = { version = "1", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
