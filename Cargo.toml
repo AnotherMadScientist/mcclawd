@@ -6,6 +6,7 @@ members = [
     "crates/mcclawd-tools",
     "crates/mcclawd-channels",
     "crates/mcclawd-tasks",
+    "crates/mcclawd-swarm",
     "crates/mcclawd-api",
 ]
 
@@ -100,4 +101,5 @@ mcclawd-agent = { path = "crates/mcclawd-agent" }
 mcclawd-tools = { path = "crates/mcclawd-tools" }
 mcclawd-channels = { path = "crates/mcclawd-channels" }
 mcclawd-tasks = { path = "crates/mcclawd-tasks" }
+mcclawd-swarm = { path = "crates/mcclawd-swarm" }
 mcclawd-api = { path = "crates/mcclawd-api" }
