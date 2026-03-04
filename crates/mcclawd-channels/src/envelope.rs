@@ -21,6 +21,7 @@ pub enum Platform {
     Telegram,
     Discord,
     Slack,
+    WhatsApp,
     Matrix,
     Email,
 }
@@ -33,6 +34,7 @@ impl std::fmt::Display for Platform {
             Platform::Telegram => write!(f, "telegram"),
             Platform::Discord => write!(f, "discord"),
             Platform::Slack => write!(f, "slack"),
+            Platform::WhatsApp => write!(f, "whatsapp"),
             Platform::Matrix => write!(f, "matrix"),
             Platform::Email => write!(f, "email"),
         }
@@ -201,6 +203,7 @@ mod tests {
             (Platform::Telegram, "telegram"),
             (Platform::Discord, "discord"),
             (Platform::Slack, "slack"),
+            (Platform::WhatsApp, "whatsapp"),
             (Platform::Matrix, "matrix"),
             (Platform::Email, "email"),
         ];

@@ -61,6 +61,9 @@ pub trait Channel: Send + Sync + 'static {
             ChannelKind::Web => Platform::Web,
             ChannelKind::Telegram => Platform::Telegram,
             ChannelKind::Discord => Platform::Discord,
+            ChannelKind::Slack => Platform::Slack,
+            ChannelKind::WhatsApp => Platform::WhatsApp,
+            ChannelKind::Email => Platform::Email,
             ChannelKind::Custom(_) => Platform::Cli, // fallback
         }
     }

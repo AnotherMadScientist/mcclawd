@@ -89,6 +89,9 @@ pub enum ChannelKind {
     Web,
     Telegram,
     Discord,
+    Slack,
+    WhatsApp,
+    Email,
     Custom(String),
 }
 
@@ -99,6 +102,9 @@ impl std::fmt::Display for ChannelKind {
             ChannelKind::Web => write!(f, "web"),
             ChannelKind::Telegram => write!(f, "telegram"),
             ChannelKind::Discord => write!(f, "discord"),
+            ChannelKind::Slack => write!(f, "slack"),
+            ChannelKind::WhatsApp => write!(f, "whatsapp"),
+            ChannelKind::Email => write!(f, "email"),
             ChannelKind::Custom(name) => write!(f, "{}", name),
         }
     }
@@ -278,6 +284,9 @@ mod tests {
         assert_eq!(ChannelKind::Web.to_string(), "web");
         assert_eq!(ChannelKind::Telegram.to_string(), "telegram");
         assert_eq!(ChannelKind::Discord.to_string(), "discord");
-        assert_eq!(ChannelKind::Custom("slack".into()).to_string(), "slack");
+        assert_eq!(ChannelKind::Slack.to_string(), "slack");
+        assert_eq!(ChannelKind::WhatsApp.to_string(), "whatsapp");
+        assert_eq!(ChannelKind::Email.to_string(), "email");
+        assert_eq!(ChannelKind::Custom("matrix".into()).to_string(), "matrix");
     }
 }
