@@ -1,6 +1,45 @@
+# Rust
 /target
+**/*.rs.bk
+*.pdb
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.venv/
+venv/
+*.so
+
+# Node
+node_modules/
+.pnpm-store/
+dist/
+*.tsbuildinfo
+
+# IDE / Editor
 *.swp
 *.swo
 .DS_Store
-secrets.enc
+.idea/
+.vscode/
+*.iml
+
+# Environment / Secrets
 .env
+.env.*
+secrets.enc
+
+# Test artifacts
+ui/test-results/
+ui/playwright-report/
+
+# Docker images (large binaries)
+docker/images/
+
+# Misc
+*.log

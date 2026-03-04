@@ -1,36 +1,42 @@
-//! Integration tests for MCP tool discovery via rmcp StreamableHttp.
+//! Integration tests for MCP tool discovery via AgentGateway.
 //!
-//! Direct tests: Connect to supergateway MCP servers on exposed ports.
-//!   Requires: `docker run -d --rm -v mcclawd_mcclawd-data:/data -p 8003:8000 mcclawd-mcp-filesystem`
+//! All MCP servers run as stdio subprocesses inside the AgentGateway container.
+//! Connect via AgentGateway on port 3000.
 //!
-//! AgentGateway tests: Connect via AgentGateway proxy on port 3000.
-//!   Requires: `docker compose up -d`
-//!   Note: AgentGateway proxy may have session/connection issues with rmcp 0.13.
-//!
+//! Requires: `docker compose up -d`
 //! Run: `cargo test -p mcclawd-tools --test mcp_integration -- --ignored --nocapture`
 
 use mcclawd_tools::mcp::McpClient;
 
 #[tokio::test]
 #[ignore]
-async fn discovers_tools_from_supergateway_direct() {
-    let client = McpClient::new("http://localhost:8003");
+async fn discovers_tools_via_agentgateway() {
+    let client = McpClient::new("http://localhost:3000");
     let conn = client
         .connect()
         .await
-        .expect("Supergateway filesystem should be running on port 8003");
+        .expect("AgentGateway should be running on port 3000");
 
     let tools = conn.tools();
-    assert!(!tools.is_empty(), "Should discover filesystem tools");
+    assert!(!tools.is_empty(), "Should discover MCP tools");
 
     let names = conn.tool_names();
     println!("Discovered {} MCP tools: {:?}", tools.len(), names);
 
+    // Should have tools from all 3 servers (filesystem, langextract, scrapling)
     assert!(
-        names
-            .iter()
-            .any(|n| n.contains("read") || n.contains("list") || n.contains("directory")),
+        names.iter().any(|n| n.contains("filesystem")),
         "Should find filesystem tools, got: {:?}",
+        names
+    );
+    assert!(
+        names.iter().any(|n| n.contains("langextract")),
+        "Should find langextract tools, got: {:?}",
+        names
+    );
+    assert!(
+        names.iter().any(|n| n.contains("scrapling")),
+        "Should find scrapling tools, got: {:?}",
         names
     );
 
@@ -40,14 +46,17 @@ async fn discovers_tools_from_supergateway_direct() {
 #[tokio::test]
 #[ignore]
 async fn filesystem_tool_lists_data_directory() {
-    let client = McpClient::new("http://localhost:8003");
+    let client = McpClient::new("http://localhost:3000");
     let conn = client
         .connect()
         .await
-        .expect("Supergateway filesystem should be running on port 8003");
+        .expect("AgentGateway should be running on port 3000");
 
     let result = conn
-        .call_tool("list_directory", serde_json::json!({ "path": "/data" }))
+        .call_tool(
+            "filesystem_list_directory",
+            serde_json::json!({ "path": "/data" }),
+        )
         .await;
 
     println!("list_directory result: {:?}", result);

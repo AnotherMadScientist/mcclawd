@@ -1,5 +1,5 @@
-# AgentGateway — multiplexes MCP tool calls to containerized MCP servers.
-# Each MCP server runs in its own Docker container with supergateway SSE endpoint.
+# AgentGateway — multiplexes MCP tool calls via stdio subprocesses.
+# Uses stdio targets to avoid HTTP upstream body-read bug in AgentGateway.
 #
 # Phase 0: This file is static. Phase 1+: generated dynamically from mcp.toml.
 binds:
@@ -10,13 +10,15 @@ binds:
               - mcp:
                   targets:
                     - name: langextract
-                      sse:
-                        host: http://mcp-langextract:8000
+                      stdio:
+                        cmd: /usr/local/bin/fastmcp
+                        args: ["run", "/opt/langextract-mcp/src/langextract_mcp/server.py"]
 
                     - name: scrapling
-                      sse:
-                        host: http://mcp-scrapling:8000
+                      stdio:
+                        cmd: /usr/local/bin/scrapling-fetch-mcp
 
                     - name: filesystem
-                      sse:
-                        host: http://mcp-filesystem:8000
+                      stdio:
+                        cmd: /usr/bin/mcp-server-filesystem
+                        args: ["/data"]

@@ -38,7 +38,9 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
   }
 
   if (res.status === 204) return undefined as T;
-  return res.json();
+  const text = await res.text();
+  if (!text) return undefined as T;
+  return JSON.parse(text);
 }
 
 export const api = {
@@ -70,10 +72,16 @@ export const api = {
   },
   secrets: {
     list: () => apiFetch<{ name: string }[]>("/api/secrets"),
+    get: (name: string) => apiFetch<{ name: string; value: string }>(`/api/secrets/${name}`),
     add: (name: string, value: string) =>
       apiFetch<void>("/api/secrets", {
         method: "POST",
         body: JSON.stringify({ name, value }),
+      }),
+    update: (name: string, value: string) =>
+      apiFetch<void>(`/api/secrets/${name}`, {
+        method: "PUT",
+        body: JSON.stringify({ value }),
       }),
     delete: (name: string) => apiFetch<void>(`/api/secrets/${name}`, { method: "DELETE" }),
   },

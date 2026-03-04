@@ -1,11 +1,14 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Plus, Trash2 } from "lucide-react";
+import { KeyRound, Plus, Trash2, Eye, EyeOff, Pencil, Check, X } from "lucide-react";
 import { api } from "../api/client";
 
 export function SecretsPage() {
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
+  const [revealed, setRevealed] = useState<Record<string, string>>({});
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
   const queryClient = useQueryClient();
 
   const { data: secrets = [] } = useQuery({
@@ -27,11 +30,64 @@ export function SecretsPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["secrets"] }),
   });
 
+  const update = useMutation({
+    mutationFn: ({ n, v }: { n: string; v: string }) => api.secrets.update(n, v),
+    onSuccess: () => {
+      setEditing(null);
+      setEditValue("");
+      // Clear revealed cache for updated secret
+      setRevealed((prev) => {
+        const next = { ...prev };
+        delete next[editing!];
+        return next;
+      });
+      queryClient.invalidateQueries({ queryKey: ["secrets"] });
+    },
+  });
+
+  const toggleReveal = async (secretName: string) => {
+    if (revealed[secretName] !== undefined) {
+      setRevealed((prev) => {
+        const next = { ...prev };
+        delete next[secretName];
+        return next;
+      });
+    } else {
+      try {
+        const data = await api.secrets.get(secretName);
+        setRevealed((prev) => ({ ...prev, [secretName]: data.value }));
+      } catch {
+        // ignore errors
+      }
+    }
+  };
+
+  const startEdit = async (secretName: string) => {
+    try {
+      const data = await api.secrets.get(secretName);
+      setEditValue(data.value);
+      setEditing(secretName);
+    } catch {
+      // ignore
+    }
+  };
+
+  const cancelEdit = () => {
+    setEditing(null);
+    setEditValue("");
+  };
+
+  const saveEdit = (secretName: string) => {
+    if (editValue) {
+      update.mutate({ n: secretName, v: editValue });
+    }
+  };
+
   return (
     <div className="max-w-2xl mx-auto space-y-6">
       <h1 className="text-2xl font-bold">Secrets</h1>
       <p className="text-sm text-muted-foreground">
-        Encrypted secrets for API keys. Values are never displayed.
+        Encrypted secrets for API keys. Click the eye icon to reveal values.
       </p>
 
       <div className="flex gap-3">
@@ -62,18 +118,74 @@ export function SecretsPage() {
         {secrets.map((s) => (
           <div
             key={s.name}
+            data-testid={`secret-row-${s.name}`}
             className="flex items-center justify-between p-4 rounded-xl bg-card border border-border"
           >
-            <div className="flex items-center gap-3">
-              <KeyRound className="w-4 h-4 text-amber-400" />
+            <div className="flex items-center gap-3 flex-1 min-w-0">
+              <KeyRound className="w-4 h-4 text-amber-400 shrink-0" />
               <span className="text-sm font-mono">{s.name}</span>
+              {editing === s.name ? (
+                <input
+                  type="text"
+                  value={editValue}
+                  onChange={(e) => setEditValue(e.target.value)}
+                  aria-label="Edit secret value"
+                  className="flex-1 px-3 py-1 rounded-lg bg-background border border-border text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/30"
+                />
+              ) : revealed[s.name] !== undefined ? (
+                <span className="text-sm font-mono text-muted-foreground" data-testid="revealed-value">
+                  {revealed[s.name]}
+                </span>
+              ) : null}
             </div>
-            <button
-              onClick={() => remove.mutate(s.name)}
-              className="p-2 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-            >
-              <Trash2 className="w-4 h-4" />
-            </button>
+            <div className="flex items-center gap-1 shrink-0">
+              {editing === s.name ? (
+                <>
+                  <button
+                    onClick={() => saveEdit(s.name)}
+                    aria-label="Save secret"
+                    className="p-2 rounded-lg text-muted-foreground hover:text-green-500 hover:bg-green-500/10 transition-colors"
+                  >
+                    <Check className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={cancelEdit}
+                    aria-label="Cancel edit"
+                    className="p-2 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={() => toggleReveal(s.name)}
+                    aria-label={revealed[s.name] !== undefined ? "Hide secret" : "Show secret"}
+                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                  >
+                    {revealed[s.name] !== undefined ? (
+                      <EyeOff className="w-4 h-4" />
+                    ) : (
+                      <Eye className="w-4 h-4" />
+                    )}
+                  </button>
+                  <button
+                    onClick={() => startEdit(s.name)}
+                    aria-label="Edit secret"
+                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                  >
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => remove.mutate(s.name)}
+                    aria-label="Delete secret"
+                    className="p-2 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </>
+              )}
+            </div>
           </div>
         ))}
         {secrets.length === 0 && (

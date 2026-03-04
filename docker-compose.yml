@@ -1,63 +1,17 @@
-# Development stack — MCP servers + AgentGateway
+# Development stack — Custom AgentGateway with MCP servers as stdio subprocesses.
+# All MCP servers run inside the AgentGateway container (stdio targets).
 # Production: mc manages containers directly via bollard (Phase 1+)
 services:
   agentgateway:
-    image: cr.agentgateway.dev/agentgateway:1.0.0-alpha.3
-    command: ["-f", "/config/agentgateway.yaml"]
+    build:
+      context: ./docker/agentgateway
     ports:
       - "3000:3000"
     volumes:
       - ./config/agentgateway.yaml:/config/agentgateway.yaml:ro
-    depends_on:
-      mcp-langextract:
-        condition: service_healthy
-      mcp-scrapling:
-        condition: service_healthy
-      mcp-filesystem:
-        condition: service_healthy
-    restart: unless-stopped
-
-  mcp-langextract:
-    build:
-      context: ./docker/mcp-langextract
-    ports:
-      - "8001:8000"
+      - mcclawd-data:/data
     environment:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-    healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8000/healthz',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    restart: unless-stopped
-
-  mcp-scrapling:
-    build:
-      context: ./docker/mcp-scrapling
-    ports:
-      - "8002:8000"
-    healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8000/healthz',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    restart: unless-stopped
-
-  mcp-filesystem:
-    build:
-      context: ./docker/mcp-filesystem
-    ports:
-      - "8003:8000"
-    volumes:
-      - mcclawd-data:/data
-    healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8000/healthz',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
     restart: unless-stopped
 
 volumes:

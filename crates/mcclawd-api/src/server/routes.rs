@@ -1,5 +1,5 @@
 use axum::{
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 
@@ -39,7 +39,12 @@ pub fn api_router() -> Router<AppState> {
             "/api/secrets",
             get(secrets::list_secrets).post(secrets::create_secret),
         )
-        .route("/api/secrets/{name}", delete(secrets::delete_secret))
+        .route(
+            "/api/secrets/{name}",
+            get(secrets::get_secret)
+                .put(secrets::update_secret)
+                .delete(secrets::delete_secret),
+        )
         // Config
         .route(
             "/api/config",

@@ -12,9 +12,20 @@ pub struct SecretEntry {
     pub name: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct SecretValue {
+    pub name: String,
+    pub value: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateSecretRequest {
     pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSecretRequest {
     pub value: String,
 }
 
@@ -42,6 +53,38 @@ pub async fn create_secret(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     Ok(StatusCode::CREATED)
+}
+
+/// GET /api/secrets/{name} — reveal a secret's value from the encrypted vault
+pub async fn get_secret(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<SecretValue>, StatusCode> {
+    let guard = state.secrets.read().await;
+    let backend = guard.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let value = backend.get(&name).await.map_err(|e| {
+        tracing::error!("Failed to get secret: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    match value {
+        Some(v) => Ok(Json(SecretValue { name, value: v })),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// PUT /api/secrets/{name} — update a secret's value in the encrypted vault
+pub async fn update_secret(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<UpdateSecretRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let guard = state.secrets.read().await;
+    let backend = guard.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    backend.set(&name, &body.value).await.map_err(|e| {
+        tracing::error!("Failed to update secret: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// DELETE /api/secrets/{name} — remove a secret from the encrypted vault
