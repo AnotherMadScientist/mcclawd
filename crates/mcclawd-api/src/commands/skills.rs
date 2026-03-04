@@ -1,7 +1,19 @@
+use mcclawd_core::clawhub::client::ClawHubClient;
+use mcclawd_core::clawhub::installer::SkillInstaller;
+use mcclawd_core::config::McclawdConfig;
 use mcclawd_core::skill_loader::SkillLoader;
 use mcclawd_core::skill_parser::parse_skill_md;
 use std::path::PathBuf;
 
+/// Load config and build a SkillInstaller from it.
+fn make_installer() -> anyhow::Result<SkillInstaller> {
+    let config = McclawdConfig::default();
+    let client = ClawHubClient::new(&config.skills.clawhub_api);
+    let skills_dir = config.skills.managed_dir.clone();
+    Ok(SkillInstaller::new(client, skills_dir))
+}
+
+/// mc skills list — list all installed skills.
 pub async fn list() -> anyhow::Result<()> {
     let root = std::env::current_dir()?;
     let loader = SkillLoader::new(root);
@@ -27,9 +39,14 @@ pub async fn list() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// mc skills info <name> — show detailed skill info.
 pub async fn info(name: &str) -> anyhow::Result<()> {
     let root = std::env::current_dir()?;
-    let skill_path = root.join(".mcclawd").join("skills").join(name).join("SKILL.md");
+    let skill_path = root
+        .join(".mcclawd")
+        .join("skills")
+        .join(name)
+        .join("SKILL.md");
 
     if !skill_path.exists() {
         anyhow::bail!("Skill '{}' not found at {}", name, skill_path.display());
@@ -62,45 +79,97 @@ pub async fn info(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn install(source: &str) -> anyhow::Result<()> {
-    let source_path = PathBuf::from(source);
-    let skill_md = source_path.join("SKILL.md");
+/// mc skills search <query> — search the ClawHub registry.
+pub async fn search(query: &str) -> anyhow::Result<()> {
+    let config = McclawdConfig::default();
+    let client = ClawHubClient::new(&config.skills.clawhub_api);
+    let results = client.search(query, 0).await?;
 
-    if !skill_md.exists() {
-        anyhow::bail!("No SKILL.md found at {}", skill_md.display());
+    if results.skills.is_empty() {
+        println!("No skills found for '{}'", query);
+        return Ok(());
     }
 
-    let content = std::fs::read_to_string(&skill_md)?;
-    let skill = parse_skill_md(&content)?;
-
-    let root = std::env::current_dir()?;
-    let dest = root.join(".mcclawd").join("skills").join(&skill.name);
-
-    if dest.exists() {
-        anyhow::bail!(
-            "Skill '{}' already installed at {}. Remove first.",
+    println!(
+        "{:<25} {:<10} {:<15} {}",
+        "NAME", "VERSION", "AUTHOR", "DESCRIPTION"
+    );
+    println!("{}", "-".repeat(70));
+    for skill in &results.skills {
+        println!(
+            "{:<25} {:<10} {:<15} {}",
             skill.name,
-            dest.display()
+            skill.version,
+            skill.author,
+            truncate(&skill.description, 30)
         );
     }
-
-    copy_dir_all(&source_path, &dest)?;
-    println!("Installed skill '{}' v{}", skill.name, skill.version);
+    println!(
+        "\n{} of {} results shown.",
+        results.skills.len(),
+        results.total
+    );
     Ok(())
 }
 
-fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> anyhow::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let dest_path = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_all(&entry.path(), &dest_path)?;
-        } else {
-            std::fs::copy(entry.path(), dest_path)?;
+/// mc skills install <source> — install from local path or registry.
+/// Detects local path vs registry name. Supports name@version syntax.
+pub async fn install(source: &str) -> anyhow::Result<()> {
+    let source_path = PathBuf::from(source);
+
+    if source_path.exists() && source_path.join("SKILL.md").exists() {
+        // Local install path
+        let installer = make_installer()?;
+        let info = installer.install_from_local(&source_path)?;
+        println!(
+            "Installed skill '{}' v{} from local path",
+            info.name, info.version
+        );
+    } else {
+        // Registry install: parse name[@version]
+        let (name, version) = parse_skill_ref(source);
+        let installer = make_installer()?;
+        let info = installer
+            .install_from_registry(name, version)
+            .await?;
+        println!(
+            "Installed skill '{}' v{} from ClawHub registry",
+            info.name, info.version
+        );
+    }
+
+    Ok(())
+}
+
+/// mc skills upgrade <name> — upgrade to latest version.
+pub async fn upgrade(name: &str) -> anyhow::Result<()> {
+    let installer = make_installer()?;
+    let info = installer.upgrade(name).await?;
+    println!(
+        "Upgraded skill '{}' to v{}",
+        info.name, info.version
+    );
+    Ok(())
+}
+
+/// mc skills uninstall <name> — remove an installed skill.
+pub async fn uninstall(name: &str) -> anyhow::Result<()> {
+    let installer = make_installer()?;
+    installer.uninstall(name)?;
+    println!("Uninstalled skill '{}'", name);
+    Ok(())
+}
+
+/// Parse "name@version" or "name" into (name, Option<version>).
+fn parse_skill_ref(input: &str) -> (&str, Option<&str>) {
+    if let Some(idx) = input.rfind('@') {
+        let name = &input[..idx];
+        let version = &input[idx + 1..];
+        if !name.is_empty() && !version.is_empty() {
+            return (name, Some(version));
         }
     }
-    Ok(())
+    (input, None)
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -108,5 +177,53 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..max - 3])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_skill_ref_name_only() {
+        let (name, version) = parse_skill_ref("code-review");
+        assert_eq!(name, "code-review");
+        assert_eq!(version, None);
+    }
+
+    #[test]
+    fn test_parse_skill_ref_with_version() {
+        let (name, version) = parse_skill_ref("code-review@1.2.0");
+        assert_eq!(name, "code-review");
+        assert_eq!(version, Some("1.2.0"));
+    }
+
+    #[test]
+    fn test_parse_skill_ref_trailing_at() {
+        let (name, version) = parse_skill_ref("code-review@");
+        assert_eq!(name, "code-review@");
+        assert_eq!(version, None);
+    }
+
+    #[test]
+    fn test_parse_skill_ref_leading_at() {
+        let (name, version) = parse_skill_ref("@1.0.0");
+        assert_eq!(name, "@1.0.0");
+        assert_eq!(version, None);
+    }
+
+    #[test]
+    fn test_truncate_short() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_long() {
+        assert_eq!(truncate("hello world foo bar", 10), "hello w...");
+    }
+
+    #[test]
+    fn test_truncate_exact() {
+        assert_eq!(truncate("hello", 5), "hello");
     }
 }
