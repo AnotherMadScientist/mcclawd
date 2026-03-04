@@ -30,3 +30,6 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 dirs = { workspace = true }
 jsonwebtoken = { workspace = true }
+bollard = { workspace = true }
+tar = { workspace = true }
+futures-util = { workspace = true }
