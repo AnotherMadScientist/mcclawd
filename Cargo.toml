@@ -86,6 +86,9 @@ tar = "0.4"
 # Platform dirs
 dirs = "6"
 
+# Testing
+tempfile = "3"
+
 # Internal crates
 mcclawd-core = { path = "crates/mcclawd-core" }
 mcclawd-agent = { path = "crates/mcclawd-agent" }
