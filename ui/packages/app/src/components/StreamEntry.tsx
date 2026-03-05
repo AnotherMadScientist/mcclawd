@@ -1,18 +1,128 @@
+import { useState, useRef, useEffect } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { AlertCircle, FileText, User } from "lucide-react";
+import { AlertCircle, FileText, User, RotateCcw, Pencil, Check, X } from "lucide-react";
 import { cn } from "../lib/utils";
 import type { StreamEvent } from "../hooks/useTaskStream";
 
-export function StreamEntry({ event }: { event: StreamEvent }) {
+interface StreamEntryProps {
+  event: StreamEvent;
+  onRetry?: (message: string) => void;
+  onEditRetry?: (message: string) => void;
+}
+
+export function StreamEntry({ event, onRetry, onEditRetry }: StreamEntryProps) {
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState(event.content);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (editing && textareaRef.current) {
+      textareaRef.current.focus();
+      const len = textareaRef.current.value.length;
+      textareaRef.current.setSelectionRange(len, len);
+      // Auto-resize
+      textareaRef.current.style.height = "auto";
+      textareaRef.current.style.height = textareaRef.current.scrollHeight + "px";
+    }
+  }, [editing]);
+
+  const handleEditSubmit = () => {
+    const trimmed = editValue.trim();
+    if (trimmed && onEditRetry) {
+      onEditRetry(trimmed);
+    }
+    setEditing(false);
+  };
+
+  const handleEditCancel = () => {
+    setEditValue(event.content);
+    setEditing(false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleEditSubmit();
+    }
+    if (e.key === "Escape") {
+      handleEditCancel();
+    }
+  };
+
   if (event.type === "user") {
     return (
-      <div className="flex justify-end">
+      <div className="group flex justify-end">
         <div className="flex items-start gap-3 max-w-[80%]">
+          {/* Action buttons — visible on group hover, hidden during edit */}
+          {!editing && (onRetry || onEditRetry) && (
+            <div className="flex flex-col gap-1 self-center opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+              {onRetry && (
+                <button
+                  onClick={() => onRetry(event.content)}
+                  title="Retry"
+                  className="p-1 rounded text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700/60 transition-colors"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                </button>
+              )}
+              {onEditRetry && (
+                <button
+                  onClick={() => {
+                    setEditValue(event.content);
+                    setEditing(true);
+                  }}
+                  title="Edit and retry"
+                  className="p-1 rounded text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700/60 transition-colors"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Message bubble */}
           <div className="rounded-2xl rounded-tr-sm bg-primary/15 border border-primary/20 px-4 py-2.5">
-            <p className="text-sm text-foreground whitespace-pre-wrap">{event.content}</p>
+            {editing ? (
+              <div className="flex flex-col gap-2">
+                <textarea
+                  ref={textareaRef}
+                  value={editValue}
+                  onChange={(e) => {
+                    setEditValue(e.target.value);
+                    e.target.style.height = "auto";
+                    e.target.style.height = e.target.scrollHeight + "px";
+                  }}
+                  onKeyDown={handleKeyDown}
+                  rows={1}
+                  className="w-full resize-none bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground min-w-[200px]"
+                />
+                <div className="flex items-center gap-1.5 justify-end">
+                  <button
+                    onClick={handleEditCancel}
+                    title="Cancel"
+                    className="flex items-center gap-1 px-2 py-0.5 rounded text-xs text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/60 transition-colors"
+                  >
+                    <X className="w-3 h-3" />
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleEditSubmit}
+                    title="Send"
+                    disabled={!editValue.trim()}
+                    className="flex items-center gap-1 px-2 py-0.5 rounded text-xs text-primary hover:text-primary/80 hover:bg-primary/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Check className="w-3 h-3" />
+                    Send
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm text-foreground whitespace-pre-wrap">{event.content}</p>
+            )}
           </div>
+
           <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center shrink-0">
             <User className="w-4 h-4 text-primary" />
           </div>

@@ -73,6 +73,32 @@ export function TaskDetailPage() {
     }
   };
 
+  const handleRetry = useCallback(async (message: string) => {
+    if (!id || sending) return;
+    setSending(true);
+    try {
+      await api.tasks.sendMessage(id, message);
+      reconnect(message);
+    } catch (err) {
+      console.error("Failed to retry message:", err);
+    } finally {
+      setSending(false);
+    }
+  }, [id, sending, reconnect]);
+
+  const handleEditRetry = useCallback(async (message: string) => {
+    if (!id || sending) return;
+    setSending(true);
+    try {
+      await api.tasks.sendMessage(id, message);
+      reconnect(message);
+    } catch (err) {
+      console.error("Failed to send edited message:", err);
+    } finally {
+      setSending(false);
+    }
+  }, [id, sending, reconnect]);
+
   return (
     <div className="max-w-4xl mx-auto flex flex-col h-full">
       <div className="flex items-center justify-between py-4">
@@ -120,7 +146,12 @@ export function TaskDetailPage() {
         )}
 
         {events.map((event, i) => (
-          <StreamEntry key={i} event={event} />
+          <StreamEntry
+            key={i}
+            event={event}
+            onRetry={event.type === "user" ? handleRetry : undefined}
+            onEditRetry={event.type === "user" ? handleEditRetry : undefined}
+          />
         ))}
 
         {statusMessage && (

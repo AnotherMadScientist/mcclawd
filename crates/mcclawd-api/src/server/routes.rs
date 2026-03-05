@@ -37,6 +37,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             post(webauthn_auth::register_finish),
         )
         .route("/api/auth/login/start", post(webauthn_auth::login_start))
+        .route("/api/auth/credentials", delete(webauthn_auth::reset_credentials))
         .route(
             "/api/auth/login/finish",
             post(webauthn_auth::login_finish),

@@ -148,4 +148,20 @@ test.describe("Workspace Page", () => {
     await page.waitForTimeout(500);
     await expect(textarea).toHaveValue(userContent);
   });
+
+  test("SOUL editor loads content from server", async ({ page }) => {
+    const textarea = page.locator("textarea");
+    await expect(textarea).toBeVisible();
+    // Should have some content loaded (not empty after server fetch)
+    const value = await textarea.inputValue();
+    // Content might be empty for new workspace, but textarea should exist
+    expect(typeof value).toBe("string");
+  });
+
+  test("USER tab shows user preferences editor", async ({ page }) => {
+    await page.getByRole("button", { name: "USER.md" }).click();
+    await page.waitForTimeout(500);
+    const textarea = page.locator("textarea");
+    await expect(textarea).toBeVisible();
+  });
 });

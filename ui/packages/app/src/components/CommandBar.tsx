@@ -353,27 +353,15 @@ export function CommandBar() {
     }
   }, [response]);
 
-  // Check if response contains an action
+  // Check if response contains an action — only parse JSON that starts with {"action":
   useEffect(() => {
     if (state === "idle" && response) {
-      const actionMatch = response.match(/\{[^{}]*"action"\s*:/);
-      if (actionMatch) {
+      const trimmed = response.trim();
+      if (trimmed.startsWith('{"action":')) {
         try {
-          const jsonStart = response.indexOf(actionMatch[0]);
-          let depth = 0;
-          let jsonEnd = jsonStart;
-          for (let i = jsonStart; i < response.length; i++) {
-            if (response[i] === "{") depth++;
-            if (response[i] === "}") depth--;
-            if (depth === 0) {
-              jsonEnd = i + 1;
-              break;
-            }
-          }
-          const jsonStr = response.slice(jsonStart, jsonEnd);
-          executeAction(jsonStr);
+          executeAction(trimmed);
         } catch {
-          // Not valid JSON, ignore
+          // Malformed JSON — will render as text
         }
       }
     }

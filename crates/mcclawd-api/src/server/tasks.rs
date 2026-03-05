@@ -5,6 +5,7 @@ use axum::{
     response::Response,
     Json,
 };
+use base64::Engine;
 use mcclawd_agent::engine::AgentEngine;
 use mcclawd_agent::workspace::WorkspaceLoader;
 use mcclawd_channels::{ChannelStatus, OutboundChunk};
@@ -12,7 +13,11 @@ use mcclawd_core::types::TaskId;
 use mcclawd_tasks::manager::{TaskRecord, TaskStatus};
 use futures::StreamExt;
 use rig::agent::MultiTurnStreamItem;
-use rig::completion::message::Message as RigMessage;
+use rig::OneOrMany;
+use rig::completion::message::{
+    DocumentSourceKind, Image, ImageMediaType, Message as RigMessage, MimeType,
+    UserContent,
+};
 use rig::streaming::{StreamedAssistantContent, StreamingChat};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -150,15 +155,39 @@ async fn run_agent(
     };
     broadcast(&tx, OutboundChunk::TextDelta("Workspace loaded".to_string()));
 
-    // 1b. Check for attached files and inject their content into the prompt
+    // 1b. Check for attached files — text files injected as prompt text,
+    //     images sent as multimodal content parts via rig's UserContent::Image
     let attachment_files = attachment_paths(&state, &task_id.0).await;
-    let prompt = if !attachment_files.is_empty() {
-        let mut augmented = prompt.to_string();
-        augmented.push_str("\n\n## Attached Files\n\n");
+    let mut text_augmented = prompt.to_string();
+    let mut image_parts: Vec<UserContent> = Vec::new();
+
+    if !attachment_files.is_empty() {
+        text_augmented.push_str("\n\n## Attached Files\n\n");
         for path in &attachment_files {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             let mime = mime_guess::from_path(path).first_or_octet_stream().to_string();
-            if mime.starts_with("text/") || mime.contains("json") || mime.contains("xml")
+
+            if let Some(image_media_type) = ImageMediaType::from_mime_type(&mime) {
+                // Image files: read bytes, base64-encode, add as multimodal content
+                match tokio::fs::read(path).await {
+                    Ok(bytes) => {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        image_parts.push(UserContent::Image(Image {
+                            data: DocumentSourceKind::Base64(b64),
+                            media_type: Some(image_media_type),
+                            detail: None,
+                            additional_params: None,
+                        }));
+                        text_augmented.push_str(&format!(
+                            "### Image: {} ({}, {}KB — sent as image content)\n\n",
+                            name, mime, bytes.len() / 1024
+                        ));
+                    }
+                    Err(_) => {
+                        text_augmented.push_str(&format!("### File: {} (could not read)\n\n", name));
+                    }
+                }
+            } else if mime.starts_with("text/") || mime.contains("json") || mime.contains("xml")
                 || mime.contains("markdown") || mime.contains("yaml") || mime.contains("toml")
                 || mime.contains("csv") || mime.contains("javascript") || mime.contains("typescript")
             {
@@ -166,14 +195,16 @@ async fn run_agent(
                 match tokio::fs::read_to_string(path).await {
                     Ok(content) => {
                         let truncated = if content.len() > 50_000 { &content[..50_000] } else { &content };
-                        augmented.push_str(&format!("### File: {}\n\n```\n{}\n```\n\n", name, truncated));
+                        // Escape triple backticks to prevent code-block breakout injection
+                        let safe_content = truncated.replace("```", "` ` `");
+                        text_augmented.push_str(&format!("### File: {}\n\n```\n{}\n```\n\n", name, safe_content));
                     }
                     Err(_) => {
-                        augmented.push_str(&format!("### File: {} (could not read)\n\n", name));
+                        text_augmented.push_str(&format!("### File: {} (could not read)\n\n", name));
                     }
                 }
             } else {
-                augmented.push_str(&format!("### File: {} ({}, {} — binary file, content not included)\n\n", name, mime,
+                text_augmented.push_str(&format!("### File: {} ({}, {} — binary file, content not included)\n\n", name, mime,
                     match tokio::fs::metadata(path).await {
                         Ok(m) => format!("{}KB", m.len() / 1024),
                         Err(_) => "unknown size".to_string(),
@@ -181,11 +212,19 @@ async fn run_agent(
                 ));
             }
         }
-        augmented
+    }
+
+    // Build the prompt message — multimodal if images attached, plain text otherwise
+    let prompt_message: RigMessage = if image_parts.is_empty() {
+        text_augmented.as_str().into()
     } else {
-        prompt.to_string()
+        let mut parts = vec![UserContent::text(&text_augmented)];
+        parts.extend(image_parts);
+        RigMessage::User {
+            content: OneOrMany::many(parts).unwrap_or_else(|_| OneOrMany::one(UserContent::text(&text_augmented))),
+        }
     };
-    let prompt = prompt.as_str();
+    let prompt = text_augmented.as_str();
 
     // 2. Get API key from secrets backend
     let api_key = {
@@ -256,7 +295,7 @@ async fn run_agent(
         tracing::info!(task_id = %task_id.0, turns = chat_history.len(), "Resuming with conversation history");
     }
 
-    let mut stream = agent.stream_chat(prompt, chat_history.clone()).await;
+    let mut stream = agent.stream_chat(prompt_message, chat_history.clone()).await;
 
     // Accumulate full response text for clean history persistence
     let mut accumulated_text = String::new();

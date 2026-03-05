@@ -72,6 +72,20 @@ export function LoginPage() {
             <Fingerprint className="w-4 h-4" />
             {loading ? "Authenticating..." : "Unlock with Biometric ID"}
           </button>
+
+          {import.meta.env.DEV && (
+            <button
+              type="button"
+              onClick={async () => {
+                if (!confirm("Reset biometric credentials? You will need to re-register.")) return;
+                await fetch("/api/auth/credentials", { method: "DELETE" });
+                window.location.href = "/setup";
+              }}
+              className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors"
+            >
+              Reset biometric key
+            </button>
+          )}
         </div>
       </div>
     </div>

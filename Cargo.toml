@@ -50,6 +50,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # YAML frontmatter (SKILL.md)
 gray_matter = "0.3"
 
+# Encoding
+base64 = "0.22"
+
 # Secrets
 aes-gcm-siv = "0.11"
 argon2 = "0.5"

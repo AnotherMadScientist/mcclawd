@@ -269,6 +269,13 @@ pub async fn register_finish(
     let key_path = vault_key_path(&data_dir);
     write_sensitive_file(&key_path, &vault_key).await?;
 
+    // Delete old secrets.enc — it was encrypted with the previous vault key and is now unreadable
+    let secrets_path = { let config = state.config.read().await; config.secrets_path() };
+    if secrets_path.exists() {
+        let _ = std::fs::remove_file(&secrets_path);
+        tracing::info!("Removed old secrets.enc (new vault key generated)");
+    }
+
     // Unlock vault with the new key
     unlock_vault_with_key(&state).await?;
 
@@ -368,4 +375,55 @@ pub async fn login_finish(
     tracing::info!("WebAuthn authentication successful, vault unlocked");
 
     Ok(Json(TokenResponse { token }))
+}
+
+/// DELETE /api/auth/credentials — reset biometric credentials (dev only).
+///
+/// Removes the vault key and WebAuthn credentials so the user can re-register.
+pub async fn reset_credentials(
+    State(state): State<AppState>,
+) -> Result<StatusCode, StatusCode> {
+    let data_dir = {
+        let config = state.config.read().await;
+        config.data_dir.clone()
+    };
+
+    // Remove WebAuthn credentials
+    let creds = credentials_path(&data_dir);
+    if creds.exists() {
+        std::fs::remove_file(&creds).map_err(|e| {
+            tracing::error!("Failed to remove credentials: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    }
+
+    // Remove vault key
+    let vault_key = data_dir.join("vault.key");
+    if vault_key.exists() {
+        std::fs::remove_file(&vault_key).map_err(|e| {
+            tracing::error!("Failed to remove vault key: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    }
+
+    // Remove secrets.enc — it was encrypted with the now-deleted vault key
+    let secrets_enc = {
+        let config = state.config.read().await;
+        config.secrets_path()
+    };
+    if secrets_enc.exists() {
+        std::fs::remove_file(&secrets_enc).map_err(|e| {
+            tracing::error!("Failed to remove secrets.enc: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    }
+
+    // Clear in-memory secrets state — vault is now locked
+    {
+        let mut secrets = state.secrets.write().await;
+        *secrets = None;
+    }
+
+    tracing::info!("Biometric credentials reset — all vault state cleared, user must re-register");
+    Ok(StatusCode::NO_CONTENT)
 }

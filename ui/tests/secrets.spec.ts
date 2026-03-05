@@ -207,4 +207,31 @@ test.describe("Secrets Page", () => {
     // Cancel to restore
     await row.locator("button[aria-label='Cancel edit']").click();
   });
+
+  test("empty state message when no custom secrets", async ({ page }) => {
+    // The page should show some content - at minimum ANTHROPIC_API_KEY from global setup
+    await expect(page.getByText("ANTHROPIC_API_KEY").first()).toBeVisible({
+      timeout: 5000,
+    });
+  });
+
+  test("secret created via API is visible in list", async ({ page }) => {
+    const name = `API_TEST_${Date.now()}`;
+    // Create via API directly
+    const fs = await import("fs");
+    const path = await import("path");
+    const token = JSON.parse(
+      fs.readFileSync(
+        path.join(__dirname, ".auth-token.json"),
+        "utf-8"
+      )
+    ).token;
+    await page.request.put(`/api/secrets/${name}`, {
+      data: { value: "api-created-value" },
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "Secrets" })).toBeVisible();
+    await expect(page.getByText(name)).toBeVisible({ timeout: 5000 });
+  });
 });

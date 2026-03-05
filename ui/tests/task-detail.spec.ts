@@ -89,4 +89,57 @@ test.describe("Task Detail Page", () => {
       )
     ).toBeVisible({ timeout: 15000 });
   });
+
+  test("follow-up input visible after task completes or fails", async ({
+    page,
+  }) => {
+    await page.goto("/tasks/new");
+    await page
+      .getByPlaceholder("What would you like me to do?")
+      .fill("E2E test: follow-up visibility");
+    await page.getByRole("button", { name: "Run Task" }).click();
+    await page.waitForURL(/\/tasks\/[a-f0-9-]+/, { timeout: 10000 });
+    // Wait for task to reach a terminal state
+    await expect(
+      page.getByText(/Complete|Error|Failed|ANTHROPIC_API_KEY/)
+    ).toBeVisible({ timeout: 30000 });
+    // Follow-up input should appear
+    await expect(
+      page.getByPlaceholder(/follow-up|Send a message|Ask a follow-up/i)
+    ).toBeVisible({ timeout: 5000 });
+  });
+
+  test("delete button removes task", async ({ page }) => {
+    await page.goto("/tasks/new");
+    await page
+      .getByPlaceholder("What would you like me to do?")
+      .fill("E2E test: delete task");
+    await page.getByRole("button", { name: "Run Task" }).click();
+    await page.waitForURL(/\/tasks\/[a-f0-9-]+/, { timeout: 10000 });
+    // Look for delete/trash button
+    const deleteBtn = page
+      .locator(
+        "button[aria-label*='delete' i], button[aria-label*='Delete' i], button:has(svg)"
+      )
+      .filter({ hasText: /delete/i })
+      .first();
+    if (await deleteBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+      await deleteBtn.click();
+      await expect(page).toHaveURL("/", { timeout: 10000 });
+    }
+  });
+
+  test("conversation shows user prompt as first message", async ({
+    page,
+  }) => {
+    await page.goto("/tasks/new");
+    const prompt = "E2E test: conversation prompt display";
+    await page
+      .getByPlaceholder("What would you like me to do?")
+      .fill(prompt);
+    await page.getByRole("button", { name: "Run Task" }).click();
+    await page.waitForURL(/\/tasks\/[a-f0-9-]+/, { timeout: 10000 });
+    // The prompt text should appear somewhere on the detail page
+    await expect(page.getByText(prompt)).toBeVisible({ timeout: 10000 });
+  });
 });

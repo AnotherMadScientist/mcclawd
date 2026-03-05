@@ -4,12 +4,30 @@ use std::io::{self, Write};
 
 fn get_backend() -> anyhow::Result<EncryptedFileBackend> {
     let config = McclawdConfig::default();
-    // Phase 0: hardcoded passphrase for local dev.
-    // Phase 1+: prompt or derive from keychain.
-    let passphrase = "mcclawd-local-dev";
+    let vault_key_path = config.data_dir.join("vault.key");
+    let passphrase = if vault_key_path.exists() {
+        let bytes = std::fs::read(&vault_key_path)?;
+        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    } else {
+        // Generate vault key if missing (first-time CLI use)
+        let key: [u8; 32] = rand::random();
+        if let Some(parent) = vault_key_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&vault_key_path, key)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &vault_key_path,
+                std::fs::Permissions::from_mode(0o600),
+            )?;
+        }
+        key.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
     Ok(EncryptedFileBackend::new(
         &config.secrets_path(),
-        passphrase,
+        &passphrase,
     )?)
 }
 
