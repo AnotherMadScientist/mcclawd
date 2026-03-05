@@ -12,6 +12,7 @@ use rig::completion::message::Message;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::fs;
 use tokio::sync::{broadcast, RwLock};
 use webauthn_rs::prelude::*;
 
@@ -64,7 +65,7 @@ impl AppState {
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
             tasks: Arc::new(RwLock::new(TaskManager::new())),
-            jwt_secret: uuid::Uuid::new_v4().to_string(),
+            jwt_secret: Self::load_or_create_jwt_secret()?,
             secrets: Arc::new(RwLock::new(None)),
             task_streams: Arc::new(RwLock::new(HashMap::new())),
             task_events: Arc::new(RwLock::new(HashMap::new())),
@@ -78,6 +79,32 @@ impl AppState {
             pg_store: None,
             scan_cache: Arc::new(DashMap::new()),
         })
+    }
+
+    /// Load JWT signing secret from `~/.mcclawd/jwt.key`, or generate and persist a new one.
+    /// Persisting the secret means JWT tokens survive server restarts (cargo-watch, etc.)
+    /// so frontend sessions are not invalidated on every code change.
+    fn load_or_create_jwt_secret() -> anyhow::Result<String> {
+        let path = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".mcclawd")
+            .join("jwt.key");
+        match fs::read_to_string(&path) {
+            Ok(s) if !s.trim().is_empty() => return Ok(s.trim().to_string()),
+            Ok(_) | Err(_) => {} // missing or empty — generate below
+        }
+        let secret = uuid::Uuid::new_v4().to_string();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, &secret)?;
+        // Restrict permissions (owner-only read/write)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(secret)
     }
 
     /// Create a broadcast channel for a task and return the sender.

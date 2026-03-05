@@ -24,6 +24,10 @@ export function useTaskStream(taskId: string | undefined) {
   // When true, the next TextDelta creates a new text event instead of appending.
   // Set on every StatusIndicator(Processing) so each LLM turn is a separate block.
   const newBlockRef = useRef(true);
+  // Prevent auto-reconnect after intentional close (unmount, user-initiated reconnect).
+  const intentionalCloseRef = useRef(false);
+  const doneRef = useRef(false);
+  const retryCountRef = useRef(0);
 
   const connect = useCallback(() => {
     if (!taskId) return;
@@ -40,9 +44,20 @@ export function useTaskStream(taskId: string | undefined) {
     ws.onopen = () => {
       setConnected(true);
       skipHistoryRef.current = false;
+      retryCountRef.current = 0; // reset on successful connection
     };
     ws.onclose = () => {
       setConnected(false);
+      // Auto-reconnect on unexpected close (server restart) — up to 5 retries with backoff
+      if (!intentionalCloseRef.current && !doneRef.current && retryCountRef.current < 5) {
+        const delay = Math.min(1000 * 2 ** retryCountRef.current, 8000);
+        retryCountRef.current += 1;
+        setTimeout(() => {
+          if (!intentionalCloseRef.current && !doneRef.current) {
+            connect();
+          }
+        }, delay);
+      }
     };
     ws.onmessage = (event) => {
       try {
@@ -54,6 +69,7 @@ export function useTaskStream(taskId: string | undefined) {
           newBlockRef.current = true;
           setStatusMessage(null);
           setDone(true);
+          doneRef.current = true;
           return;
         }
 
@@ -136,18 +152,26 @@ export function useTaskStream(taskId: string | undefined) {
     };
 
     return () => {
+      intentionalCloseRef.current = true;
       ws.close();
     };
   }, [taskId]);
 
   useEffect(() => {
+    intentionalCloseRef.current = false;
+    doneRef.current = false;
+    retryCountRef.current = 0;
     const cleanup = connect();
-    return cleanup;
+    return () => {
+      intentionalCloseRef.current = true;
+      cleanup?.();
+    };
   }, [connect]);
 
   /** Reconnect for follow-up — show user message immediately, server persists it */
   const reconnect = useCallback(
     (userMessage?: string) => {
+      intentionalCloseRef.current = true; // don't auto-reconnect the old WS
       if (wsRef.current) {
         wsRef.current.close();
       }
@@ -163,6 +187,9 @@ export function useTaskStream(taskId: string | undefined) {
       streamingRef.current = false;
       newBlockRef.current = true;
       skipHistoryRef.current = true;
+      retryCountRef.current = 0;
+      intentionalCloseRef.current = false; // allow auto-reconnect for new WS
+      doneRef.current = false;
       const timer = setTimeout(() => {
         connect();
       }, 300);
