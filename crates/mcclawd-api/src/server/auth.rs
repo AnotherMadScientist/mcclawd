@@ -113,11 +113,29 @@ pub async fn auth_middleware(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
 
-    let token = match auth_header {
+    // Check Authorization header first, then fall back to ?token= query param
+    // (needed for SSE EventSource and WebSocket which can't send headers)
+    let owned_token: String;
+    let token: &str = match auth_header {
         Some(h) if h.starts_with("Bearer ") => &h[7..],
         _ => {
-            return (StatusCode::UNAUTHORIZED, "Missing or invalid Authorization header")
-                .into_response();
+            // Fallback: check ?token= query param
+            match req.uri().query().and_then(|q| {
+                q.split('&')
+                    .find_map(|pair| pair.strip_prefix("token="))
+            }) {
+                Some(t) => {
+                    owned_token = t.to_string();
+                    &owned_token
+                }
+                None => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        "Missing or invalid Authorization header",
+                    )
+                        .into_response();
+                }
+            }
         }
     };
 

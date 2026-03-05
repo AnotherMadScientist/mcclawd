@@ -57,7 +57,7 @@ impl SkillInstaller {
             .client
             .download_skill(&meta.name, &meta.version)
             .await?;
-        self.extract_tar_gz(&bytes, &dest)?;
+        self.extract_package(&bytes, &dest)?;
 
         // Verify SKILL.md exists and parses
         let skill_md = dest.join("SKILL.md");
@@ -241,9 +241,30 @@ impl SkillInstaller {
         Ok(())
     }
 
-    /// Extract tar.gz bytes into a destination directory.
-    fn extract_tar_gz(&self, bytes: &[u8], dest: &Path) -> anyhow::Result<()> {
+    /// Extract a skill package (ZIP or tar.gz) into a destination directory.
+    fn extract_package(&self, bytes: &[u8], dest: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(dest)?;
+
+        // Try ZIP first (ClawHub serves ZIP packages)
+        let cursor = std::io::Cursor::new(bytes);
+        if let Ok(mut archive) = zip::ZipArchive::new(cursor) {
+            for i in 0..archive.len() {
+                let mut file = archive.by_index(i)?;
+                let outpath = dest.join(file.mangled_name());
+                if file.is_dir() {
+                    std::fs::create_dir_all(&outpath)?;
+                } else {
+                    if let Some(parent) = outpath.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let mut outfile = std::fs::File::create(&outpath)?;
+                    std::io::copy(&mut file, &mut outfile)?;
+                }
+            }
+            return Ok(());
+        }
+
+        // Fall back to tar.gz
         let decoder = flate2::read::GzDecoder::new(bytes);
         let mut archive = tar::Archive::new(decoder);
         archive.unpack(dest)?;
@@ -516,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_tar_gz() {
+    fn test_extract_package_tar_gz() {
         let tmp = tempfile::tempdir().unwrap();
 
         // Create a tar.gz in memory with a SKILL.md
@@ -541,9 +562,37 @@ mod tests {
         let dest = tmp.path().join("extracted");
         let client = ClawHubClient::new("https://api.clawhub.com");
         let installer = SkillInstaller::new(client, tmp.path().to_path_buf());
-        installer.extract_tar_gz(&gz_bytes, &dest).unwrap();
+        installer.extract_package(&gz_bytes, &dest).unwrap();
 
         assert!(dest.join("SKILL.md").exists());
+    }
+
+    #[test]
+    fn test_extract_package_zip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_content = sample_skill_md();
+
+        // Create a ZIP in memory with a SKILL.md
+        let mut zip_buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut zip_buf);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            writer.start_file("SKILL.md", options).unwrap();
+            std::io::Write::write_all(&mut writer, skill_content.as_bytes()).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let dest = tmp.path().join("extracted-zip");
+        let client = ClawHubClient::new("https://api.clawhub.com");
+        let installer = SkillInstaller::new(client, tmp.path().to_path_buf());
+        installer
+            .extract_package(zip_buf.get_ref(), &dest)
+            .unwrap();
+
+        assert!(dest.join("SKILL.md").exists());
+        let content = fs::read_to_string(dest.join("SKILL.md")).unwrap();
+        assert!(content.contains("test-skill"));
     }
 
     #[test]

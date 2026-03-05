@@ -133,15 +133,20 @@ pub async fn skill_content(
         return Ok(Json(serde_json::json!({ "name": name, "content": content })));
     }
 
-    // 2. Try downloading from ClawHub (get version from cache first)
+    // 2. Try downloading from ClawHub (get version from cache or API)
     let cache = build_cache(&state).await;
-    let version = cache
-        .get_skill(&name)
-        .await
-        .map(|s| s.version)
-        .unwrap_or_else(|| "latest".to_string());
-
     let client = ClawHubClient::new(&clawhub_api);
+    let version = match cache.get_skill(&name).await {
+        Some(s) => s.version,
+        None => {
+            // No cached version — fetch detail from ClawHub to get the latest version
+            match client.get_skill(&name, None).await {
+                Ok(meta) => meta.version,
+                Err(_) => "latest".to_string(),
+            }
+        }
+    };
+
     match client.download_skill_md(&name, &version).await {
         Ok(content) => Ok(Json(serde_json::json!({ "name": name, "content": content }))),
         Err(e) => {
