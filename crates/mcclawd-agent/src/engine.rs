@@ -8,6 +8,10 @@ use crate::mcp_integration::McpBundle;
 use crate::workspace::Workspace;
 use mcclawd_core::config::McclawdConfig;
 use mcclawd_tools::builtin::memory::{MemoryRecall, MemoryStore};
+use mcclawd_tools::system_tools::{
+    CreateTask, InstallSkill, ListSkills, ManageSecret, NavigateTo, ReadWorkspace, UninstallSkill,
+    UpdateWorkspace,
+};
 use rig::agent::Agent;
 use rig::client::CompletionClient;
 use rig::providers::anthropic::{self, completion::CLAUDE_4_SONNET};
@@ -42,7 +46,8 @@ impl AgentEngine {
         max_turns: usize,
         config: &McclawdConfig,
     ) -> anyhow::Result<(McclawdAgent, MemoryStore, Vec<McpBundle>)> {
-        let context = ContextBuilder::new(workspace);
+        let context = ContextBuilder::new(workspace)
+            .with_skills_dir(config.skills.managed_dir.clone());
         let system_prompt = context.build_system_prompt();
 
         let client = anthropic::Client::new(api_key)?;
@@ -65,5 +70,33 @@ impl AgentEngine {
 
         let agent = builder.build();
         Ok((agent, memory_store, bundles))
+    }
+
+    /// Build a system agent with UI control tools (no MCP, no memory tools).
+    ///
+    /// Used by the always-on system agent that handles voice/text commands
+    /// for navigation, task creation, skill management, etc.
+    pub async fn build_system_agent(
+        api_key: &str,
+        system_prompt: &str,
+    ) -> anyhow::Result<McclawdAgent> {
+        let client = anthropic::Client::new(api_key)?;
+
+        let agent = client
+            .agent(CLAUDE_4_SONNET)
+            .preamble(system_prompt)
+            .max_tokens(4096)
+            .default_max_turns(5)
+            .tool(NavigateTo)
+            .tool(CreateTask)
+            .tool(InstallSkill)
+            .tool(UninstallSkill)
+            .tool(ListSkills)
+            .tool(ManageSecret)
+            .tool(ReadWorkspace)
+            .tool(UpdateWorkspace)
+            .build();
+
+        Ok(agent)
     }
 }

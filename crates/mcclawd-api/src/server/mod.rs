@@ -11,6 +11,7 @@ pub mod security;
 pub mod skills_routes;
 pub mod state;
 pub mod swarms;
+pub mod system_agent;
 pub mod tasks;
 pub mod webauthn_auth;
 pub mod workspace;

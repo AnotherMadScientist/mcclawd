@@ -29,6 +29,7 @@ tower = { workspace = true }
 tower-http = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+dashmap = { workspace = true }
 dirs = { workspace = true }
 jsonwebtoken = { workspace = true }
 bollard = { workspace = true }
@@ -40,6 +41,8 @@ webauthn-rs-proto = { workspace = true }
 url = { workspace = true }
 rand = { workspace = true }
 sqlx = { workspace = true }
+tokio-util = { workspace = true }
+mime_guess = "2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

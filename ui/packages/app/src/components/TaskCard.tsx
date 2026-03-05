@@ -31,7 +31,7 @@ export function TaskCard({ task }: { task: Task }) {
       >
         <div className="flex items-start justify-between gap-4">
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-foreground truncate group-hover:text-primary transition-colors">
+            <p className="text-sm font-medium text-foreground line-clamp-2 break-words group-hover:text-primary transition-colors">
               {task.prompt}
             </p>
             <p className="text-xs text-muted-foreground mt-1">ID: {task.id.slice(0, 8)}</p>

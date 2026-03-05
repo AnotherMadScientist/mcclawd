@@ -242,9 +242,32 @@ impl SkillInstaller {
     }
 
     /// Extract a skill package (ZIP or tar.gz) into a destination directory.
+    /// Uses a temp directory for atomic extraction — if extraction fails,
+    /// the destination is not left in an inconsistent state.
     fn extract_package(&self, bytes: &[u8], dest: &Path) -> anyhow::Result<()> {
-        std::fs::create_dir_all(dest)?;
+        // Extract to a temp dir first, then rename on success
+        let tmp_dest = dest.with_extension("_extracting");
+        if tmp_dest.exists() {
+            std::fs::remove_dir_all(&tmp_dest)?;
+        }
+        std::fs::create_dir_all(&tmp_dest)?;
 
+        let result = self.extract_to_dir(bytes, &tmp_dest);
+        if result.is_err() {
+            let _ = std::fs::remove_dir_all(&tmp_dest);
+            return result;
+        }
+
+        // Atomic move: remove existing dest if any, rename temp to dest
+        if dest.exists() {
+            std::fs::remove_dir_all(dest)?;
+        }
+        std::fs::rename(&tmp_dest, dest)?;
+        Ok(())
+    }
+
+    /// Inner extraction logic — extracts ZIP or tar.gz into the given directory.
+    fn extract_to_dir(&self, bytes: &[u8], dest: &Path) -> anyhow::Result<()> {
         // Try ZIP first (ClawHub serves ZIP packages)
         let cursor = std::io::Cursor::new(bytes);
         if let Ok(mut archive) = zip::ZipArchive::new(cursor) {

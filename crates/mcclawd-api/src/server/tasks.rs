@@ -1,6 +1,8 @@
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
+    body::Body,
+    extract::{Multipart, Path, State},
+    http::{header, StatusCode},
+    response::Response,
     Json,
 };
 use mcclawd_agent::engine::AgentEngine;
@@ -13,6 +15,8 @@ use rig::agent::MultiTurnStreamItem;
 use rig::completion::message::Message as RigMessage;
 use rig::streaming::{StreamedAssistantContent, StreamingChat};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use tokio_util::io::ReaderStream;
 
 use super::state::AppState;
 
@@ -22,6 +26,14 @@ pub struct CreateTaskRequest {
     pub prompt: String,
     pub workspace: Option<String>,
     pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentMeta {
+    pub name: String,
+    pub size: u64,
+    pub content_type: String,
+    pub url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,6 +149,43 @@ async fn run_agent(
         }
     };
     broadcast(&tx, OutboundChunk::TextDelta("Workspace loaded".to_string()));
+
+    // 1b. Check for attached files and inject their content into the prompt
+    let attachment_files = attachment_paths(&state, &task_id.0).await;
+    let prompt = if !attachment_files.is_empty() {
+        let mut augmented = prompt.to_string();
+        augmented.push_str("\n\n## Attached Files\n\n");
+        for path in &attachment_files {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let mime = mime_guess::from_path(path).first_or_octet_stream().to_string();
+            if mime.starts_with("text/") || mime.contains("json") || mime.contains("xml")
+                || mime.contains("markdown") || mime.contains("yaml") || mime.contains("toml")
+                || mime.contains("csv") || mime.contains("javascript") || mime.contains("typescript")
+            {
+                // Text files: read and include content
+                match tokio::fs::read_to_string(path).await {
+                    Ok(content) => {
+                        let truncated = if content.len() > 50_000 { &content[..50_000] } else { &content };
+                        augmented.push_str(&format!("### File: {}\n\n```\n{}\n```\n\n", name, truncated));
+                    }
+                    Err(_) => {
+                        augmented.push_str(&format!("### File: {} (could not read)\n\n", name));
+                    }
+                }
+            } else {
+                augmented.push_str(&format!("### File: {} ({}, {} — binary file, content not included)\n\n", name, mime,
+                    match tokio::fs::metadata(path).await {
+                        Ok(m) => format!("{}KB", m.len() / 1024),
+                        Err(_) => "unknown size".to_string(),
+                    }
+                ));
+            }
+        }
+        augmented
+    } else {
+        prompt.to_string()
+    };
+    let prompt = prompt.as_str();
 
     // 2. Get API key from secrets backend
     let api_key = {
@@ -361,4 +410,174 @@ pub async fn delete_task(
     state.pg_delete_task(&task_id).await;
 
     StatusCode::NO_CONTENT
+}
+
+// ── Attachments ─────────────────────────────────────────────────────────────
+
+/// Sanitize a filename: strip path separators and `..` to prevent traversal.
+fn sanitize_filename(name: &str) -> String {
+    name.replace(['/', '\\'], "")
+        .replace("..", "")
+        .trim()
+        .to_string()
+}
+
+/// Resolve the attachments directory for a given task.
+async fn attachments_dir(state: &AppState, task_id: &str) -> PathBuf {
+    let config = state.config.read().await;
+    config.data_dir.join("tasks").join(task_id).join("attachments")
+}
+
+/// POST /api/tasks/{id}/attachments — upload one or more files
+pub async fn upload_attachments(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<Json<Vec<AttachmentMeta>>, StatusCode> {
+    let dir = attachments_dir(&state, &id).await;
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        tracing::error!(error = %e, "Failed to create attachments dir");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let mut results = Vec::new();
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let original_name = field.file_name().unwrap_or("unnamed").to_string();
+        let safe_name = sanitize_filename(&original_name);
+        if safe_name.is_empty() {
+            continue;
+        }
+
+        let content_type = field
+            .content_type()
+            .unwrap_or("application/octet-stream")
+            .to_string();
+
+        let data = field.bytes().await.map_err(|e| {
+            tracing::error!(error = %e, "Failed to read multipart field");
+            StatusCode::BAD_REQUEST
+        })?;
+
+        let file_path = dir.join(&safe_name);
+        tokio::fs::write(&file_path, &data).await.map_err(|e| {
+            tracing::error!(error = %e, "Failed to write attachment");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        results.push(AttachmentMeta {
+            name: safe_name.clone(),
+            size: data.len() as u64,
+            content_type,
+            url: format!("/api/tasks/{id}/attachments/{safe_name}"),
+        });
+    }
+
+    tracing::info!(task_id = %id, count = results.len(), "Attachments uploaded");
+
+    // Emit attachment event to the task stream for conversation history
+    let attachment_infos: Vec<mcclawd_channels::AttachmentInfo> = results
+        .iter()
+        .map(|a| mcclawd_channels::AttachmentInfo {
+            name: a.name.clone(),
+            size: a.size,
+            content_type: a.content_type.clone(),
+            url: a.url.clone(),
+        })
+        .collect();
+
+    if !attachment_infos.is_empty() {
+        let chunk = OutboundChunk::Attachments(attachment_infos);
+        let task_id_typed = TaskId(id.clone());
+        if let Some(tx) = state.task_streams.read().await.get(&task_id_typed) {
+            state.send_and_persist(&task_id_typed, tx, chunk).await;
+        } else {
+            state.persist_only(&task_id_typed, chunk).await;
+        }
+    }
+
+    Ok(Json(results))
+}
+
+/// GET /api/tasks/{id}/attachments — list all attachments for a task
+pub async fn list_attachments(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<AttachmentMeta>>, StatusCode> {
+    let dir = attachments_dir(&state, &id).await;
+    if !dir.exists() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let mut entries = tokio::fs::read_dir(&dir).await.map_err(|e| {
+        tracing::error!(error = %e, "Failed to read attachments dir");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let mut results = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if let Ok(meta) = entry.metadata().await {
+            if meta.is_file() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let content_type = mime_guess::from_path(&name)
+                    .first_or_octet_stream()
+                    .to_string();
+                results.push(AttachmentMeta {
+                    url: format!("/api/tasks/{id}/attachments/{name}"),
+                    name,
+                    size: meta.len(),
+                    content_type,
+                });
+            }
+        }
+    }
+
+    Ok(Json(results))
+}
+
+/// GET /api/tasks/{id}/attachments/{filename} — download/serve a single attachment
+pub async fn download_attachment(
+    State(state): State<AppState>,
+    Path((id, filename)): Path<(String, String)>,
+) -> Result<Response<Body>, StatusCode> {
+    let safe_name = sanitize_filename(&filename);
+    if safe_name.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let dir = attachments_dir(&state, &id).await;
+    let file_path = dir.join(&safe_name);
+
+    let file = tokio::fs::File::open(&file_path).await.map_err(|_| StatusCode::NOT_FOUND)?;
+    let stream = ReaderStream::new(file);
+
+    let content_type = mime_guess::from_path(&safe_name)
+        .first_or_octet_stream()
+        .to_string();
+
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("inline; filename=\"{safe_name}\""),
+        )
+        .body(Body::from_stream(stream))
+        .unwrap())
+}
+
+/// List attachment file paths for a task (used to inject into agent context).
+pub async fn attachment_paths(state: &AppState, task_id: &str) -> Vec<PathBuf> {
+    let dir = attachments_dir(state, task_id).await;
+    if !dir.exists() {
+        return Vec::new();
+    }
+    let mut paths = Vec::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry.metadata().await.map(|m| m.is_file()).unwrap_or(false) {
+                paths.push(entry.path());
+            }
+        }
+    }
+    paths
 }

@@ -59,6 +59,21 @@ pub enum OutboundChunk {
     },
     /// Status indicator (typing, processing, etc.).
     StatusIndicator(ChannelStatus),
+
+    // -------------------------------------------------------------------
+    // Phase 4 variants
+    // -------------------------------------------------------------------
+    /// User-uploaded file attachments metadata (persisted in event history).
+    Attachments(Vec<AttachmentInfo>),
+}
+
+/// Metadata for a user-uploaded attachment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentInfo {
+    pub name: String,
+    pub size: u64,
+    pub content_type: String,
+    pub url: String,
 }
 
 /// A single inline button for rich-channel keyboards.

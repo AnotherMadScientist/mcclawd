@@ -127,6 +127,12 @@ impl crate::traits::Channel for CliChannel {
                 };
                 eprintln!("[status: {}]", label);
             }
+            // Phase 4 variants
+            OutboundChunk::Attachments(attachments) => {
+                for att in &attachments {
+                    eprintln!("[attachment: {} ({}, {})]", att.name, att.content_type, att.size);
+                }
+            }
         }
         Ok(())
     }

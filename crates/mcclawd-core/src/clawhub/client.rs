@@ -394,20 +394,35 @@ impl ClawHubClient {
 
     /// Download a skill package and extract just the SKILL.md text content.
     /// The package is a ZIP file; we extract SKILL.md from it in-memory.
+    /// Uses case-insensitive matching and searches at any depth.
     pub async fn download_skill_md(&self, name: &str, version: &str) -> anyhow::Result<String> {
         let bytes = self.download_skill(name, version).await?;
         let cursor = std::io::Cursor::new(bytes);
         let mut archive = zip::ZipArchive::new(cursor)
             .map_err(|e| anyhow::anyhow!("Failed to open skill package as ZIP: {e}"))?;
 
+        let mut file_names = Vec::new();
         for i in 0..archive.len() {
-            let mut file = archive.by_index(i)?;
-            if file.name() == "SKILL.md" || file.name().ends_with("/SKILL.md") {
+            let file = archive.by_index(i)?;
+            let fname = file.name().to_string();
+            file_names.push(fname.clone());
+
+            // Case-insensitive match: any file named SKILL.md at any depth
+            let basename = fname.rsplit('/').next().unwrap_or(&fname);
+            if basename.eq_ignore_ascii_case("SKILL.md") {
+                drop(file);
+                let mut file = archive.by_index(i)?;
                 let mut content = String::new();
                 std::io::Read::read_to_string(&mut file, &mut content)?;
                 return Ok(content);
             }
         }
+
+        tracing::warn!(
+            skill = name,
+            files = ?file_names,
+            "SKILL.md not found in ZIP — listing all files for debugging"
+        );
         anyhow::bail!("SKILL.md not found in downloaded package for '{name}'")
     }
 

@@ -1,0 +1,218 @@
+//! Security scanner for installed skills.
+//!
+//! Runs `uvx snyk-agent-scan@latest --json --skills <path>` as a subprocess
+//! and parses the JSON output into structured results.
+
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use tokio::process::Command;
+
+/// Overall scan result for a skill.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanResult {
+    pub status: ScanStatus,
+    pub issues: Vec<ScanIssue>,
+}
+
+/// Aggregate status derived from the worst issue severity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScanStatus {
+    Pass,
+    Warning,
+    Critical,
+    NotScanned,
+}
+
+/// A single issue found by the scanner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanIssue {
+    /// Issue code (e.g. E001, W007, TF001).
+    pub code: String,
+    /// Severity category: "issue", "warning", or "toxic_flow".
+    pub severity: String,
+    /// Human-readable description.
+    pub description: String,
+}
+
+/// Raw JSON output shape from snyk-agent-scan.
+#[derive(Debug, Deserialize)]
+struct SnykScanOutput {
+    #[serde(default)]
+    issues: Vec<SnykIssue>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SnykIssue {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    severity: String,
+    #[serde(default, alias = "message")]
+    description: String,
+}
+
+/// Scan a skill directory using snyk-agent-scan.
+///
+/// If the scanner is not installed, returns `ScanStatus::NotScanned`.
+pub async fn scan_skill(skill_path: &Path) -> anyhow::Result<ScanResult> {
+    // Check if uvx is available
+    let uvx_check = Command::new("which").arg("uvx").output().await;
+    if uvx_check.is_err() || !uvx_check.unwrap().status.success() {
+        tracing::debug!("uvx not found — returning NotScanned");
+        return Ok(ScanResult {
+            status: ScanStatus::NotScanned,
+            issues: vec![],
+        });
+    }
+
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        Command::new("uvx")
+            .arg("snyk-agent-scan@latest")
+            .arg("--json")
+            .arg("--skills")
+            .arg(skill_path)
+            .output(),
+    )
+    .await;
+
+    let output = match output {
+        Ok(inner) => inner,
+        Err(_) => {
+            tracing::warn!("snyk-agent-scan timed out after 120s");
+            return Ok(ScanResult {
+                status: ScanStatus::NotScanned,
+                issues: vec![],
+            });
+        }
+    };
+
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!("Failed to run snyk-agent-scan: {e}");
+            return Ok(ScanResult {
+                status: ScanStatus::NotScanned,
+                issues: vec![],
+            });
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!("snyk-agent-scan exited with {}: {stderr}", output.status);
+        // Non-zero exit may still produce JSON on stdout (e.g. issues found)
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() {
+        return Ok(ScanResult {
+            status: ScanStatus::NotScanned,
+            issues: vec![],
+        });
+    }
+
+    let parsed: SnykScanOutput = match serde_json::from_str(&stdout) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Failed to parse snyk-agent-scan output: {e}");
+            return Ok(ScanResult {
+                status: ScanStatus::NotScanned,
+                issues: vec![],
+            });
+        }
+    };
+
+    let issues: Vec<ScanIssue> = parsed
+        .issues
+        .into_iter()
+        .map(|i| ScanIssue {
+            code: i.code,
+            severity: i.severity,
+            description: i.description,
+        })
+        .collect();
+
+    let status = derive_status(&issues);
+
+    Ok(ScanResult { status, issues })
+}
+
+/// Derive the aggregate status from the list of issues.
+fn derive_status(issues: &[ScanIssue]) -> ScanStatus {
+    if issues.is_empty() {
+        return ScanStatus::Pass;
+    }
+
+    let has_critical = issues.iter().any(|i| {
+        i.severity == "issue"
+            || i.severity == "toxic_flow"
+            || i.code.starts_with('E')
+            || i.code.starts_with("TF")
+    });
+
+    if has_critical {
+        ScanStatus::Critical
+    } else {
+        ScanStatus::Warning
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_derive_status_empty() {
+        assert_eq!(derive_status(&[]), ScanStatus::Pass);
+    }
+
+    #[test]
+    fn test_derive_status_warning() {
+        let issues = vec![ScanIssue {
+            code: "W001".to_string(),
+            severity: "warning".to_string(),
+            description: "Minor concern".to_string(),
+        }];
+        assert_eq!(derive_status(&issues), ScanStatus::Warning);
+    }
+
+    #[test]
+    fn test_derive_status_critical_e_code() {
+        let issues = vec![ScanIssue {
+            code: "E001".to_string(),
+            severity: "issue".to_string(),
+            description: "Critical issue".to_string(),
+        }];
+        assert_eq!(derive_status(&issues), ScanStatus::Critical);
+    }
+
+    #[test]
+    fn test_derive_status_critical_toxic_flow() {
+        let issues = vec![ScanIssue {
+            code: "TF001".to_string(),
+            severity: "toxic_flow".to_string(),
+            description: "Toxic flow detected".to_string(),
+        }];
+        assert_eq!(derive_status(&issues), ScanStatus::Critical);
+    }
+
+    #[test]
+    fn test_scan_result_serialization() {
+        let result = ScanResult {
+            status: ScanStatus::Warning,
+            issues: vec![ScanIssue {
+                code: "W007".to_string(),
+                severity: "warning".to_string(),
+                description: "Potential concern".to_string(),
+            }],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("Warning"));
+        assert!(json.contains("W007"));
+
+        let parsed: ScanResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.status, ScanStatus::Warning);
+        assert_eq!(parsed.issues.len(), 1);
+    }
+}

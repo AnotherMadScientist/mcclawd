@@ -1,7 +1,9 @@
 use crate::server::pg_store::PgTaskStore;
 use crate::supervisor::AgentSupervisor;
+use dashmap::DashMap;
 use mcclawd_channels::OutboundChunk;
 use mcclawd_core::providers::{ProviderPool, ProviderPoolConfig};
+use mcclawd_core::scanner::ScanResult;
 use mcclawd_core::secrets::SecretBackend;
 use mcclawd_core::types::TaskId;
 use mcclawd_core::McclawdConfig;
@@ -41,6 +43,8 @@ pub struct AppState {
     pub task_chat_history: Arc<RwLock<HashMap<TaskId, Vec<Message>>>>,
     /// Optional PostgreSQL store for durable persistence (None = in-memory only).
     pub pg_store: Option<PgTaskStore>,
+    /// Cache for security scan results (skill name -> ScanResult).
+    pub scan_cache: Arc<DashMap<String, ScanResult>>,
 }
 
 impl AppState {
@@ -72,6 +76,7 @@ impl AppState {
             config_path: None,
             task_chat_history: Arc::new(RwLock::new(HashMap::new())),
             pg_store: None,
+            scan_cache: Arc::new(DashMap::new()),
         })
     }
 

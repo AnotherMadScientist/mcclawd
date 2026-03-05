@@ -8,6 +8,7 @@ pub mod identity;
 pub mod persistence;
 pub mod providers;
 pub mod sanitizer;
+pub mod scanner;
 pub mod secrets;
 pub mod skill_loader;
 pub mod skill_parser;
@@ -18,6 +19,7 @@ pub use clawhub::{ClawHubClient, ClawHubSearchResult, ClawHubSkillMeta, Installe
 pub use config::McclawdConfig;
 pub use error::{McclawdError, Result};
 pub use sanitizer::sanitize_prompt;
+pub use scanner::{ScanResult, ScanStatus, ScanIssue};
 pub use skill_loader::SkillLoader;
 pub use skills::{LoadedSkill, SandboxConfig};
 pub use types::{AgentId, SessionId, TaskId};

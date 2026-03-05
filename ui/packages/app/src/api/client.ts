@@ -4,7 +4,7 @@ import type {
   RegistrationResponseJSON,
   AuthenticationResponseJSON,
 } from "@simplewebauthn/browser";
-import type { McclawdConfig, McpServer, Task, WorkspaceFile, InstalledSkill, CachedSearchResult, ClawHubSkillMeta } from "./types";
+import type { AttachmentMeta, McclawdConfig, McpServer, Task, WorkspaceFile, InstalledSkill, CachedSearchResult, ClawHubSkillMeta, ScanResult } from "./types";
 
 const TOKEN_KEY = "mcclawd_token";
 
@@ -91,6 +91,25 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ message }),
       }),
+    uploadAttachments: async (taskId: string, files: File[]) => {
+      const formData = new FormData();
+      for (const file of files) {
+        formData.append("files", file);
+      }
+      const token = getToken();
+      const headers: Record<string, string> = {};
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      // Do NOT set Content-Type — browser sets it with boundary for FormData
+      const res = await fetch(`/api/tasks/${taskId}/attachments`, {
+        method: "POST",
+        headers,
+        body: formData,
+      });
+      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+      return res.json() as Promise<AttachmentMeta[]>;
+    },
+    listAttachments: (taskId: string) =>
+      apiFetch<AttachmentMeta[]>(`/api/tasks/${taskId}/attachments`),
   },
   workspace: {
     list: () => apiFetch<WorkspaceFile[]>("/api/workspace"),
@@ -146,5 +165,17 @@ export const api = {
       }),
     uninstall: (name: string) =>
       apiFetch<void>(`/api/skills/${encodeURIComponent(name)}`, { method: "DELETE" }),
+    scan: (name: string) =>
+      apiFetch<ScanResult>(`/api/skills/${encodeURIComponent(name)}/scan`),
+  },
+  systemAgent: {
+    chat: (message: string) =>
+      apiFetch<{ task_id: string }>("/api/system-agent/chat", {
+        method: "POST",
+        body: JSON.stringify({ message }),
+      }),
+    history: () => apiFetch<unknown[]>("/api/system-agent/history"),
+    clearHistory: () =>
+      apiFetch<void>("/api/system-agent/history", { method: "DELETE" }),
   },
 };

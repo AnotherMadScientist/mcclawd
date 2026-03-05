@@ -15,6 +15,7 @@ use super::security;
 use super::skills_routes;
 use super::state::AppState;
 use super::swarms;
+use super::system_agent;
 use super::tasks;
 use super::webauthn_auth;
 use super::workspace;
@@ -56,6 +57,14 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route(
             "/api/tasks/{id}/message",
             post(tasks::send_message),
+        )
+        .route(
+            "/api/tasks/{id}/attachments",
+            get(tasks::list_attachments).post(tasks::upload_attachments),
+        )
+        .route(
+            "/api/tasks/{id}/attachments/{filename}",
+            get(tasks::download_attachment),
         )
         // Workspace
         .route("/api/workspace", get(workspace::list_files))
@@ -122,12 +131,19 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             "/api/skills/{name}/content",
             get(skills_routes::skill_content),
         )
+        .route("/api/skills/{name}/scan", get(skills_routes::scan_skill))
         .route("/api/skills/{name}", delete(skills_routes::uninstall_skill))
         // Providers
         .route("/api/providers", get(providers::list_providers))
         .route("/api/providers/usage", get(providers::provider_usage))
         // Config reload
         .route("/api/config/reload", post(providers::reload_config))
+        // System agent
+        .route("/api/system-agent/chat", post(system_agent::chat))
+        .route(
+            "/api/system-agent/history",
+            get(system_agent::history).delete(system_agent::clear_history),
+        )
         // Apply JWT auth to all protected routes
         .route_layer(middleware::from_fn_with_state(state, auth::auth_middleware));
 

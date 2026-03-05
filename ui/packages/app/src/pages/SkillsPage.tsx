@@ -11,10 +11,17 @@ import {
   Puzzle,
   X,
   Plus,
+  Sparkles,
+  Wand2,
+  Shield,
+  ShieldAlert,
+  ShieldCheck,
+  ShieldQuestion,
 } from "lucide-react";
 import { api } from "../api/client";
 import { getToken } from "../api/client";
-import type { InstalledSkill, ClawHubSkillMeta } from "../api/types";
+import type { InstalledSkill, ClawHubSkillMeta, ScanResult } from "../api/types";
+import { TiptapSkillEditor } from "../components/TiptapSkillEditor";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -62,6 +69,71 @@ function NotificationBanner({
 // Browse card (catalog grid)
 // ---------------------------------------------------------------------------
 
+// Tag-based color palette for the top border accent
+const TAG_COLORS: Record<string, string> = {
+  ai: "from-violet-500/60",
+  llm: "from-violet-500/60",
+  ml: "from-blue-500/60",
+  data: "from-cyan-500/60",
+  devops: "from-orange-500/60",
+  security: "from-red-500/60",
+  web: "from-emerald-500/60",
+  api: "from-sky-500/60",
+  database: "from-amber-500/60",
+  default: "from-primary/40",
+};
+
+function getTagColor(tags: string[]): string {
+  const fallback = TAG_COLORS["default"] || "from-primary/40";
+  if (!tags || tags.length === 0) return fallback;
+  for (const t of tags) {
+    const color = TAG_COLORS[t.toLowerCase()];
+    if (color) return color;
+  }
+  return fallback;
+}
+
+// ---------------------------------------------------------------------------
+// Security status badge
+// ---------------------------------------------------------------------------
+
+function SecurityBadge({ scanResult }: { scanResult?: ScanResult | null }) {
+  if (!scanResult || scanResult.status === "NotScanned") {
+    return (
+      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-muted text-[10px] text-muted-foreground leading-none">
+        <ShieldQuestion className="w-2.5 h-2.5" />
+        Not Scanned
+      </span>
+    );
+  }
+
+  if (scanResult.status === "Pass") {
+    return (
+      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-[10px] text-emerald-400 border border-emerald-500/20 leading-none">
+        <ShieldCheck className="w-2.5 h-2.5" />
+        Safe
+      </span>
+    );
+  }
+
+  if (scanResult.status === "Warning") {
+    return (
+      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-yellow-500/10 text-[10px] text-yellow-400 border border-yellow-500/20 leading-none">
+        <Shield className="w-2.5 h-2.5" />
+        Warning
+      </span>
+    );
+  }
+
+  // Critical
+  return (
+    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-red-500/10 text-[10px] text-red-400 border border-red-500/20 leading-none">
+      <ShieldAlert className="w-2.5 h-2.5" />
+      Critical
+    </span>
+  );
+}
+
 function BrowseCard({
   skill,
   isInstalled,
@@ -69,6 +141,9 @@ function BrowseCard({
   onClick,
   onInstall,
   installPending,
+  scanResult,
+  onScan,
+  scanPending,
 }: {
   skill: ClawHubSkillMeta;
   isInstalled: boolean;
@@ -76,51 +151,115 @@ function BrowseCard({
   onClick: () => void;
   onInstall: () => void;
   installPending: boolean;
+  scanResult?: ScanResult | null;
+  onScan: () => void;
+  scanPending: boolean;
 }) {
+  const visibleTags = skill.tags ? skill.tags.slice(0, 3) : [];
+  const accentColor = getTagColor(skill.tags);
+
   return (
     <button
       onClick={onClick}
-      className={`p-3 rounded-xl bg-card border transition-colors text-left w-full ${
+      className={`relative rounded-xl bg-card border transition-colors text-left w-full overflow-hidden flex flex-col ${
         isSelected
           ? "border-primary ring-1 ring-primary/30"
           : "border-border hover:border-primary/40"
       }`}
     >
-      <div className="flex items-start gap-2.5">
-        <Package className="w-4 h-4 text-violet-400 mt-0.5 shrink-0" />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <p className="text-sm font-medium truncate">{skill.name}</p>
-            {isInstalled && (
-              <Check className="w-3 h-3 text-emerald-400 shrink-0" />
+      {/* Top gradient accent bar */}
+      <div
+        className={`h-0.5 w-full bg-gradient-to-r ${accentColor} to-transparent`}
+      />
+
+      <div className="p-3 flex flex-col gap-2 flex-1">
+        {/* Header row: icon + name + installed check + install button */}
+        <div className="flex items-start gap-2.5">
+          <div className="w-8 h-8 rounded-full bg-violet-500/15 flex items-center justify-center shrink-0">
+            <Package className="w-4 h-4 text-violet-400" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5">
+              <p className="text-sm font-semibold truncate leading-tight">
+                {skill.name}
+              </p>
+              {isInstalled && (
+                <Check className="w-3 h-3 text-emerald-400 shrink-0" />
+              )}
+            </div>
+            <p className="text-[11px] text-muted-foreground truncate mt-0.5">
+              {skill.author ? `${skill.author} · ` : ""}v{skill.version}
+            </p>
+          </div>
+          <div className="flex items-center gap-0.5 shrink-0">
+            {/* Scan button */}
+            {!scanResult && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onScan();
+                }}
+                disabled={scanPending}
+                className="p-1 rounded-md hover:bg-muted transition-colors disabled:opacity-50"
+                title="Scan for security issues"
+              >
+                {scanPending ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />
+                ) : (
+                  <Shield className="w-3.5 h-3.5 text-muted-foreground/50 hover:text-muted-foreground" />
+                )}
+              </button>
+            )}
+            {/* Install button */}
+            {!isInstalled && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onInstall();
+                }}
+                disabled={installPending}
+                className="p-1 rounded-md hover:bg-muted transition-colors disabled:opacity-50"
+                title="Install skill"
+              >
+                {installPending ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />
+                ) : (
+                  <Download className="w-3.5 h-3.5 text-muted-foreground hover:text-foreground" />
+                )}
+              </button>
             )}
           </div>
-          <p className="text-xs text-muted-foreground truncate">
-            {skill.author ? `${skill.author} \u00b7 ` : ""}v{skill.version}
+        </div>
+
+        {/* Description */}
+        {skill.description && (
+          <p className="text-xs text-muted-foreground/70 line-clamp-2 leading-relaxed">
+            {skill.description}
           </p>
-          {skill.description && (
-            <p className="text-xs text-muted-foreground/70 mt-1 line-clamp-2">
-              {skill.description}
-            </p>
+        )}
+
+        {/* Footer: tags + security badge + download count */}
+        <div className="flex items-center justify-between gap-2 mt-auto pt-1">
+          <div className="flex flex-wrap gap-1 min-w-0 items-center">
+            {visibleTags.map((tag) => (
+              <span
+                key={tag}
+                className="bg-muted text-[10px] px-1.5 py-0.5 rounded-full text-muted-foreground leading-none"
+              >
+                {tag}
+              </span>
+            ))}
+            {scanResult && <SecurityBadge scanResult={scanResult} />}
+          </div>
+          {skill.downloads > 0 && (
+            <span className="flex items-center gap-0.5 text-[10px] text-muted-foreground/60 shrink-0">
+              <Download className="w-2.5 h-2.5" />
+              {skill.downloads >= 1000
+                ? `${(skill.downloads / 1000).toFixed(1)}k`
+                : skill.downloads}
+            </span>
           )}
         </div>
-        {!isInstalled && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onInstall();
-            }}
-            disabled={installPending}
-            className="p-1 rounded-md hover:bg-muted transition-colors disabled:opacity-50 shrink-0"
-            title="Install skill"
-          >
-            {installPending ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />
-            ) : (
-              <Download className="w-3.5 h-3.5 text-muted-foreground hover:text-foreground" />
-            )}
-          </button>
-        )}
       </div>
     </button>
   );
@@ -136,12 +275,14 @@ function InstalledRow({
   onClick,
   onUninstall,
   uninstallPending,
+  scanResult,
 }: {
   skill: InstalledSkill;
   isSelected: boolean;
   onClick: () => void;
   onUninstall: () => void;
   uninstallPending: boolean;
+  scanResult?: ScanResult | null;
 }) {
   return (
     <div
@@ -154,7 +295,10 @@ function InstalledRow({
     >
       <Check className="w-3 h-3 text-emerald-400 shrink-0" />
       <div className="min-w-0 flex-1">
-        <p className="text-xs font-medium truncate">{skill.name}</p>
+        <div className="flex items-center gap-1">
+          <p className="text-xs font-medium truncate">{skill.name}</p>
+          {scanResult && <SecurityBadge scanResult={scanResult} />}
+        </div>
         <p className="text-[10px] text-muted-foreground">v{skill.version}</p>
       </div>
       <button
@@ -228,12 +372,85 @@ Optional settings that can be customized:
 `;
 
 // ---------------------------------------------------------------------------
-// Create Skill Dialog — editable with real-time section annotations
+// AI skill generation helper
+// ---------------------------------------------------------------------------
+
+function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function generateSkillFromDescription(name: string, description: string): string {
+  const slug = slugify(name) || "my-skill";
+  return `---
+name: ${slug}
+version: 0.1.0
+author: me
+description: ${description}
+tags:
+  - custom
+---
+
+# ${slug}
+
+## Description
+${description}
+
+## Instructions
+[Describe step-by-step how this skill works]
+
+## Tools Required
+[List any MCP tools this skill needs]
+
+## Examples
+\`\`\`
+User: [example prompt]
+Assistant: [example response]
+\`\`\`
+
+## Configuration
+[Any configuration options]
+`;
+}
+
+function parseSkillName(text: string): string {
+  const match = text.match(/^name:\s*(.+)$/m);
+  return match && match[1] ? slugify(match[1].trim()) : "";
+}
+
+// ---------------------------------------------------------------------------
+// Create Skill Dialog — description-first AI flow + editable with section bars
 // ---------------------------------------------------------------------------
 
 function CreateSkillDialog({ onClose }: { onClose: () => void }) {
+  const [mode, setMode] = useState<"describe" | "edit">("describe");
+  const [skillName, setSkillName] = useState("");
+  const [description, setDescription] = useState("");
+  const [generating, setGenerating] = useState(false);
   const [text, setText] = useState(SKILL_TEMPLATE);
-  const sections = parseSkillSections(text);
+
+  const folderName = mode === "edit" ? (parseSkillName(text) || slugify(skillName) || "my-skill") : (slugify(skillName) || "my-skill");
+
+  function handleGenerate() {
+    if (!skillName.trim() && !description.trim()) return;
+    setGenerating(true);
+    // Simulate async generation (replace with real API call when System Agent is ready)
+    setTimeout(() => {
+      const generated = generateSkillFromDescription(skillName, description);
+      setText(generated);
+      setGenerating(false);
+      setMode("edit");
+    }, 800);
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      handleGenerate();
+    }
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-6" onClick={onClose}>
@@ -242,60 +459,139 @@ function CreateSkillDialog({ onClose }: { onClose: () => void }) {
         <div className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
           <div>
             <h2 className="text-lg font-semibold">Create a Skill</h2>
-            <p className="text-xs text-muted-foreground mt-0.5">Edit the template — colored bars show SKILL.md sections</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {mode === "describe"
+                ? "Describe what your skill does — AI will generate the SKILL.md template"
+                : "Edit the template — colored bars show SKILL.md sections"}
+            </p>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-muted transition-colors">
-            <X className="w-5 h-5 text-muted-foreground" />
-          </button>
+          <div className="flex items-center gap-2">
+            {mode === "edit" && (
+              <button
+                onClick={() => setMode("describe")}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-muted text-xs font-medium hover:bg-muted/80 transition-colors text-muted-foreground"
+              >
+                <Wand2 className="w-3.5 h-3.5" />
+                Regenerate
+              </button>
+            )}
+            <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-muted transition-colors">
+              <X className="w-5 h-5 text-muted-foreground" />
+            </button>
+          </div>
         </div>
 
-        {/* Body — textarea with overlaid section bars, both sharing exact line-height */}
+        {/* Body */}
         <div className="flex-1 overflow-y-auto">
-          <div className="flex" style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: "13px", lineHeight: "20px" }}>
-            <textarea
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              className="flex-1 bg-transparent text-foreground/90 resize-none focus:outline-none"
-              style={{ padding: "16px 24px", fontFamily: "inherit", fontSize: "inherit", lineHeight: "inherit" }}
-              spellCheck={false}
-              rows={text.split("\n").length + 2}
-            />
-            {/* Section bars — pixel-matched to textarea lines */}
-            <div className="w-28 shrink-0 border-l border-border/10" style={{ paddingTop: "16px" }}>
-              {sections.map((section, i) => (
-                <div
-                  key={`${section.key}-${i}`}
-                  className="flex items-stretch"
-                  style={{ height: `${section.lines.length * 20}px` }}
-                >
-                  <div className={`w-1 ${section.color.bg} shrink-0`} />
-                  <div className="flex items-start px-2 pt-0.5">
-                    <span className={`text-[10px] font-semibold uppercase tracking-wider ${section.color.text} whitespace-nowrap`} style={{ fontFamily: "system-ui, sans-serif" }}>
-                      {section.label}
-                    </span>
+          {mode === "describe" ? (
+            /* Describe mode — centered card */
+            <div className="flex items-center justify-center min-h-[360px] p-8">
+              <div className="w-full max-w-lg space-y-5">
+                {/* Sparkle icon */}
+                <div className="flex justify-center">
+                  <div className="w-12 h-12 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center">
+                    <Sparkles className="w-6 h-6 text-primary" />
                   </div>
                 </div>
-              ))}
+
+                <div className="text-center">
+                  <h3 className="text-base font-semibold">Describe your skill</h3>
+                  <p className="text-xs text-muted-foreground mt-1">Give it a name and explain what it does — AI generates the full SKILL.md</p>
+                </div>
+
+                {/* Skill name input */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-foreground/70">Skill name</label>
+                  <input
+                    type="text"
+                    value={skillName}
+                    onChange={(e) => setSkillName(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder="e.g. web-scraper"
+                    className="w-full px-3 py-2 rounded-lg bg-muted border border-border text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 font-mono"
+                    autoFocus
+                  />
+                  {skillName && (
+                    <p className="text-[10px] text-muted-foreground pl-0.5">
+                      Folder: <span className="text-foreground/60 font-mono">{slugify(skillName) || "my-skill"}</span>
+                    </p>
+                  )}
+                </div>
+
+                {/* Description textarea */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-foreground/70">Description</label>
+                  <textarea
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder="e.g. A skill that scrapes web pages and extracts structured data using CSS selectors"
+                    className="w-full px-3 py-2 rounded-lg bg-muted border border-border text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 resize-none"
+                    rows={4}
+                  />
+                </div>
+
+                {/* Actions */}
+                <div className="flex flex-col gap-2">
+                  <button
+                    onClick={handleGenerate}
+                    disabled={generating || (!skillName.trim() && !description.trim())}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {generating ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Generating SKILL.md...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-4 h-4" />
+                        Generate SKILL.md
+                      </>
+                    )}
+                  </button>
+                  <button
+                    onClick={() => { setText(SKILL_TEMPLATE); setMode("edit"); }}
+                    className="w-full px-4 py-2 rounded-lg bg-transparent text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                  >
+                    Skip — start from blank template
+                  </button>
+                </div>
+
+                <p className="text-center text-[10px] text-muted-foreground">
+                  Tip: Press <kbd className="px-1 py-0.5 rounded bg-muted border border-border font-mono text-[10px]">Cmd+Enter</kbd> to generate
+                </p>
+              </div>
             </div>
-          </div>
+          ) : (
+            /* Edit mode — TipTap editor with section bars */
+            <TiptapSkillEditor value={text} onChange={setText} />
+          )}
         </div>
 
         {/* Footer */}
         <div className="flex items-center justify-between px-6 py-3 border-t border-border shrink-0">
-          <p className="text-xs text-muted-foreground">
-            Save as <code className="px-1 py-0.5 bg-muted rounded">SKILL.md</code> in your skill directory
+          <p className="text-xs text-muted-foreground font-mono">
+            ~/.mcclawd/skills/<span className="text-foreground/60">{folderName}</span>/SKILL.md
           </p>
-          <div className="flex gap-2">
-            <button
-              onClick={() => navigator.clipboard.writeText(text)}
-              className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition-opacity"
-            >
-              Copy to Clipboard
-            </button>
+          {mode === "edit" && (
+            <div className="flex gap-2">
+              <button
+                onClick={() => navigator.clipboard.writeText(text)}
+                className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition-opacity"
+              >
+                Copy to Clipboard
+              </button>
+              <button onClick={onClose} className="px-3 py-1.5 rounded-lg bg-muted text-xs font-medium hover:bg-muted/80 transition-colors">
+                Close
+              </button>
+            </div>
+          )}
+          {mode === "describe" && (
             <button onClick={onClose} className="px-3 py-1.5 rounded-lg bg-muted text-xs font-medium hover:bg-muted/80 transition-colors">
-              Close
+              Cancel
             </button>
-          </div>
+          )}
         </div>
       </div>
     </div>
@@ -433,6 +729,7 @@ function SkillDetailDialog({
   onNotify: (type: "success" | "error", message: string) => void;
 }) {
   const queryClient = useQueryClient();
+  const [scanning, setScanning] = useState(false);
 
   const { data: installed = [] } = useQuery({
     queryKey: ["skills"],
@@ -450,6 +747,34 @@ function SkillDetailDialog({
     queryKey: ["skill-content", name],
     queryFn: () => api.skills.content(name).then((r) => r.content).catch(() => null),
   });
+
+  // Security scan query (only for installed skills)
+  const { data: scanResult } = useQuery({
+    queryKey: ["skill-scan", name],
+    queryFn: () => api.skills.scan(name).catch(() => null),
+    enabled: !!installedInfo,
+  });
+
+  const handleScan = async () => {
+    setScanning(true);
+    try {
+      const result = await api.skills.scan(name);
+      queryClient.setQueryData(["skill-scan", name], result);
+      if (result.status === "Pass") {
+        onNotify("success", `Scan passed — no issues found`);
+      } else if (result.status === "Warning") {
+        onNotify("error", `Scan found ${result.issues.length} warning(s)`);
+      } else if (result.status === "Critical") {
+        onNotify("error", `Scan found ${result.issues.length} critical issue(s)`);
+      } else {
+        onNotify("error", "Scanner not available (uvx/snyk-agent-scan not installed)");
+      }
+    } catch {
+      onNotify("error", "Scan failed");
+    } finally {
+      setScanning(false);
+    }
+  };
 
   const install = useMutation({
     mutationFn: () => api.skills.install(name, skill?.version),
@@ -528,6 +853,19 @@ function SkillDetailDialog({
                   <span className="text-[10px] text-muted-foreground">+{skill.tags.length - 3}</span>
                 )}
               </div>
+            )}
+            {installedInfo && (
+              <>
+                <SecurityBadge scanResult={scanResult} />
+                <button
+                  onClick={handleScan}
+                  disabled={scanning}
+                  className="px-3 py-1.5 rounded-lg bg-muted text-xs font-medium hover:bg-muted/80 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+                >
+                  {scanning ? <Loader2 className="w-3 h-3 animate-spin" /> : <Shield className="w-3 h-3" />}
+                  Scan
+                </button>
+              </>
             )}
             {installedInfo ? (
               <button
@@ -641,6 +979,9 @@ export function SkillsPage() {
   const [uninstallingSkill, setUninstallingSkill] = useState<string | null>(null);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [syncProgress, setSyncProgress] = useState<number | null>(null);
+  const [scanResults, setScanResults] = useState<Record<string, ScanResult>>({});
+  const [scanningSkill, setScanningSkill] = useState<string | null>(null);
+  const scanLoadedRef = useRef(false);
 
   const autoRefreshed = useRef(false);
 
@@ -648,6 +989,22 @@ export function SkillsPage() {
     setNotification({ type, message });
     setTimeout(() => setNotification(null), 3000);
   }, []);
+
+  const handleCardScan = useCallback(
+    (name: string) => {
+      setScanningSkill(name);
+      api.skills
+        .scan(name)
+        .then((result) => {
+          setScanResults((prev) => ({ ...prev, [name]: result }));
+        })
+        .catch(() => {
+          /* scan not available */
+        })
+        .finally(() => setScanningSkill(null));
+    },
+    [],
+  );
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedQuery(searchQuery), 400);
@@ -678,6 +1035,8 @@ export function SkillsPage() {
       queryClient.invalidateQueries({ queryKey: ["skills"] });
       notify("success", `Installed "${variables.name}"`);
       setInstallingSkill(null);
+      // Auto-scan after install
+      handleCardScan(variables.name);
     },
     onError: (err: Error) => {
       notify("error", `Install failed: ${err.message}`);
@@ -729,6 +1088,20 @@ export function SkillsPage() {
       es.close();
     };
   }, [queryClient, notify]);
+
+  // Load cached scan results for installed skills
+  useEffect(() => {
+    if (scanLoadedRef.current || installed.length === 0) return;
+    scanLoadedRef.current = true;
+    // Fire-and-forget: load scan results for each installed skill
+    for (const skill of installed) {
+      api.skills.scan(skill.name).then((result) => {
+        if (result && result.status !== "NotScanned") {
+          setScanResults((prev) => ({ ...prev, [skill.name]: result }));
+        }
+      }).catch(() => { /* ignore — scan not available */ });
+    }
+  }, [installed]);
 
   // Auto-refresh catalog on first load if empty
   useEffect(() => {
@@ -825,7 +1198,7 @@ export function SkillsPage() {
           )}
 
           {!catalogLoading && skills.length > 0 && (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2.5">
               {skills.map((skill: ClawHubSkillMeta) => (
                 <BrowseCard
                   key={skill.name}
@@ -838,6 +1211,9 @@ export function SkillsPage() {
                     quickInstall.mutate({ name: skill.name, version: skill.version });
                   }}
                   installPending={installingSkill === skill.name}
+                  scanResult={scanResults[skill.name]}
+                  onScan={() => handleCardScan(skill.name)}
+                  scanPending={scanningSkill === skill.name}
                 />
               ))}
             </div>
@@ -882,6 +1258,7 @@ export function SkillsPage() {
                       quickUninstall.mutate(skill.name);
                     }}
                     uninstallPending={uninstallingSkill === skill.name}
+                    scanResult={scanResults[skill.name]}
                   />
                 ))}
               </div>

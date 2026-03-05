@@ -2,9 +2,15 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import type { StreamChunk } from "../api/types";
 
 export interface StreamEvent {
-  type: "text" | "error" | "user";
+  type: "text" | "error" | "user" | "attachments";
   content: string;
   timestamp: Date;
+  attachments?: Array<{
+    name: string;
+    size: number;
+    content_type: string;
+    url: string;
+  }>;
 }
 
 export function useTaskStream(taskId: string | undefined) {
@@ -64,6 +70,16 @@ export function useTaskStream(taskId: string | undefined) {
           // Reset streaming state for the next agent turn
           streamingRef.current = false;
           newBlockRef.current = true;
+        } else if ("Attachments" in chunk) {
+          setEvents((prev) => [
+            ...prev,
+            {
+              type: "attachments" as const,
+              content: "",
+              timestamp,
+              attachments: chunk.Attachments,
+            },
+          ]);
         } else if ("TextDelta" in chunk) {
           if (streamingRef.current) {
             // Streaming LLM response — accumulate into text event

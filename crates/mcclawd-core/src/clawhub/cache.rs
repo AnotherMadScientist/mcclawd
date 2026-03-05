@@ -22,12 +22,14 @@ pub struct CachedCatalog {
     pub total: u64,
 }
 
-/// File-based cache for ClawHub skill metadata.
+/// File-based cache for ClawHub skill metadata and SKILL.md content.
 ///
 /// Stores catalog at `{cache_dir}/clawhub_catalog.json`.
+/// Stores SKILL.md content at `{cache_dir}/skill_content/{name}.md`.
 /// Provides sync (background refresh) and search (local filter) operations.
 pub struct ClawHubCache {
     cache_path: PathBuf,
+    content_dir: PathBuf,
     client: ClawHubClient,
     /// In-memory catalog, loaded from disk or refreshed from the registry.
     pub(crate) catalog: Arc<RwLock<Option<CachedCatalog>>>,
@@ -37,9 +39,11 @@ impl ClawHubCache {
     /// Create a new cache. `cache_dir` is typically `~/.mcclawd/cache/`.
     pub fn new(cache_dir: &Path, client: ClawHubClient) -> Self {
         let cache_path = cache_dir.join("clawhub_catalog.json");
+        let content_dir = cache_dir.join("skill_content");
         let catalog = Arc::new(RwLock::new(None));
         Self {
             cache_path,
+            content_dir,
             client,
             catalog,
         }
@@ -196,6 +200,55 @@ impl ClawHubCache {
                 last_refreshed: Some(cat.last_refreshed),
                 cache_path: self.cache_path.clone(),
             },
+        }
+    }
+
+    /// Get cached SKILL.md content for a skill.
+    /// Returns `None` if not cached.
+    pub async fn get_content(&self, name: &str) -> Option<String> {
+        let path = self.content_dir.join(format!("{name}.md"));
+        tokio::fs::read_to_string(&path).await.ok()
+    }
+
+    /// Cache SKILL.md content for a skill on disk.
+    pub async fn set_content(&self, name: &str, content: &str) -> anyhow::Result<()> {
+        tokio::fs::create_dir_all(&self.content_dir).await?;
+        let path = self.content_dir.join(format!("{name}.md"));
+        let tmp = path.with_extension("md.tmp");
+        tokio::fs::write(&tmp, content).await?;
+        tokio::fs::rename(&tmp, &path).await?;
+        Ok(())
+    }
+
+    /// Download and cache SKILL.md for a skill, returning the content.
+    /// Uses cached version if available, otherwise downloads from ClawHub.
+    pub async fn get_or_download_content(&self, name: &str) -> Option<String> {
+        // Check disk cache first
+        if let Some(content) = self.get_content(name).await {
+            return Some(content);
+        }
+
+        // Resolve version from catalog metadata
+        let version = match self.get_skill(name).await {
+            Some(s) => s.version,
+            None => match self.client.get_skill(name, None).await {
+                Ok(meta) => meta.version,
+                Err(_) => return None,
+            },
+        };
+
+        // Download and cache
+        match self.client.download_skill_md(name, &version).await {
+            Ok(content) => {
+                if let Err(e) = self.set_content(name, &content).await {
+                    tracing::warn!("Failed to cache SKILL.md for '{name}': {e}");
+                }
+                Some(content)
+            }
+            Err(e) => {
+                tracing::debug!("Failed to download SKILL.md for '{name}': {e}");
+                None
+            }
         }
     }
 
@@ -395,5 +448,36 @@ mod tests {
         cache.set_catalog_for_test(make_test_catalog()).await;
         // Just set, so it should not be stale for 1 hour
         assert!(!cache.is_stale(std::time::Duration::from_secs(3600)).await);
+    }
+
+    #[tokio::test]
+    async fn test_content_cache_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let client = ClawHubClient::new("http://localhost:9999");
+        let cache = ClawHubCache::new(tmp.path(), client);
+
+        // Initially empty
+        assert!(cache.get_content("my-skill").await.is_none());
+
+        // Set content
+        cache
+            .set_content("my-skill", "# My Skill\nDoes things.")
+            .await
+            .unwrap();
+
+        // Read it back
+        let content = cache.get_content("my-skill").await.unwrap();
+        assert_eq!(content, "# My Skill\nDoes things.");
+    }
+
+    #[tokio::test]
+    async fn test_content_cache_overwrites() {
+        let tmp = tempfile::tempdir().unwrap();
+        let client = ClawHubClient::new("http://localhost:9999");
+        let cache = ClawHubCache::new(tmp.path(), client);
+
+        cache.set_content("s", "v1").await.unwrap();
+        cache.set_content("s", "v2").await.unwrap();
+        assert_eq!(cache.get_content("s").await.unwrap(), "v2");
     }
 }

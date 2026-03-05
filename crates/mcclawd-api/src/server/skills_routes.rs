@@ -19,6 +19,7 @@ use mcclawd_core::clawhub::cache::CachedSearchResult;
 use mcclawd_core::clawhub::installer::{InstalledSkillInfo, SkillInstaller};
 use mcclawd_core::clawhub::{ClawHubCache, ClawHubClient, ClawHubSearchResult};
 use mcclawd_core::clawhub::ClawHubSkillMeta;
+use mcclawd_core::scanner::{self, ScanResult, ScanStatus};
 
 use super::state::AppState;
 
@@ -118,7 +119,7 @@ pub async fn install_skill(
 }
 
 /// GET /api/skills/{name}/content — read the full SKILL.md text.
-/// Tries: 1) installed on disk, 2) download from ClawHub.
+/// Tries: 1) installed on disk, 2) content cache, 3) download from ClawHub (and cache).
 pub async fn skill_content(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -126,31 +127,18 @@ pub async fn skill_content(
     // 1. Try installed skill on disk
     let config = state.config.read().await;
     let skill_md_path = config.skills.managed_dir.join(&name).join("SKILL.md");
-    let clawhub_api = config.skills.clawhub_api.clone();
     drop(config);
 
     if let Ok(content) = tokio::fs::read_to_string(&skill_md_path).await {
         return Ok(Json(serde_json::json!({ "name": name, "content": content })));
     }
 
-    // 2. Try downloading from ClawHub (get version from cache or API)
+    // 2. Try content cache, then download from ClawHub (caches on success)
     let cache = build_cache(&state).await;
-    let client = ClawHubClient::new(&clawhub_api);
-    let version = match cache.get_skill(&name).await {
-        Some(s) => s.version,
+    match cache.get_or_download_content(&name).await {
+        Some(content) => Ok(Json(serde_json::json!({ "name": name, "content": content }))),
         None => {
-            // No cached version — fetch detail from ClawHub to get the latest version
-            match client.get_skill(&name, None).await {
-                Ok(meta) => meta.version,
-                Err(_) => "latest".to_string(),
-            }
-        }
-    };
-
-    match client.download_skill_md(&name, &version).await {
-        Ok(content) => Ok(Json(serde_json::json!({ "name": name, "content": content }))),
-        Err(e) => {
-            tracing::debug!("Could not fetch SKILL.md for '{name}': {e}");
+            tracing::debug!("SKILL.md not available for '{name}' (not installed, not cached, download failed)");
             Err((
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": format!("SKILL.md not available for '{name}'")})),
@@ -281,6 +269,74 @@ pub async fn refresh_catalog_stream(
     });
 
     Sse::new(stream)
+}
+
+/// GET /api/skills/{name}/scan — run security scan on a skill (installed or catalog).
+/// Caches results in AppState.scan_cache (DashMap).
+/// For uninstalled skills, downloads SKILL.md to a temp dir and scans there.
+pub async fn scan_skill(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<ScanResult>, (StatusCode, Json<serde_json::Value>)> {
+    // Check cache first
+    if let Some(cached) = state.scan_cache.get(&name) {
+        return Ok(Json(cached.clone()));
+    }
+
+    // Try installed path first
+    let config = state.config.read().await;
+    let skill_path = config.skills.managed_dir.join(&name);
+    let cache_dir = config.skills.cache_dir.clone();
+    let clawhub_api = config.skills.clawhub_api.clone();
+    drop(config);
+
+    let scan_path = if skill_path.exists() {
+        skill_path
+    } else {
+        // Not installed — check if we have cached SKILL.md content
+        let content_cache = cache_dir.join("skill_content").join(format!("{}.md", &name));
+        if content_cache.exists() {
+            // Create temp dir with SKILL.md for scanner
+            let tmp = std::env::temp_dir().join(format!("mcclawd_scan_{}", &name));
+            let _ = std::fs::create_dir_all(&tmp);
+            let _ = std::fs::copy(&content_cache, tmp.join("SKILL.md"));
+            tmp
+        } else {
+            // Try to download SKILL.md from ClawHub
+            let client = mcclawd_core::clawhub::client::ClawHubClient::new(&clawhub_api);
+            match client.download_skill_md(&name, "latest").await {
+                Ok(content) => {
+                    let tmp = std::env::temp_dir().join(format!("mcclawd_scan_{}", &name));
+                    let _ = std::fs::create_dir_all(&tmp);
+                    let _ = std::fs::write(tmp.join("SKILL.md"), &content);
+                    tmp
+                }
+                Err(_) => {
+                    // Can't get content — return NotScanned
+                    let result = ScanResult {
+                        status: ScanStatus::NotScanned,
+                        issues: vec![],
+                    };
+                    return Ok(Json(result));
+                }
+            }
+        }
+    };
+
+    match scanner::scan_skill(&scan_path).await {
+        Ok(result) => {
+            state.scan_cache.insert(name, result.clone());
+            Ok(Json(result))
+        }
+        Err(e) => {
+            tracing::error!("Scan failed for skill '{}': {e}", name);
+            let result = ScanResult {
+                status: ScanStatus::NotScanned,
+                issues: vec![],
+            };
+            Ok(Json(result))
+        }
+    }
 }
 
 #[cfg(test)]

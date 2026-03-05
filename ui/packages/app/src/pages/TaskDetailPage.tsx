@@ -1,10 +1,19 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "react-router";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, StopCircle, Send, Loader2 } from "lucide-react";
 import { api } from "../api/client";
 import { useTaskStream } from "../hooks/useTaskStream";
 import { StreamEntry } from "../components/StreamEntry";
+import {
+  useFileAttachments,
+  DropZone,
+  AttachButton,
+  FileThumbnails,
+  FilePreviewDialog,
+} from "../components/FileAttachments";
+import type { AttachedFile } from "../components/FileAttachments";
+import { MicButton } from "../components/MicButton";
 
 export function TaskDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -12,6 +21,8 @@ export function TaskDetailPage() {
   const { events, statusMessage, connected, done, reconnect } = useTaskStream(id);
   const [followUp, setFollowUp] = useState("");
   const [sending, setSending] = useState(false);
+  const [previewFile, setPreviewFile] = useState<AttachedFile | null>(null);
+  const { files: attachedFiles, addFiles, removeFile, clear: clearFiles } = useFileAttachments();
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const { data: task } = useQuery({
@@ -28,13 +39,32 @@ export function TaskDetailPage() {
 
   const isRunning = connected && !done;
 
+  // Mic dictation for follow-up input
+  const followUpBeforeMicRef = useRef(followUp);
+
+  const handleFollowUpInterim = useCallback((text: string) => {
+    const base = followUpBeforeMicRef.current;
+    setFollowUp(base ? base + " " + text : text);
+  }, []);
+
+  const handleFollowUpTranscript = useCallback((text: string) => {
+    const base = followUpBeforeMicRef.current;
+    const final_ = base ? base + " " + text : text;
+    setFollowUp(final_);
+    followUpBeforeMicRef.current = final_;
+  }, []);
+
   const handleSendFollowUp = async () => {
     if (!id || !followUp.trim() || sending) return;
     const message = followUp.trim();
     setSending(true);
     try {
       await api.tasks.sendMessage(id, message);
+      if (attachedFiles.length > 0) {
+        await api.tasks.uploadAttachments(id, attachedFiles.map((f) => f.file));
+      }
       setFollowUp("");
+      clearFiles();
       reconnect(message);
     } catch (err) {
       console.error("Failed to send follow-up:", err);
@@ -105,25 +135,55 @@ export function TaskDetailPage() {
 
       {/* Follow-up input — visible when task is done */}
       {done && (
-        <div className="flex items-center gap-3 py-3 border-t border-border">
-          <input
-            type="text"
-            value={followUp}
-            onChange={(e) => setFollowUp(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSendFollowUp()}
-            placeholder="Send a follow-up message..."
-            className="flex-1 bg-muted rounded-lg px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-primary/50"
-            disabled={sending}
-          />
-          <button
-            onClick={handleSendFollowUp}
-            disabled={!followUp.trim() || sending}
-            className="p-2.5 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-          </button>
-        </div>
+        <DropZone onDrop={addFiles} disabled={sending}>
+          <div className="py-3 border-t border-border space-y-2">
+            {attachedFiles.length > 0 && (
+              <div className="px-1">
+                <FileThumbnails
+                  files={attachedFiles}
+                  onRemove={removeFile}
+                  onPreview={setPreviewFile}
+                  disabled={sending}
+                />
+              </div>
+            )}
+            <div className="flex items-center gap-3">
+              <AttachButton onFiles={addFiles} disabled={sending} compact />
+              <input
+                type="text"
+                value={followUp}
+                onChange={(e) => setFollowUp(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    handleSendFollowUp();
+                    clearFiles();
+                  }
+                }}
+                placeholder="Send a follow-up message... (drag files to attach)"
+                className="flex-1 bg-muted rounded-lg px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-primary/50"
+                disabled={sending}
+              />
+              <MicButton
+                onTranscript={handleFollowUpTranscript}
+                onInterim={handleFollowUpInterim}
+                disabled={sending}
+                size="sm"
+              />
+              <button
+                onClick={() => {
+                  handleSendFollowUp();
+                  clearFiles();
+                }}
+                disabled={!followUp.trim() || sending}
+                className="p-2.5 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+              </button>
+            </div>
+          </div>
+        </DropZone>
       )}
+      <FilePreviewDialog file={previewFile} onClose={() => setPreviewFile(null)} />
     </div>
   );
 }

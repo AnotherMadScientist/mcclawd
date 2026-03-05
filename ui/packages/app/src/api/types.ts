@@ -41,7 +41,22 @@ export type StreamChunk =
   | { ToolEnd: { name: string; summary: string | null } }
   | { StatusIndicator: "Typing" | "Processing" | "UploadingMedia" | "Done" }
   | "Done"
-  | { Error: string };
+  | { Error: string }
+  | {
+      Attachments: Array<{
+        name: string;
+        size: number;
+        content_type: string;
+        url: string;
+      }>;
+    };
+
+export interface AttachmentMeta {
+  name: string;
+  size: number;
+  content_type: string;
+  url: string;
+}
 
 export interface InstalledSkill {
   name: string;
@@ -78,4 +93,17 @@ export interface CacheStats {
   skill_count: number;
   last_refreshed: string | null;
   cache_path: string;
+}
+
+export type ScanStatus = "Pass" | "Warning" | "Critical" | "NotScanned";
+
+export interface ScanIssue {
+  code: string;
+  severity: string;
+  description: string;
+}
+
+export interface ScanResult {
+  status: ScanStatus;
+  issues: ScanIssue[];
 }
