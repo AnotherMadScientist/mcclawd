@@ -50,6 +50,9 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
 }
 
 export const api = {
+  health: {
+    llm: () => apiFetch<{ ok: boolean; error?: string }>("/api/health/llm"),
+  },
   auth: {
     login: (password: string) =>
       apiFetch<{ token: string }>("/api/auth/login", {

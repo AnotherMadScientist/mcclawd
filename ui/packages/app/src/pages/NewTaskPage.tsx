@@ -66,6 +66,12 @@ export function NewTaskPage() {
     queryFn: api.mcp.servers,
   });
 
+  const { data: llmHealth } = useQuery({
+    queryKey: ["llm-health"],
+    queryFn: api.health.llm,
+    refetchInterval: 30_000,
+  });
+
   const createTask = useMutation({
     mutationFn: async () => {
       const task = await api.tasks.create(prompt);
@@ -156,9 +162,9 @@ export function NewTaskPage() {
           <ResourceCard
             icon={Brain}
             title={config?.agent.model || "claude-sonnet-4-5"}
-            description="AI model powering the agent"
+            description={llmHealth?.ok ? "AI model powering the agent" : llmHealth?.error || "Checking LLM connection..."}
             color="text-violet-400"
-            status="active"
+            status={llmHealth?.ok ? "active" : "inactive"}
           />
           <ResourceCard
             icon={FileText}

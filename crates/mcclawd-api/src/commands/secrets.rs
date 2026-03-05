@@ -31,15 +31,19 @@ fn get_backend() -> anyhow::Result<EncryptedFileBackend> {
     )?)
 }
 
-pub async fn set(key: &str) -> anyhow::Result<()> {
-    eprint!("Enter value for {}: ", key);
-    io::stderr().flush()?;
-    let mut value = String::new();
-    io::stdin().read_line(&mut value)?;
-    let value = value.trim();
+pub async fn set(key: &str, inline_value: Option<&str>) -> anyhow::Result<()> {
+    let value = if let Some(v) = inline_value {
+        v.to_string()
+    } else {
+        eprint!("Enter value for {}: ", key);
+        io::stderr().flush()?;
+        let mut buf = String::new();
+        io::stdin().read_line(&mut buf)?;
+        buf.trim().to_string()
+    };
 
     let backend = get_backend()?;
-    backend.set(key, value).await?;
+    backend.set(key, &value).await?;
     println!("Secret '{}' saved.", key);
     Ok(())
 }

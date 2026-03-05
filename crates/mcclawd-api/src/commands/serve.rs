@@ -8,7 +8,7 @@ use crate::sandbox::{ImageBuilder, SandboxOrchestrator};
 use crate::server::pg_store::PgTaskStore;
 use crate::server::{routes, state::AppState};
 use crate::supervisor::AgentSupervisor;
-use mcclawd_core::secrets::EncryptedFileBackend;
+use mcclawd_core::secrets::{EncryptedFileBackend, SecretBackend};
 use mcclawd_core::skills::SandboxConfig;
 use mcclawd_core::types::TaskId;
 use mcclawd_core::McclawdConfig;
@@ -263,6 +263,21 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
                             }
                         }
                     };
+                    // Auto-seed ANTHROPIC_API_KEY from env if not already in vault
+                    if let Ok(env_key) = std::env::var("ANTHROPIC_API_KEY") {
+                        if !env_key.is_empty() {
+                            match backend.get("ANTHROPIC_API_KEY").await {
+                                Ok(Some(v)) if !v.is_empty() => {}
+                                _ => {
+                                    if let Err(e) = backend.set("ANTHROPIC_API_KEY", &env_key).await {
+                                        tracing::warn!("Failed to seed ANTHROPIC_API_KEY from env: {e}");
+                                    } else {
+                                        tracing::info!("Seeded ANTHROPIC_API_KEY from environment into vault");
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let mut secrets = state.secrets.write().await;
                     *secrets = Some(Arc::new(backend));
                 }

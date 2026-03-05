@@ -55,7 +55,12 @@ enum Commands {
 #[derive(Subcommand)]
 enum SecretsAction {
     /// Set a secret value
-    Set { key: String },
+    Set {
+        key: String,
+        /// Value to set (if omitted, prompts interactively)
+        #[arg(long)]
+        value: Option<String>,
+    },
     /// Get a secret value (masked)
     Get { key: String },
     /// List all secret keys
@@ -120,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
             commands::run::execute(&prompt, &workspace, swarm).await?;
         }
         Commands::Secrets { action } => match action {
-            SecretsAction::Set { key } => commands::secrets::set(&key).await?,
+            SecretsAction::Set { key, value } => commands::secrets::set(&key, value.as_deref()).await?,
             SecretsAction::Get { key } => commands::secrets::get(&key).await?,
             SecretsAction::List => commands::secrets::list().await?,
             SecretsAction::Delete { key } => commands::secrets::delete(&key).await?,

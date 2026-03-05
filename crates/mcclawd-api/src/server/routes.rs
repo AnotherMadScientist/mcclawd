@@ -1,7 +1,9 @@
 use axum::{
+    extract::State,
+    http::StatusCode,
     middleware,
     routing::{delete, get, post, put},
-    Router,
+    Json, Router,
 };
 
 use super::auth;
@@ -139,6 +141,8 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/api/providers/usage", get(providers::provider_usage))
         // Config reload
         .route("/api/config/reload", post(providers::reload_config))
+        // LLM health check (tiny API call to verify key works)
+        .route("/api/health/llm", get(llm_health))
         // System agent
         .route("/api/system-agent/chat", post(system_agent::chat))
         .route(
@@ -153,4 +157,68 @@ pub fn api_router(state: AppState) -> Router<AppState> {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Check if the LLM is reachable by doing a tiny Anthropic API call (max_tokens=1).
+/// Returns { "ok": true/false, "error": "..." }
+async fn llm_health(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    // 1. Check if vault is unlocked and ANTHROPIC_API_KEY exists
+    let api_key = {
+        let secrets = state.secrets.read().await;
+        match secrets.as_ref() {
+            Some(backend) => match backend.get("ANTHROPIC_API_KEY").await {
+                Ok(Some(key)) if !key.is_empty() => key,
+                _ => {
+                    return (
+                        StatusCode::OK,
+                        Json(serde_json::json!({ "ok": false, "error": "ANTHROPIC_API_KEY not set" })),
+                    );
+                }
+            },
+            None => {
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "ok": false, "error": "Vault locked" })),
+                );
+            }
+        }
+    };
+
+    // 2. Tiny API call — 1 token, cheapest model
+    let client = reqwest::Client::new();
+    let res = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await;
+
+    match res {
+        Ok(r) if r.status().is_success() => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true })),
+        ),
+        Ok(r) => {
+            let status = r.status().as_u16();
+            let body = r.text().await.unwrap_or_default();
+            let msg = if status == 401 { "Invalid API key" } else { &body };
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "ok": false, "error": msg })),
+            )
+        }
+        Err(e) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": false, "error": format!("Network error: {e}") })),
+        ),
+    }
 }
