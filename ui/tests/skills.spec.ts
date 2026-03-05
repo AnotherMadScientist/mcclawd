@@ -13,13 +13,21 @@ test.describe("Skills Page", () => {
     ).toBeVisible();
   });
 
-  test("shows no skills installed message", async ({ page }) => {
-    await expect(page.getByText("No skills installed")).toBeVisible();
+  test("shows search input for browsing catalog", async ({ page }) => {
+    await expect(
+      page.getByPlaceholder("Search skills...")
+    ).toBeVisible();
   });
 
-  test("shows Phase 1+ notice about ClawHub", async ({ page }) => {
+  test("shows Sync button for catalog refresh", async ({ page }) => {
     await expect(
-      page.getByText(/ClawHub integration coming/)
+      page.getByRole("button", { name: /Sync/ })
+    ).toBeVisible();
+  });
+
+  test("shows Create button for new skills", async ({ page }) => {
+    await expect(
+      page.getByRole("button", { name: /Create/ })
     ).toBeVisible();
   });
 });

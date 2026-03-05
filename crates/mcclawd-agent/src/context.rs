@@ -57,8 +57,10 @@ impl ContextBuilder {
             }
         }
 
-        // 5. Response formatting instructions
-        sections.push("\n---\n\n## Response Guidelines\n\nAlways include source links in your responses when referencing external information. Format sources as a \"Sources\" section at the end of your response with clickable markdown links:\n\n**Sources:**\n- [Title](URL)\n\nIf you used tools to retrieve information, cite the source URL. If no external sources were used, omit the Sources section.".to_string());
+        // 5. Response formatting instructions (only if we have content)
+        if !sections.is_empty() {
+            sections.push("\n---\n\n## Response Guidelines\n\nAlways include source links in your responses when referencing external information. Format sources as a \"Sources\" section at the end of your response with clickable markdown links:\n\n**Sources:**\n- [Title](URL)\n\nIf you used tools to retrieve information, cite the source URL. If no external sources were used, omit the Sources section.".to_string());
+        }
 
         sections.join("\n")
     }

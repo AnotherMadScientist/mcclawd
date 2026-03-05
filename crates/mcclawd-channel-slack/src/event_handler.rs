@@ -278,7 +278,7 @@ pub fn format_outbound(
                 None
             }
         }
-        OutboundChunk::UserMessage(_) | OutboundChunk::Done => None,
+        OutboundChunk::UserMessage(_) | OutboundChunk::Attachments(_) | OutboundChunk::Done => None,
     }
 }
 

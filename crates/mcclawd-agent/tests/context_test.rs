@@ -38,8 +38,8 @@ fn test_context_handles_missing_optional_files() {
     let builder = ContextBuilder::new(ws);
     let prompt = builder.build_system_prompt();
     assert!(prompt.contains("Minimal agent."));
-    // No separators when only soul is present
-    assert!(!prompt.contains("---"));
+    // Response guidelines are always appended when there's content
+    assert!(prompt.contains("Response Guidelines"));
 }
 
 #[test]
