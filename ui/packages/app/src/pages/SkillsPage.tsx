@@ -445,8 +445,8 @@ function SkillDetailDialog({
     queryFn: () => api.skills.detail(name).catch(() => null),
   });
 
-  // Fetch full SKILL.md content (only succeeds for installed skills)
-  const { data: skillContent } = useQuery({
+  // Fetch full SKILL.md content (tries disk first, then ClawHub download)
+  const { data: skillContent, isLoading: contentLoading } = useQuery({
     queryKey: ["skill-content", name],
     queryFn: () => api.skills.content(name).then((r) => r.content).catch(() => null),
   });
@@ -556,19 +556,22 @@ function SkillDetailDialog({
 
         {/* Body — full SKILL.md with section annotations */}
         <div className="flex-1 overflow-y-auto">
-          {metaLoading && (
-            <div className="flex justify-center py-16">
+          {(metaLoading || contentLoading) && (
+            <div className="flex flex-col items-center justify-center py-16 gap-2">
               <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+              <p className="text-xs text-muted-foreground">
+                {contentLoading ? "Fetching SKILL.md content..." : "Loading metadata..."}
+              </p>
             </div>
           )}
 
-          {!metaLoading && !skill && (
+          {!metaLoading && !contentLoading && !skill && (
             <p className="text-muted-foreground text-sm text-center py-12">
               Skill details not available. Try refreshing the catalog.
             </p>
           )}
 
-          {!metaLoading && skill && sections.length > 0 && (
+          {!metaLoading && !contentLoading && skill && sections.length > 0 && (
             <div className="font-mono text-[13px] leading-relaxed">
               {isStub && (
                 <div className="px-6 py-2 bg-amber-500/5 border-b border-amber-500/20 text-amber-400 text-xs font-sans">
