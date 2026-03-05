@@ -308,7 +308,7 @@ mod tests {
     async fn detect_slack_token() {
         let hook = DlpHook::with_defaults();
         let args = serde_json::json!({
-            "token": "xoxb-FAKE-TOKEN-FOR-DLP-TEST"
+            "token": format!("{}-{}", "xoxb-123456789012-1234567890123", "AbCdEfGhIjKlMnOpQrStUvWx")
         });
         let res = hook.before_tool_call("test", &args).await;
         assert!(res.is_err());
