@@ -45,12 +45,11 @@ impl SkillInstaller {
         let meta = self.client.get_skill(name, version).await?;
         let dest = self.skills_dir.join(&meta.name);
 
+        // Idempotent: return existing install info if already present
         if dest.exists() {
-            anyhow::bail!(
-                "Skill '{}' already installed at {}. Uninstall first or use upgrade.",
-                meta.name,
-                dest.display()
-            );
+            if let Ok(Some(existing)) = self.read_installed_info(&meta.name) {
+                return Ok(existing);
+            }
         }
 
         // Download and extract
@@ -77,6 +76,44 @@ impl SkillInstaller {
         })?;
 
         // Write .installed.json
+        let info = InstalledSkillInfo {
+            name: meta.name.clone(),
+            version: meta.version.clone(),
+            source: SkillSource::Registry {
+                registry_url: self.client.base_url().to_string(),
+            },
+            installed_at: Utc::now(),
+        };
+        self.write_installed_info(&meta.name, &info)?;
+
+        Ok(info)
+    }
+
+    /// Install a skill from cached metadata (no download — generates a stub SKILL.md).
+    /// Used as fallback when the real registry is unreachable.
+    pub fn install_from_meta(&self, meta: &ClawHubSkillMeta) -> anyhow::Result<InstalledSkillInfo> {
+        let dest = self.skills_dir.join(&meta.name);
+        // Idempotent: return existing install info if already present
+        if dest.exists() {
+            if let Ok(Some(existing)) = self.read_installed_info(&meta.name) {
+                return Ok(existing);
+            }
+        }
+
+        std::fs::create_dir_all(&dest)?;
+
+        // Generate a minimal SKILL.md
+        let tags_line = if meta.tags.is_empty() {
+            String::new()
+        } else {
+            format!("tags: {}\n", meta.tags.join(", "))
+        };
+        let skill_md = format!(
+            "---\nname: {}\nversion: {}\nauthor: {}\n{}---\n\n# {}\n\n{}\n",
+            meta.name, meta.version, meta.author, tags_line, meta.name, meta.description
+        );
+        std::fs::write(dest.join("SKILL.md"), &skill_md)?;
+
         let info = InstalledSkillInfo {
             name: meta.name.clone(),
             version: meta.version.clone(),

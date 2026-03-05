@@ -26,6 +26,7 @@ notify = { workspace = true }
 reqwest = { workspace = true }
 tar = { workspace = true }
 flate2 = { workspace = true }
+zip = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

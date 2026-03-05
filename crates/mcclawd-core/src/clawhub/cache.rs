@@ -67,45 +67,56 @@ impl ClawHubCache {
         Ok(())
     }
 
-    /// Refresh the cache from the ClawHub registry.
-    /// Falls back to built-in seed catalog if the registry is unreachable.
+    /// Refresh the cache from the ClawHub registry using cursor-based pagination.
     /// Returns the number of skills cached.
     pub async fn refresh(&self) -> anyhow::Result<usize> {
+        self.refresh_with_progress(|_, _| {}).await
+    }
+
+    /// Refresh with a progress callback called after each batch: (fetched_so_far, batch_skills).
+    pub async fn refresh_with_progress<F>(
+        &self,
+        mut on_batch: F,
+    ) -> anyhow::Result<usize>
+    where
+        F: FnMut(usize, &[ClawHubSkillMeta]),
+    {
         let mut all_skills = Vec::new();
-        let mut page = 0u64;
-        let mut live_ok = true;
-        loop {
-            match self.client.search("", page).await {
+        let mut cursor: Option<String> = None;
+        let max_pages = 100;
+
+        for _ in 0..max_pages {
+            match self.client.list_skills(200, cursor.as_deref()).await {
                 Ok(result) => {
                     let batch_len = result.skills.len();
-                    all_skills.extend(result.skills);
-                    if all_skills.len() as u64 >= result.total || batch_len == 0 || page > 25 {
+                    all_skills.extend(result.skills.clone());
+
+                    // Save incrementally and notify
+                    let catalog = CachedCatalog {
+                        skills: all_skills.clone(),
+                        last_refreshed: Utc::now(),
+                        total: all_skills.len() as u64,
+                    };
+                    let _ = self.save_to_disk(&catalog).await;
+                    *self.catalog.write().await = Some(catalog);
+                    on_batch(all_skills.len(), &result.skills);
+
+                    if batch_len == 0 || result.next_cursor.is_none() {
                         break;
                     }
-                    page += 1;
+                    cursor = result.next_cursor;
                 }
                 Err(e) => {
-                    tracing::warn!("ClawHub registry unreachable, using seed catalog: {e}");
-                    live_ok = false;
+                    tracing::warn!("ClawHub registry unreachable: {e}");
+                    if all_skills.is_empty() {
+                        anyhow::bail!("ClawHub registry unreachable: {e}");
+                    }
                     break;
                 }
             }
         }
 
-        // If live fetch failed or returned nothing, use built-in seed catalog.
-        if !live_ok || all_skills.is_empty() {
-            all_skills = seed_catalog();
-        }
-
-        let count = all_skills.len();
-        let catalog = CachedCatalog {
-            skills: all_skills,
-            last_refreshed: Utc::now(),
-            total: count as u64,
-        };
-        self.save_to_disk(&catalog).await?;
-        *self.catalog.write().await = Some(catalog);
-        Ok(count)
+        Ok(all_skills.len())
     }
 
     /// Search the cached catalog locally (case-insensitive substring match on name, description, tags).
@@ -203,72 +214,6 @@ pub struct CachedSearchResult {
     pub page: u64,
     pub cached: bool,
     pub last_refreshed: Option<DateTime<Utc>>,
-}
-
-/// Built-in seed catalog for when ClawHub registry is unreachable.
-fn seed_catalog() -> Vec<ClawHubSkillMeta> {
-    vec![
-        ClawHubSkillMeta {
-            name: "code-review".into(), version: "1.2.0".into(), author: "macleodlabs".into(),
-            description: "Automated code review — analyses diffs and suggests improvements".into(),
-            downloads: 2841, tags: vec!["review".into(), "quality".into(), "ai".into()],
-            updated_at: "2025-12-10T10:00:00Z".into(),
-        },
-        ClawHubSkillMeta {
-            name: "memory-store".into(), version: "1.0.3".into(), author: "macleodlabs".into(),
-            description: "Persistent memory with vector-backed recall for long-running agents".into(),
-            downloads: 1953, tags: vec!["memory".into(), "vector".into(), "rag".into()],
-            updated_at: "2025-11-28T08:30:00Z".into(),
-        },
-        ClawHubSkillMeta {
-            name: "web-scraper".into(), version: "2.1.0".into(), author: "clawhub".into(),
-            description: "Web scraping with headless browser, selectors, and structured output".into(),
-            downloads: 1247, tags: vec!["web".into(), "scraping".into(), "mcp".into()],
-            updated_at: "2025-12-01T14:20:00Z".into(),
-        },
-        ClawHubSkillMeta {
-            name: "test-runner".into(), version: "1.1.0".into(), author: "opensrc".into(),
-            description: "Run and analyse test suites across languages with AI-powered failure triage".into(),
-            downloads: 987, tags: vec!["testing".into(), "ci".into(), "triage".into()],
-            updated_at: "2025-11-15T09:00:00Z".into(),
-        },
-        ClawHubSkillMeta {
-            name: "doc-writer".into(), version: "0.9.0".into(), author: "macleodlabs".into(),
-            description: "Generate and maintain API docs, READMEs, and changelogs from code".into(),
-            downloads: 756, tags: vec!["docs".into(), "markdown".into(), "api".into()],
-            updated_at: "2025-10-22T16:45:00Z".into(),
-        },
-        ClawHubSkillMeta {
-            name: "sql-analyst".into(), version: "1.0.0".into(), author: "dataforge".into(),
-            description: "Natural language to SQL with schema awareness and query explanation".into(),
-            downloads: 632, tags: vec!["sql".into(), "database".into(), "analytics".into()],
-            updated_at: "2025-12-05T11:10:00Z".into(),
-        },
-        ClawHubSkillMeta {
-            name: "git-assistant".into(), version: "0.8.1".into(), author: "clawhub".into(),
-            description: "Smart git operations — commit messages, PR descriptions, branch management".into(),
-            downloads: 1102, tags: vec!["git".into(), "vcs".into(), "productivity".into()],
-            updated_at: "2025-11-20T13:30:00Z".into(),
-        },
-        ClawHubSkillMeta {
-            name: "k8s-helper".into(), version: "1.0.0".into(), author: "cloudops".into(),
-            description: "Kubernetes troubleshooting, manifest generation, and cluster health checks".into(),
-            downloads: 489, tags: vec!["kubernetes".into(), "devops".into(), "cloud".into()],
-            updated_at: "2025-12-08T07:15:00Z".into(),
-        },
-        ClawHubSkillMeta {
-            name: "image-describer".into(), version: "0.5.0".into(), author: "visionai".into(),
-            description: "Describe, caption, and extract text from images using multimodal AI".into(),
-            downloads: 321, tags: vec!["vision".into(), "multimodal".into(), "ocr".into()],
-            updated_at: "2025-09-30T10:00:00Z".into(),
-        },
-        ClawHubSkillMeta {
-            name: "slack-summarizer".into(), version: "1.3.0".into(), author: "macleodlabs".into(),
-            description: "Summarize Slack channels, threads, and DMs with configurable detail levels".into(),
-            downloads: 874, tags: vec!["slack".into(), "summary".into(), "communication".into()],
-            updated_at: "2025-12-02T15:00:00Z".into(),
-        },
-    ]
 }
 
 /// Cache statistics.

@@ -117,6 +117,11 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             get(skills_routes::skill_detail),
         )
         .route("/api/skills/refresh", post(skills_routes::refresh_catalog))
+        .route("/api/skills/refresh-stream", get(skills_routes::refresh_catalog_stream))
+        .route(
+            "/api/skills/{name}/content",
+            get(skills_routes::skill_content),
+        )
         .route("/api/skills/{name}", delete(skills_routes::uninstall_skill))
         // Providers
         .route("/api/providers", get(providers::list_providers))

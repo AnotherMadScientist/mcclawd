@@ -102,7 +102,7 @@ fn default_skills_managed_dir() -> PathBuf {
 }
 
 fn default_clawhub_api() -> String {
-    "https://api.clawhub.com".to_string()
+    "https://clawhub.ai".to_string()
 }
 
 fn default_skills_cache_dir() -> PathBuf {
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn test_config_default_has_skills() {
         let config = McclawdConfig::default();
-        assert_eq!(config.skills.clawhub_api, "https://api.clawhub.com");
+        assert_eq!(config.skills.clawhub_api, "https://clawhub.ai");
         assert!(config.skills.managed_dir.ends_with("skills"));
     }
 
@@ -313,7 +313,7 @@ cache_dir = "/custom/cache"
 max_turns = 10
 "#;
         let config: McclawdConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.skills.clawhub_api, "https://api.clawhub.com");
+        assert_eq!(config.skills.clawhub_api, "https://clawhub.ai");
         assert!(config.skills.managed_dir.ends_with("skills"));
         assert!(config.skills.cache_dir.ends_with("cache"));
     }

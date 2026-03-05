@@ -5,10 +5,15 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{
+        sse::{Event, Sse},
+        IntoResponse,
+    },
     Json,
 };
+use futures_util::stream::Stream;
 use serde::Deserialize;
+use std::convert::Infallible;
 
 use mcclawd_core::clawhub::cache::CachedSearchResult;
 use mcclawd_core::clawhub::installer::{InstalledSkillInfo, SkillInstaller};
@@ -76,19 +81,74 @@ pub async fn search_clawhub(
 }
 
 /// POST /api/skills/install — install a skill from the registry.
+/// Falls back to installing from cached metadata when the registry is unreachable.
 pub async fn install_skill(
     State(state): State<AppState>,
     Json(body): Json<InstallRequest>,
 ) -> Result<Json<InstalledSkillInfo>, impl IntoResponse> {
     let (_, installer) = build_installer(&state).await;
     let version = body.version.as_deref();
+
+    // Try real registry first
     match installer.install_from_registry(&body.name, version).await {
-        Ok(info) => Ok(Json(info)),
+        Ok(info) => return Ok(Json(info)),
         Err(e) => {
-            tracing::error!("Failed to install skill '{}': {e}", body.name);
+            tracing::warn!("Registry install failed for '{}', trying cache fallback: {e}", body.name);
+        }
+    }
+
+    // Fallback: install from cached metadata (generates stub SKILL.md)
+    let cache = build_cache(&state).await;
+    match cache.get_skill(&body.name).await {
+        Some(meta) => match installer.install_from_meta(&meta) {
+            Ok(info) => Ok(Json(info)),
+            Err(e) => {
+                tracing::error!("Failed to install skill '{}' from cache: {e}", body.name);
+                Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("Failed to install skill: {e}")})),
+                ))
+            }
+        },
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("Skill '{}' not found in registry or cache", body.name)})),
+        )),
+    }
+}
+
+/// GET /api/skills/{name}/content — read the full SKILL.md text.
+/// Tries: 1) installed on disk, 2) download from ClawHub.
+pub async fn skill_content(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, impl IntoResponse> {
+    // 1. Try installed skill on disk
+    let config = state.config.read().await;
+    let skill_md_path = config.skills.managed_dir.join(&name).join("SKILL.md");
+    let clawhub_api = config.skills.clawhub_api.clone();
+    drop(config);
+
+    if let Ok(content) = tokio::fs::read_to_string(&skill_md_path).await {
+        return Ok(Json(serde_json::json!({ "name": name, "content": content })));
+    }
+
+    // 2. Try downloading from ClawHub (get version from cache first)
+    let cache = build_cache(&state).await;
+    let version = cache
+        .get_skill(&name)
+        .await
+        .map(|s| s.version)
+        .unwrap_or_else(|| "latest".to_string());
+
+    let client = ClawHubClient::new(&clawhub_api);
+    match client.download_skill_md(&name, &version).await {
+        Ok(content) => Ok(Json(serde_json::json!({ "name": name, "content": content }))),
+        Err(e) => {
+            tracing::debug!("Could not fetch SKILL.md for '{name}': {e}");
             Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to install skill: {e}")})),
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("SKILL.md not available for '{name}'")})),
             ))
         }
     }
@@ -185,6 +245,37 @@ pub async fn refresh_catalog(
             }))
         }
     }
+}
+
+/// GET /api/skills/refresh-stream — SSE stream of refresh progress.
+/// Sends events as batches arrive: {"fetched": N} and final {"done": true, "total": N}.
+pub async fn refresh_catalog_stream(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let cache = build_cache(&state).await;
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
+
+    tokio::spawn(async move {
+        let tx2 = tx.clone();
+        let result = cache
+            .refresh_with_progress(|fetched, _batch| {
+                let data = serde_json::json!({"fetched": fetched}).to_string();
+                let _ = tx2.try_send(data);
+            })
+            .await;
+
+        let final_data = match result {
+            Ok(total) => serde_json::json!({"done": true, "total": total}).to_string(),
+            Err(e) => serde_json::json!({"done": true, "total": 0, "error": e.to_string()}).to_string(),
+        };
+        let _ = tx.send(final_data).await;
+    });
+
+    let stream = futures_util::stream::unfold(rx, |mut rx| async {
+        rx.recv().await.map(|data| (Ok(Event::default().data(data)), rx))
+    });
+
+    Sse::new(stream)
 }
 
 #[cfg(test)]

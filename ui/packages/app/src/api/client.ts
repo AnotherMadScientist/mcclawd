@@ -135,6 +135,8 @@ export const api = {
       ),
     detail: (name: string) =>
       apiFetch<ClawHubSkillMeta>(`/api/skills/catalog/${encodeURIComponent(name)}`),
+    content: (name: string) =>
+      apiFetch<{ name: string; content: string }>(`/api/skills/${encodeURIComponent(name)}/content`),
     refresh: () =>
       apiFetch<{ refreshed: number }>("/api/skills/refresh", { method: "POST" }),
     install: (name: string, version?: string) =>
