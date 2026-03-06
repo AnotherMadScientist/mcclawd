@@ -2,8 +2,6 @@ use mcclawd_core::config::McclawdConfig;
 use mcclawd_core::secrets::{EncryptedFileBackend, SecretBackend};
 use std::io::{self, Write};
 
-/// Keys we auto-import from .env into the vault.
-const ENV_IMPORT_KEYS: &[&str] = &["ANTHROPIC_API_KEY", "ANTHROPIC_ADMIN_KEY"];
 
 fn get_backend() -> anyhow::Result<EncryptedFileBackend> {
     let config = McclawdConfig::default();
@@ -157,22 +155,23 @@ pub async fn init(env_file: Option<&str>, auto_yes: bool) -> anyhow::Result<()> 
         }
     };
 
-    // Collect importable keys from environment (loaded by dotenvy in main.rs)
-    let mut found_keys: Vec<(&str, String)> = Vec::new();
-    for &env_key in ENV_IMPORT_KEYS {
-        if let Ok(val) = std::env::var(env_key) {
-            if !val.is_empty() {
-                found_keys.push((env_key, val));
+    // Read .env file via dotenvy (handles multiline, quotes, escapes correctly)
+    let env_path = env_file
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().join(".env"));
+    let mut found_keys: Vec<(String, String)> = Vec::new();
+    if let Ok(iter) = dotenvy::from_path_iter(&env_path) {
+        for item in iter.flatten() {
+            let (key, val) = item;
+            if !key.is_empty() && !val.is_empty() {
+                found_keys.push((key, val));
             }
         }
     }
+    found_keys.sort_by(|a, b| a.0.cmp(&b.0));
 
     if found_keys.is_empty() {
-        println!("\nNo importable keys found in environment/.env");
-        println!("Set them in .env or export them:");
-        for &key in ENV_IMPORT_KEYS {
-            println!("  {key}=sk-...");
-        }
+        println!("\nNo keys found in {}", env_path.display());
     } else {
         // Show what we found and ask for confirmation
         println!("\nFound {} key(s) in environment/.env:", found_keys.len());
@@ -183,8 +182,8 @@ pub async fn init(env_file: Option<&str>, auto_yes: bool) -> anyhow::Result<()> 
                 "****".to_string()
             };
             // Check if already in vault with same value
-            let status = match backend.get(key).await {
-                Ok(Some(existing)) if &existing == val => " (up to date)",
+            let status = match backend.get(key.as_str()).await {
+                Ok(Some(existing)) if existing == *val => " (up to date)",
                 Ok(Some(_)) => " (will update)",
                 _ => " (new)",
             };
@@ -193,12 +192,12 @@ pub async fn init(env_file: Option<&str>, auto_yes: bool) -> anyhow::Result<()> 
 
         if confirm("\nImport these keys into the vault?", auto_yes) {
             for (key, val) in &found_keys {
-                match backend.get(key).await {
-                    Ok(Some(existing)) if &existing == val => {
+                match backend.get(key.as_str()).await {
+                    Ok(Some(existing)) if existing == *val => {
                         // Already up to date, skip
                     }
                     _ => {
-                        backend.set(key, val).await?;
+                        backend.set(key.as_str(), val.as_str()).await?;
                         println!("  {key} imported.");
                     }
                 }

@@ -233,9 +233,16 @@ pub struct SandboxConfig {
     /// CPU limit in nano-CPUs. Default: 1 CPU (1_000_000_000).
     #[serde(default)]
     pub cpu_limit: Option<i64>,
-    /// Docker network name for agent + MCP communication. Default: "mcclawd_tools".
+    /// Docker network name for agent + MCP communication. Default: "mcclawd_default".
     #[serde(default = "default_sandbox_network")]
     pub network: String,
+    /// When true (default), tasks fail if Docker is unavailable instead of
+    /// falling back to host execution. Set to false only for development.
+    #[serde(default = "default_true")]
+    pub strict_sandbox: bool,
+    /// Maximum number of PIDs allowed in agent containers. Default: 256.
+    #[serde(default = "default_pids_limit")]
+    pub pids_limit: Option<i64>,
 }
 
 impl Default for SandboxConfig {
@@ -245,8 +252,14 @@ impl Default for SandboxConfig {
             memory_limit: default_sandbox_memory(),
             cpu_limit: None,
             network: default_sandbox_network(),
+            strict_sandbox: false,
+            pids_limit: default_pids_limit(),
         }
     }
+}
+
+fn default_pids_limit() -> Option<i64> {
+    Some(256)
 }
 
 fn default_sandbox_image() -> String {
@@ -258,7 +271,7 @@ fn default_sandbox_memory() -> Option<i64> {
 }
 
 fn default_sandbox_network() -> String {
-    "mcclawd_tools".to_string()
+    "mcclawd_default".to_string()
 }
 
 /// OpenClaw compatibility settings.

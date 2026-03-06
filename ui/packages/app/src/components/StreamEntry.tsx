@@ -2,7 +2,8 @@ import { useState, useRef, useEffect } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { AlertCircle, FileText, User, RotateCcw, Pencil, Check, X } from "lucide-react";
+import { AlertCircle, Download, FileText, User, RotateCcw, Pencil, Check, X } from "lucide-react";
+import { SpeechButton } from "./SpeechButton";
 import { cn } from "../lib/utils";
 import type { StreamEvent } from "../hooks/useTaskStream";
 import { MermaidBlock } from "./MermaidBlock";
@@ -181,6 +182,43 @@ export function StreamEntry({ event, onRetry, onEditRetry }: StreamEntryProps) {
     );
   }
 
+  if (event.type === "generated_files" && event.attachments) {
+    const token = localStorage.getItem("mcclawd_token") || "";
+    const authUrl = (url: string) =>
+      `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+    return (
+      <div className="flex items-start gap-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20 p-4">
+        <Download className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+        <div className="flex flex-col gap-2">
+          <p className="text-sm font-medium text-emerald-300">Generated Files</p>
+          <div className="flex flex-wrap gap-2">
+            {event.attachments.map((file, i) => {
+              const sizeLabel =
+                file.size < 1024
+                  ? file.size + "B"
+                  : file.size < 1048576
+                    ? (file.size / 1024).toFixed(1) + "KB"
+                    : (file.size / 1048576).toFixed(1) + "MB";
+              return (
+                <a
+                  key={i}
+                  href={authUrl(file.url)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-2 px-2 py-1 rounded bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 hover:bg-emerald-500/20 transition-colors text-sm"
+                >
+                  <FileText className="w-4 h-4 shrink-0" />
+                  <span className="truncate max-w-[200px]">{file.name}</span>
+                  <span className="text-xs text-emerald-400/60">{sizeLabel}</span>
+                </a>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (event.type === "error") {
     return (
       <div className="flex items-start gap-3 rounded-lg bg-red-500/10 border border-red-500/20 p-4">
@@ -192,7 +230,7 @@ export function StreamEntry({ event, onRetry, onEditRetry }: StreamEntryProps) {
 
   // text response — rendered as markdown
   return (
-    <div className={cn("rounded-lg bg-card border border-border p-4", "agent-response")}>
+    <div className={cn("group/response rounded-lg bg-card border border-border p-4 relative", "agent-response")}>
       <div className="prose-response text-sm text-foreground">
         <Markdown
           remarkPlugins={[remarkGfm]}
@@ -230,6 +268,10 @@ export function StreamEntry({ event, onRetry, onEditRetry }: StreamEntryProps) {
         >
           {event.content}
         </Markdown>
+      </div>
+      {/* Read aloud button — appears on hover */}
+      <div className="absolute top-2 right-2 opacity-0 group-hover/response:opacity-100 transition-opacity">
+        <SpeechButton text={event.content} size="sm" />
       </div>
     </div>
   );
