@@ -102,11 +102,12 @@ export function SecretsPage() {
         Encrypted secrets for API keys. Click the eye icon to reveal values.
       </p>
 
-      <div className="flex gap-3">
+      <form className="flex gap-3" onSubmit={(e) => { e.preventDefault(); add.mutate(); }} autoComplete="off">
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="Secret name (e.g. ANTHROPIC_API_KEY)"
+          autoComplete="off"
           className="flex-1 px-4 py-2 rounded-lg bg-card border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
         />
         <input
@@ -114,17 +115,18 @@ export function SecretsPage() {
           value={value}
           onChange={(e) => setValue(e.target.value)}
           placeholder="Value"
+          autoComplete="new-password"
           className="flex-1 px-4 py-2 rounded-lg bg-card border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
         />
         <button
-          onClick={() => add.mutate()}
+          type="submit"
           disabled={!name || !value}
           aria-label="Add secret"
           className="px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40 text-sm"
         >
           <Plus className="w-4 h-4" />
         </button>
-      </div>
+      </form>
 
       <div className="space-y-2">
         {secrets.map((s) => (

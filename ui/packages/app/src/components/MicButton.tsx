@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { useWhisper } from "../hooks/useWhisper";
+import { getToken } from "../api/client";
 
 const HOLD_THRESHOLD_MS = 300;
 
@@ -12,11 +12,24 @@ interface MicButtonProps {
   size?: "sm" | "md";
 }
 
+/** Post recorded audio to backend for OpenAI Whisper transcription. */
+async function transcribeViaBackend(blob: Blob): Promise<string> {
+  const form = new FormData();
+  form.append("audio", blob, "recording.webm");
+  const token = getToken();
+  const res = await fetch("/api/transcribe", {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: form,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const json = await res.json();
+  return json.text ?? "";
+}
+
 /**
- * Mic button — records audio via MediaRecorder, transcribes locally via
- * Whisper (Transformers.js WASM). No API key needed.
- *
- * Click to start/stop, or hold to record while pressed.
+ * Mic button — records audio via MediaRecorder, sends to backend
+ * for OpenAI Whisper transcription. Click to start/stop, or hold to record.
  */
 export function MicButton({ onTranscript, onInterim, onStart, onError, disabled, size = "sm" }: MicButtonProps) {
   const [isListening, setIsListening] = useState(false);
@@ -30,8 +43,6 @@ export function MicButton({ onTranscript, onInterim, onStart, onError, disabled,
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number>(0);
   const mediaStreamRef = useRef<MediaStream | null>(null);
-
-  const { transcribe } = useWhisper();
 
   const stopAudioMeter = useCallback(() => {
     if (animFrameRef.current) {
@@ -50,36 +61,33 @@ export function MicButton({ onTranscript, onInterim, onStart, onError, disabled,
     setMicLevel(0);
   }, []);
 
-  const startAudioMeter = useCallback(
-    (stream: MediaStream) => {
-      try {
-        const ctx = new AudioContext();
-        audioContextRef.current = ctx;
-        const source = ctx.createMediaStreamSource(stream);
-        const analyser = ctx.createAnalyser();
-        analyser.fftSize = 256;
-        analyser.smoothingTimeConstant = 0.5;
-        source.connect(analyser);
-        analyserRef.current = analyser;
+  const startAudioMeter = useCallback((stream: MediaStream) => {
+    try {
+      const ctx = new AudioContext();
+      audioContextRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.5;
+      source.connect(analyser);
+      analyserRef.current = analyser;
 
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-        const tick = () => {
-          analyser.getByteFrequencyData(dataArray);
-          let sum = 0;
-          for (let i = 0; i < dataArray.length; i++) {
-            sum += dataArray[i] ?? 0;
-          }
-          const avg = sum / dataArray.length / 255;
-          setMicLevel(Math.min(1, avg * 2.5));
-          animFrameRef.current = requestAnimationFrame(tick);
-        };
-        tick();
-      } catch {
-        // AudioContext not available — meter just won't show
-      }
-    },
-    [],
-  );
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      const tick = () => {
+        analyser.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i] ?? 0;
+        }
+        const avg = sum / dataArray.length / 255;
+        setMicLevel(Math.min(1, avg * 2.5));
+        animFrameRef.current = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch {
+      // AudioContext not available
+    }
+  }, []);
 
   const startRecording = useCallback(async () => {
     try {
@@ -97,12 +105,12 @@ export function MicButton({ onTranscript, onInterim, onStart, onError, disabled,
 
       recorder.onstop = async () => {
         const blob = new Blob(chunksRef.current, { type: "audio/webm" });
-        if (blob.size < 1000) return; // too short
+        if (blob.size < 1000) return;
 
         setStatusText("Transcribing...");
         onInterim?.("...");
         try {
-          const text = await transcribe(blob);
+          const text = await transcribeViaBackend(blob);
           if (text.trim()) {
             onTranscript(text.trim());
           }
@@ -122,7 +130,7 @@ export function MicButton({ onTranscript, onInterim, onStart, onError, disabled,
     } catch {
       onError?.("Microphone access denied");
     }
-  }, [transcribe, onTranscript, onInterim, onStart, onError, startAudioMeter]);
+  }, [onTranscript, onInterim, onStart, onError, startAudioMeter]);
 
   const stopRecording = useCallback(() => {
     if (recorderRef.current && recorderRef.current.state !== "inactive") {
