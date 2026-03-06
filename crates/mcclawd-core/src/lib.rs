@@ -13,6 +13,7 @@ pub mod secrets;
 pub mod skill_loader;
 pub mod skill_parser;
 pub mod skills;
+pub mod tool_resolver;
 pub mod types;
 
 pub use clawhub::{ClawHubClient, ClawHubSearchResult, ClawHubSkillMeta, InstalledSkillInfo, SkillInstaller, SkillSource};
@@ -22,4 +23,5 @@ pub use sanitizer::sanitize_prompt;
 pub use scanner::{ScanResult, ScanStatus, ScanIssue};
 pub use skill_loader::SkillLoader;
 pub use skills::{LoadedSkill, SandboxConfig};
+pub use tool_resolver::{ResolvedToolSet, ToolResolver};
 pub use types::{AgentId, SessionId, TaskId};

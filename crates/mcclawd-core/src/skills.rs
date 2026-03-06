@@ -13,6 +13,18 @@ pub struct LoadedSkill {
     pub install_steps: Vec<String>,
     /// Context text injected into agent preamble
     pub context: String,
+    /// Skill names this skill depends on (Gap 4: dependency resolution)
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    /// Instructions for the agent on how to use this skill
+    #[serde(default)]
+    pub instructions: String,
+    /// Usage examples for the agent
+    #[serde(default)]
+    pub examples: String,
+    /// Configuration reference (not injected into prompt by default)
+    #[serde(default)]
+    pub config_section: String,
 }
 
 /// Configuration for a sandbox container.

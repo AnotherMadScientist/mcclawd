@@ -30,6 +30,20 @@ impl HookPipeline {
     pub fn is_empty(&self) -> bool {
         self.hooks.is_empty()
     }
+
+    /// Instantiate user-defined hooks from config and append them after existing hooks.
+    ///
+    /// User hooks always run last — after DLP, secret scanner, and audit hooks.
+    pub fn add_user_hooks(
+        mut self,
+        configs: Vec<super::user_hook::UserHookConfig>,
+    ) -> crate::Result<Self> {
+        for cfg in configs {
+            let hook = super::user_hook::UserHook::new(cfg)?;
+            self.hooks.push(Arc::new(hook));
+        }
+        Ok(self)
+    }
 }
 
 impl Default for HookPipeline {
@@ -184,6 +198,80 @@ mod tests {
         assert!(res.is_err());
         // Second hook should not have been called
         assert_eq!(counter.before_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn add_user_hooks_appends_after_builtin() {
+        use crate::hooks::user_hook::{UserHookAction, UserHookConfig, UserHookTrigger, UserHookType};
+        use std::collections::HashMap;
+
+        let counter = Arc::new(CountingHook::new());
+
+        let user_cfg = UserHookConfig {
+            name: "allow-hook".to_string(),
+            trigger: UserHookTrigger::BeforeToolCall,
+            hook_type: UserHookType::Shell,
+            command: Some("true".to_string()),
+            url: None,
+            method: "POST".to_string(),
+            headers: HashMap::new(),
+            pattern: None,
+            action: UserHookAction::Allow,
+            message: None,
+            timeout_ms: 1000,
+            enabled: true,
+        };
+
+        let pipeline = HookPipeline::new()
+            .add(counter.clone())
+            .add_user_hooks(vec![user_cfg])
+            .unwrap();
+
+        // 1 built-in + 1 user hook
+        assert_eq!(pipeline.len(), 2);
+
+        let args = serde_json::json!({});
+        pipeline.before_tool_call("t", &args).await.unwrap();
+        // Built-in counter hook ran
+        assert_eq!(counter.before_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn add_user_hooks_block_stops_before_chain() {
+        use crate::hooks::user_hook::{UserHookAction, UserHookConfig, UserHookTrigger, UserHookType};
+        use std::collections::HashMap;
+
+        let user_cfg = UserHookConfig {
+            name: "block-hook".to_string(),
+            trigger: UserHookTrigger::BeforeToolCall,
+            hook_type: UserHookType::Shell,
+            command: Some("true".to_string()),
+            url: None,
+            method: "POST".to_string(),
+            headers: HashMap::new(),
+            pattern: None,
+            action: UserHookAction::Block,
+            message: Some("nope".to_string()),
+            timeout_ms: 1000,
+            enabled: true,
+        };
+
+        let pipeline = HookPipeline::new()
+            .add_user_hooks(vec![user_cfg])
+            .unwrap();
+
+        let args = serde_json::json!({});
+        let res = pipeline.before_tool_call("t", &args).await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("nope"));
+    }
+
+    #[tokio::test]
+    async fn empty_user_hooks_pass_through() {
+        let pipeline = HookPipeline::new().add_user_hooks(vec![]).unwrap();
+        assert!(pipeline.is_empty());
+        let args = serde_json::json!({});
+        assert!(pipeline.before_tool_call("t", &args).await.is_ok());
     }
 
     #[tokio::test]

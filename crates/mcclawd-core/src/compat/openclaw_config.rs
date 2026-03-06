@@ -86,23 +86,24 @@ pub struct OpenClawMcpServer {
     pub url: Option<String>,
 }
 
-/// Load an OpenClaw config from a JSON file path.
+/// Load an OpenClaw config from a JSON or JSON5 file path.
 pub fn load_openclaw_config(path: &Path) -> anyhow::Result<OpenClawConfig> {
     let content = std::fs::read_to_string(path)?;
-    let config: OpenClawConfig = serde_json::from_str(&content)?;
+    let config: OpenClawConfig = json5::from_str(&content)?;
     Ok(config)
 }
 
 /// Load a standalone `.mcp.json` file (just MCP server definitions).
+/// Accepts both JSON and JSON5 (comments, trailing commas, etc.).
 pub fn load_mcp_json(path: &Path) -> anyhow::Result<HashMap<String, OpenClawMcpServer>> {
     let content = std::fs::read_to_string(path)?;
-    let wrapper: McpJsonWrapper = serde_json::from_str(&content)?;
+    let wrapper: McpJsonWrapper = json5::from_str(&content)?;
     // Support both { "mcpServers": { ... } } and flat { "server": { ... } } formats
     if let Some(servers) = wrapper.mcp_servers {
         Ok(servers)
     } else {
         // Try parsing as flat map
-        let servers: HashMap<String, OpenClawMcpServer> = serde_json::from_str(&content)?;
+        let servers: HashMap<String, OpenClawMcpServer> = json5::from_str(&content)?;
         Ok(servers)
     }
 }
@@ -357,6 +358,35 @@ mod tests {
         let server = empty.get("empty").unwrap();
         assert!(server.command.is_none());
         assert!(server.url.is_none());
+    }
+
+    #[test]
+    fn parse_json5_with_comments_and_trailing_commas() {
+        // JSON5 allows // comments and trailing commas
+        let json5 = r#"{
+            // Telegram channel config
+            "channels": {
+                "telegram": {
+                    "botToken": "json5-token",
+                    "allowedIds": ["111", "222",], // trailing comma
+                },
+            },
+            /* MCP servers */
+            "mcpServers": {
+                "search": {
+                    "url": "http://localhost:8001",
+                },
+            },
+            "skills": ["web-search",], // trailing comma
+        }"#;
+        let f = write_temp_json(json5);
+        let cfg = load_openclaw_config(f.path()).unwrap();
+        let tg = cfg.channels.unwrap().telegram.unwrap();
+        assert_eq!(tg.bot_token.unwrap(), "json5-token");
+        assert_eq!(tg.allowed_ids.unwrap().len(), 2);
+        let servers = cfg.mcp_servers.unwrap();
+        assert!(servers.contains_key("search"));
+        assert_eq!(cfg.skills.unwrap(), vec!["web-search"]);
     }
 
     #[test]

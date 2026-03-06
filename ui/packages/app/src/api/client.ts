@@ -4,7 +4,7 @@ import type {
   RegistrationResponseJSON,
   AuthenticationResponseJSON,
 } from "@simplewebauthn/browser";
-import type { AttachmentMeta, McclawdConfig, McpServer, Task, WorkspaceFile, InstalledSkill, CachedSearchResult, ClawHubSkillMeta, ScanResult } from "./types";
+import type { AttachmentMeta, McclawdConfig, McpServer, Task, WorkspaceFile, InstalledSkill, CachedSearchResult, ClawHubSkillMeta, ScanResult, Provider, DetailedUsageSummary, BudgetInfo, BudgetUpdate, AnthropicModel, ModelPricing, CreditsResponse } from "./types";
 
 const TOKEN_KEY = "mcclawd_token";
 
@@ -82,17 +82,20 @@ export const api = {
   },
   tasks: {
     list: () => apiFetch<Task[]>("/api/tasks"),
-    create: (prompt: string, workspace?: string, model?: string) =>
+    create: (prompt: string, workspace?: string, model?: string, delayStart?: boolean, tags?: string[]) =>
       apiFetch<Task>("/api/tasks", {
         method: "POST",
-        body: JSON.stringify({ prompt, workspace, model }),
+        body: JSON.stringify({ prompt, workspace, model, delay_start: delayStart ?? false, tags }),
       }),
     get: (id: string) => apiFetch<Task>(`/api/tasks/${id}`),
     cancel: (id: string) => apiFetch<void>(`/api/tasks/${id}`, { method: "DELETE" }),
-    sendMessage: (id: string, message: string) =>
+    clearAll: () => apiFetch<{ deleted: number }>("/api/tasks", { method: "DELETE" }),
+    deleteByTag: (tag: string) =>
+      apiFetch<{ deleted: number }>(`/api/tasks?tag=${encodeURIComponent(tag)}`, { method: "DELETE" }),
+    sendMessage: (id: string, message: string, truncateHistoryTo?: number) =>
       apiFetch<void>(`/api/tasks/${id}/message`, {
         method: "POST",
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ message, truncate_history_to: truncateHistoryTo ?? null }),
       }),
     uploadAttachments: async (taskId: string, files: File[]) => {
       const formData = new FormData();
@@ -140,14 +143,34 @@ export const api = {
   },
   config: {
     get: () => apiFetch<McclawdConfig>("/api/config"),
-    update: (config: Partial<McclawdConfig>) =>
+    update: (update: { model?: string; max_turns?: number; default_workspace?: string }) =>
       apiFetch<void>("/api/config", {
         method: "PUT",
-        body: JSON.stringify(config),
+        body: JSON.stringify(update),
       }),
   },
   mcp: {
     servers: () => apiFetch<McpServer[]>("/api/mcp/servers"),
+    addServer: (server: {
+      name: string;
+      image: string;
+      port: number;
+      command?: string;
+      args?: string[];
+      env?: Record<string, string>;
+    }) =>
+      apiFetch<McpServer>("/api/mcp/servers", {
+        method: "POST",
+        body: JSON.stringify(server),
+      }),
+    removeServer: (name: string) =>
+      apiFetch<void>(`/api/mcp/servers/${encodeURIComponent(name)}`, {
+        method: "DELETE",
+      }),
+    restartServer: (name: string) =>
+      apiFetch<void>(`/api/mcp/servers/${encodeURIComponent(name)}/restart`, {
+        method: "POST",
+      }),
   },
   skills: {
     list: () => apiFetch<InstalledSkill[]>("/api/skills"),
@@ -161,6 +184,11 @@ export const api = {
       apiFetch<{ name: string; content: string }>(`/api/skills/${encodeURIComponent(name)}/content`),
     refresh: () =>
       apiFetch<{ refreshed: number }>("/api/skills/refresh", { method: "POST" }),
+    create: (name: string, content: string) =>
+      apiFetch<{ name: string; path: string }>("/api/skills/create", {
+        method: "POST",
+        body: JSON.stringify({ name, content }),
+      }),
     install: (name: string, version?: string) =>
       apiFetch<InstalledSkill>("/api/skills/install", {
         method: "POST",
@@ -170,6 +198,22 @@ export const api = {
       apiFetch<void>(`/api/skills/${encodeURIComponent(name)}`, { method: "DELETE" }),
     scan: (name: string) =>
       apiFetch<ScanResult>(`/api/skills/${encodeURIComponent(name)}/scan`),
+  },
+  providers: {
+    list: () => apiFetch<Provider[]>("/api/providers"),
+    models: () => apiFetch<AnthropicModel[]>("/api/providers/models"),
+    pricing: () => apiFetch<ModelPricing[]>("/api/providers/pricing"),
+    usage: (granularity?: string) =>
+      apiFetch<DetailedUsageSummary>(
+        `/api/providers/usage/detailed${granularity ? `?granularity=${granularity}` : ""}`,
+      ),
+    budgetInfo: () => apiFetch<BudgetInfo>("/api/providers/budget/info"),
+    setBudget: (budget: BudgetUpdate) =>
+      apiFetch<{ status: string }>("/api/providers/budget", {
+        method: "PUT",
+        body: JSON.stringify(budget),
+      }),
+    credits: () => apiFetch<CreditsResponse>("/api/providers/credits"),
   },
   systemAgent: {
     chat: (message: string) =>

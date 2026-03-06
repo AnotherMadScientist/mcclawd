@@ -1,15 +1,20 @@
 .PHONY: dev dev-api dev-ui test test-e2e build
 
-# Start both API (with auto-restart) and UI dev server
+# Start both API (with auto-restart) and UI dev server.
+# Uses a trap to ensure Ctrl+C kills both background processes cleanly.
 dev:
 	@echo "Starting dev environment (auto-restart on code changes)..."
 	@echo "API: http://localhost:9090 (cargo-watch)"
 	@echo "UI:  http://localhost:8080 (vite)"
-	@$(MAKE) -j2 dev-api dev-ui
+	@echo "Press Ctrl+C to stop both servers."
+	@trap 'kill 0' INT TERM; \
+		(cd ui && pnpm dev) & \
+		cargo watch -w crates/ -x 'run -p mcclawd-api -- serve' & \
+		wait
 
 # API server with auto-restart on any Rust file change
 dev-api:
-	cargo watch -x 'run -p mcclawd-api -- serve' -w crates/
+	cargo watch -w crates/ -x 'run -p mcclawd-api -- serve'
 
 # UI dev server (Vite already has HMR)
 dev-ui:

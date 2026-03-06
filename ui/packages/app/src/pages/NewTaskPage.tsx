@@ -9,9 +9,13 @@ import {
   FileText,
   Sparkles,
   ArrowRight,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { api } from "../api/client";
 import { ResourceCard } from "../components/ResourceCard";
+
+const FALLBACK_MODELS = ["claude-sonnet-4-6-20250514", "claude-opus-4-6-20250514", "claude-haiku-4-5-20251001"];
 
 function SkillsResourceCard() {
   const { data: skills = [] } = useQuery({
@@ -53,6 +57,11 @@ import { MicButton } from "../components/MicButton";
 export function NewTaskPage() {
   const [prompt, setPrompt] = useState("");
   const [previewFile, setPreviewFile] = useState<AttachedFile | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [selectedModel, setSelectedModel] = useState<string>("");
+  const [selectedWorkspace, setSelectedWorkspace] = useState<string>("");
+  const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
+  const [tagsInput, setTagsInput] = useState("");
   const { files, addFiles, removeFile, clear: clearFiles } = useFileAttachments();
   const navigate = useNavigate();
 
@@ -61,6 +70,17 @@ export function NewTaskPage() {
     queryFn: api.config.get,
   });
 
+  const { data: liveModels } = useQuery({
+    queryKey: ["providers", "models"],
+    queryFn: api.providers.models,
+    staleTime: 3600_000,
+    retry: 1,
+  });
+
+  const modelOptions = liveModels && liveModels.length > 0
+    ? liveModels.map((m) => m.id)
+    : FALLBACK_MODELS;
+
   const { data: mcpServers = [] } = useQuery({
     queryKey: ["mcp-servers"],
     queryFn: api.mcp.servers,
@@ -68,15 +88,35 @@ export function NewTaskPage() {
 
   const { data: llmHealth } = useQuery({
     queryKey: ["llm-health"],
-    queryFn: api.health.llm,
+    queryFn: () =>
+      api.health.llm().catch(() => ({ ok: false, error: "Checking LLM connection..." } as { ok: boolean; error?: string })),
     refetchInterval: 30_000,
+    retry: false,
   });
+
+  const { data: installedSkills = [] } = useQuery({
+    queryKey: ["installed-skills"],
+    queryFn: api.skills.list,
+  });
+
+  // Resolve effective model/workspace (from selectors, falling back to config)
+  const effectiveModel = selectedModel || config?.agent.model;
+  const effectiveWorkspace = selectedWorkspace || config?.agent.default_workspace || "default";
 
   const createTask = useMutation({
     mutationFn: async () => {
-      const task = await api.tasks.create(prompt);
-      if (files.length > 0) {
+      const hasFiles = files.length > 0;
+      const parsedTags = tagsInput.split(",").map((t) => t.trim()).filter(Boolean);
+      const task = await api.tasks.create(
+        prompt,
+        effectiveWorkspace !== (config?.agent.default_workspace || "default") ? effectiveWorkspace : undefined,
+        selectedModel || undefined,
+        hasFiles,
+        parsedTags.length > 0 ? parsedTags : undefined,
+      );
+      if (hasFiles) {
         await api.tasks.uploadAttachments(task.id, files.map((f) => f.file));
+        await api.tasks.sendMessage(task.id, prompt);
       }
       return task;
     },
@@ -86,7 +126,6 @@ export function NewTaskPage() {
     },
   });
 
-  // Track what was typed before mic started so we can append cleanly
   const promptBeforeMicRef = useRef(prompt);
 
   const handleInterim = useCallback((text: string) => {
@@ -100,6 +139,12 @@ export function NewTaskPage() {
     setPrompt(final_);
     promptBeforeMicRef.current = final_;
   }, []);
+
+  const toggleSkill = (name: string) => {
+    setSelectedSkills((prev) =>
+      prev.includes(name) ? prev.filter((s) => s !== name) : [...prev, name],
+    );
+  };
 
   return (
     <div className="max-w-4xl mx-auto space-y-8">
@@ -137,6 +182,16 @@ export function NewTaskPage() {
             </button>
           </div>
         </div>
+        {/* Tags input */}
+        <div className="mt-2">
+          <input
+            data-testid="task-tags-input"
+            value={tagsInput}
+            onChange={(e) => setTagsInput(e.target.value)}
+            placeholder="Tags (comma-separated, e.g. deploy, urgent)"
+            className="w-full px-4 py-2 rounded-lg bg-card border border-border text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+          />
+        </div>
         {files.length > 0 && (
           <div className="px-2">
             <FileThumbnails
@@ -148,6 +203,94 @@ export function NewTaskPage() {
         )}
       </DropZone>
       <FilePreviewDialog file={previewFile} onClose={() => setPreviewFile(null)} />
+
+      {/* Advanced Options */}
+      <div className="rounded-xl border border-border bg-card overflow-hidden">
+        <button
+          onClick={() => setShowAdvanced((v) => !v)}
+          className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium hover:bg-muted/50 transition-colors"
+          aria-expanded={showAdvanced}
+        >
+          <span>Advanced Options</span>
+          {showAdvanced ? (
+            <ChevronUp className="w-4 h-4 text-muted-foreground" />
+          ) : (
+            <ChevronDown className="w-4 h-4 text-muted-foreground" />
+          )}
+        </button>
+
+        {showAdvanced && (
+          <div className="px-4 pb-4 space-y-4 border-t border-border pt-4">
+            {/* Model selector */}
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Model</label>
+              <select
+                value={selectedModel || effectiveModel || ""}
+                onChange={(e) => setSelectedModel(e.target.value)}
+                className="w-full text-sm font-mono bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                aria-label="Model"
+              >
+                {modelOptions.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Workspace selector */}
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Workspace</label>
+              <select
+                value={selectedWorkspace || effectiveWorkspace}
+                onChange={(e) => setSelectedWorkspace(e.target.value)}
+                className="w-full text-sm font-mono bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                aria-label="Workspace"
+              >
+                <option value="default">default</option>
+                {config?.agent.default_workspace && config.agent.default_workspace !== "default" && (
+                  <option value={config.agent.default_workspace}>{config.agent.default_workspace}</option>
+                )}
+              </select>
+            </div>
+
+            {/* Skills multi-select */}
+            {installedSkills.length > 0 && (
+              <div>
+                <label className="text-xs text-muted-foreground mb-2 block">
+                  Skills (deselect to exclude)
+                </label>
+                <div className="space-y-1 max-h-40 overflow-y-auto">
+                  {installedSkills.map((skill) => (
+                    <label
+                      key={skill.name}
+                      className="flex items-center gap-2 text-sm cursor-pointer hover:bg-muted/50 px-2 py-1 rounded"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={
+                          selectedSkills.length === 0
+                            ? true
+                            : selectedSkills.includes(skill.name)
+                        }
+                        onChange={() => {
+                          if (selectedSkills.length === 0) {
+                            // Start with all selected, then deselect this one
+                            const all = installedSkills.map((s) => s.name).filter((n) => n !== skill.name);
+                            setSelectedSkills(all);
+                          } else {
+                            toggleSkill(skill.name);
+                          }
+                        }}
+                        className="rounded"
+                      />
+                      <span className="font-mono">{skill.name}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       <div>
         <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
@@ -161,16 +304,16 @@ export function NewTaskPage() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <ResourceCard
             icon={Brain}
-            title={config?.agent.model || "claude-sonnet-4-5"}
+            title={effectiveModel || "claude-sonnet-4-5"}
             description={llmHealth?.ok ? "AI model powering the agent" : llmHealth?.error || "Checking LLM connection..."}
             color="text-violet-400"
             status={llmHealth?.ok ? "active" : "inactive"}
           />
           <ResourceCard
             icon={FileText}
-            title={`Workspace: ${config?.agent.default_workspace || "default"}`}
+            title={`Workspace: ${effectiveWorkspace}`}
             description="Agent personality, skills, and user preferences"
-            items={["SOUL.md", "AGENTS.md", "USER.md"]}
+            items={["SOUL.md", "AGENTS.md", "USER.md", "IDENTITY.md", "TOOLS.md", "HEARTBEAT.md"]}
             color="text-amber-400"
             status="active"
           />

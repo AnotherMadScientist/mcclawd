@@ -114,7 +114,14 @@ export function CommandBar() {
             return true;
         }
       } catch {
-        // Not JSON — regular text response
+        // Not JSON — try natural language navigation patterns
+        const navMatch = text.match(
+          /(?:navigat(?:ed?|ing)\s+(?:you\s+)?to|go(?:ing)?\s+to|taking\s+you\s+to|opening)\s+(\/[\w/-]+)/i,
+        );
+        if (navMatch && navMatch[1]) {
+          navigate(navMatch[1]);
+          return true;
+        }
       }
       return false;
     },
@@ -179,10 +186,43 @@ export function CommandBar() {
     };
   }, []);
 
+  // Direct navigation shortcuts — bypass LLM for common nav commands
+  const ROUTE_KEYWORDS: [RegExp, string][] = [
+    [/^\/?(settings|config)$/i, "/config"],
+    [/^\/?(tasks?)$/i, "/tasks"],
+    [/^\/?(new\s*task|create\s*task)$/i, "/tasks/new"],
+    [/^\/?(skills?)$/i, "/config/skills"],
+    [/^\/?(secrets?)$/i, "/config/secrets"],
+    [/^\/?(mcp|servers?)$/i, "/config/mcp"],
+    [/^\/?(workspace)$/i, "/workspace"],
+    [/^\/?(home|dashboard)$/i, "/"],
+    [/^go\s*(?:to\s+)?\/?(settings|config)$/i, "/config"],
+    [/^go\s*(?:to\s+)?\/?(tasks?)$/i, "/tasks"],
+    [/^go\s*(?:to\s+)?\/?(skills?)$/i, "/config/skills"],
+    [/^go\s*(?:to\s+)?\/?(secrets?)$/i, "/config/secrets"],
+    [/^go\s*(?:to\s+)?\/?(mcp|servers?)$/i, "/config/mcp"],
+    [/^go\s*(?:to\s+)?\/?(workspace)$/i, "/workspace"],
+    [/^go\s*(?:to\s+)?\/?(home|dashboard)$/i, "/"],
+    [/^show\s+\/?(tasks?)$/i, "/tasks"],
+    [/^show\s+\/?(skills?)$/i, "/config/skills"],
+    [/^show\s+\/?(secrets?)$/i, "/config/secrets"],
+    [/^show\s+\/?(settings|config)$/i, "/config"],
+  ];
+
   // Send message to system agent
   const sendMessage = useCallback(
     async (message: string) => {
       if (!message.trim()) return;
+
+      // Try direct navigation first (no LLM needed)
+      const trimMsg = message.trim();
+      for (const [pattern, route] of ROUTE_KEYWORDS) {
+        if (pattern.test(trimMsg)) {
+          setInput("");
+          navigate(route);
+          return;
+        }
+      }
 
       setInput("");
       setResponse("");
@@ -199,7 +239,7 @@ export function CommandBar() {
         setState("idle");
       }
     },
-    [connectStream],
+    [connectStream, navigate],
   );
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -353,16 +393,20 @@ export function CommandBar() {
     }
   }, [response]);
 
-  // Check if response contains an action — only parse JSON that starts with {"action":
+  // Check if response contains an action — JSON or natural language navigation
   useEffect(() => {
     if (state === "idle" && response) {
       const trimmed = response.trim();
+      // Try JSON action first
       if (trimmed.startsWith('{"action":')) {
         try {
           executeAction(trimmed);
         } catch {
           // Malformed JSON — will render as text
         }
+      } else {
+        // Try natural language navigation detection on the full response
+        executeAction(trimmed);
       }
     }
   }, [state, response, executeAction]);

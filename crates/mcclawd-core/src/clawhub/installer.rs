@@ -1,10 +1,20 @@
 //! Skill downloader and installer — handles both local and registry installs.
 
 use super::client::{ClawHubClient, ClawHubSkillMeta};
+use super::dep_resolver::DepResolver;
 use crate::skill_parser::parse_skill_md;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+/// A skill that has an update available in the registry (Gap 5).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillUpdate {
+    pub name: String,
+    pub installed_version: String,
+    pub latest_version: String,
+}
 
 /// Metadata about an installed skill (written to .installed.json in skill dir).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,12 +36,24 @@ pub enum SkillSource {
 pub struct SkillInstaller {
     client: ClawHubClient,
     skills_dir: PathBuf,
+    /// Version pins: skill name -> pinned version string. Pinned skills skip update checks.
+    pinned_versions: HashMap<String, String>,
 }
 
 impl SkillInstaller {
     /// Create a new installer with a ClawHub client and a local skills directory.
     pub fn new(client: ClawHubClient, skills_dir: PathBuf) -> Self {
-        Self { client, skills_dir }
+        Self {
+            client,
+            skills_dir,
+            pinned_versions: HashMap::new(),
+        }
+    }
+
+    /// Set version pins from config (Gap 5).
+    pub fn with_pinned_versions(mut self, pins: HashMap<String, String>) -> Self {
+        self.pinned_versions = pins;
+        self
     }
 
     /// Install a skill from the registry.
@@ -157,6 +179,124 @@ impl SkillInstaller {
         self.write_installed_info(&skill.name, &info)?;
 
         Ok(info)
+    }
+
+    /// Check all installed skills for available updates (Gap 5).
+    /// Skips pinned skills. Returns only skills where a newer version exists.
+    pub async fn check_for_updates(&self) -> anyhow::Result<Vec<SkillUpdate>> {
+        let installed = self.list_installed()?;
+        let mut updates = Vec::new();
+
+        for skill in installed {
+            // Pinned skills are intentionally frozen
+            if self.pinned_versions.contains_key(&skill.name) {
+                continue;
+            }
+            match self.client.get_skill(&skill.name, None).await {
+                Ok(latest) => {
+                    if self.version_is_newer(&latest.version, &skill.version) {
+                        updates.push(SkillUpdate {
+                            name: skill.name,
+                            installed_version: skill.version,
+                            latest_version: latest.version,
+                        });
+                    }
+                }
+                Err(_) => {
+                    // Skip skills that can't be checked (registry down, renamed, etc.)
+                }
+            }
+        }
+
+        Ok(updates)
+    }
+
+    /// Install a skill and all its dependencies in topological order (Gap 4).
+    ///
+    /// Downloads SKILL.md for each skill to inspect `## Dependencies`, builds the
+    /// dependency graph, detects cycles, then installs leaves-first.
+    /// Already-installed skills are skipped.
+    pub async fn install_with_deps(
+        &self,
+        name: &str,
+        version: Option<&str>,
+    ) -> anyhow::Result<Vec<InstalledSkillInfo>> {
+        // Resolve dep graph recursively then install in topo order
+        let mut dep_graph: HashMap<String, Vec<String>> = HashMap::new();
+        let mut visited: HashSet<String> = HashSet::new();
+        self.collect_deps(name, version, &mut dep_graph, &mut visited)
+            .await?;
+
+        let install_order = DepResolver::resolve_order(&dep_graph)?;
+
+        let mut installed = Vec::new();
+        for skill_name in &install_order {
+            // Skip already-installed skills
+            if self.read_installed_info(skill_name)?.is_some() {
+                tracing::debug!("Skipping already-installed dependency: {skill_name}");
+                continue;
+            }
+            let pinned = self.pinned_versions.get(skill_name).map(|s| s.as_str());
+            let info = self.install_from_registry(skill_name, pinned).await?;
+            tracing::info!("Installed dependency: {} v{}", info.name, info.version);
+            installed.push(info);
+        }
+
+        Ok(installed)
+    }
+
+    /// Recursively collect the dependency graph for a skill by downloading its SKILL.md.
+    async fn collect_deps(
+        &self,
+        name: &str,
+        version: Option<&str>,
+        graph: &mut HashMap<String, Vec<String>>,
+        visited: &mut HashSet<String>,
+    ) -> anyhow::Result<()> {
+        if !visited.insert(name.to_string()) {
+            return Ok(()); // Already processed
+        }
+
+        // Try to read SKILL.md from disk (already installed) first
+        let deps = if let Some(info) = self.read_installed_info(name)? {
+            let skill_md = self.skills_dir.join(&info.name).join("SKILL.md");
+            if let Ok(content) = std::fs::read_to_string(&skill_md) {
+                parse_skill_md(&content).map(|s| s.dependencies).unwrap_or_default()
+            } else {
+                vec![]
+            }
+        } else {
+            // Download SKILL.md to inspect deps
+            match self.client.download_skill_md(name, version.unwrap_or("latest")).await {
+                Ok(content) => parse_skill_md(&content)
+                    .map(|s| s.dependencies)
+                    .unwrap_or_default(),
+                Err(e) => {
+                    tracing::warn!("Could not fetch SKILL.md for '{name}' to resolve deps: {e}");
+                    vec![]
+                }
+            }
+        };
+
+        graph.insert(name.to_string(), deps.clone());
+
+        // Recurse into dependencies
+        for dep in deps {
+            let dep_version = self.pinned_versions.get(&dep).map(|s| s.as_str());
+            Box::pin(self.collect_deps(&dep, dep_version, graph, visited)).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Compare two version strings. Returns true if `latest` is newer than `installed`.
+    /// Tries semver first, falls back to plain string inequality.
+    fn version_is_newer(&self, latest: &str, installed: &str) -> bool {
+        use semver::Version;
+        match (Version::parse(latest), Version::parse(installed)) {
+            (Ok(l), Ok(i)) => l > i,
+            _ => latest != installed,
+        }
     }
 
     /// Check if a newer version is available.

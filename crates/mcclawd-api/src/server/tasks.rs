@@ -31,6 +31,15 @@ pub struct CreateTaskRequest {
     pub prompt: String,
     pub workspace: Option<String>,
     pub model: Option<String>,
+    /// When true, create the task but do NOT auto-start the agent.
+    /// The caller must upload attachments and then POST /api/tasks/{id}/message
+    /// to trigger the agent. This prevents a race where the agent starts
+    /// before attachment files are written to disk.
+    #[serde(default)]
+    pub delay_start: bool,
+    /// Optional tags for categorizing and filtering tasks.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +55,8 @@ pub struct TaskResponse {
     pub id: String,
     pub prompt: String,
     pub status: TaskStatus,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 impl From<&TaskRecord> for TaskResponse {
@@ -54,6 +65,7 @@ impl From<&TaskRecord> for TaskResponse {
             id: r.id.0.clone(),
             prompt: r.prompt.clone(),
             status: r.status.clone(),
+            tags: r.tags.clone(),
         }
     }
 }
@@ -82,13 +94,21 @@ pub async fn create_task(
     let workspace_name = body.workspace.clone().unwrap_or_else(|| "default".to_string());
 
     // Create task record
+    let tags = body.tags.unwrap_or_default();
     let id = {
         let mut mgr = state.tasks.write().await;
-        mgr.start_task(prompt.clone())
+        mgr.start_task_with_tags(prompt.clone(), tags)
     };
 
-    // Persist to postgres
-    state.pg_save_task(&id, &prompt, "Running").await;
+    // When delay_start is set, persist as Pending (caller will trigger via sendMessage
+    // after uploading attachments). Otherwise persist as Running.
+    let initial_status = if body.delay_start { "Pending" } else { "Running" };
+    // Retrieve tags from the task record for DB persistence
+    let task_tags = {
+        let mgr = state.tasks.read().await;
+        mgr.get_task(&id).map(|t| t.tags.clone()).unwrap_or_default()
+    };
+    state.pg_save_task(&id, &prompt, initial_status, &task_tags).await;
 
     let resp = {
         let mgr = state.tasks.read().await;
@@ -101,6 +121,7 @@ pub async fn create_task(
                         id: id.0,
                         prompt,
                         status: TaskStatus::Failed("Task creation failed".to_string()),
+                        tags: Vec::new(),
                     }),
                 );
             }
@@ -110,18 +131,156 @@ pub async fn create_task(
     // Create broadcast channel for streaming
     let tx = state.create_task_stream(&id).await;
 
-    // Spawn agent execution in background
-    let state_clone = state.clone();
-    let task_id = id.clone();
-    tokio::spawn(async move {
-        run_agent(state_clone, task_id, &prompt, &workspace_name, tx).await;
-    });
+    if !body.delay_start {
+        // Spawn agent execution in background immediately
+        let state_clone = state.clone();
+        let task_id = id.clone();
+        tokio::spawn(async move {
+            run_agent(state_clone, task_id, &prompt, &workspace_name, tx).await;
+        });
+    }
 
     (StatusCode::CREATED, Json(resp))
 }
 
 /// Run the Rig agent and stream output via broadcast channel.
+///
+/// All execution runs inside Docker containers via the sandbox orchestrator.
+/// Falls back to in-process host execution only when Docker is unavailable
+/// (development convenience — not production).
 async fn run_agent(
+    state: AppState,
+    task_id: TaskId,
+    prompt: &str,
+    workspace_name: &str,
+    tx: tokio::sync::broadcast::Sender<OutboundChunk>,
+) {
+    // Try Docker-sandboxed execution first (production path)
+    if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
+        if orch.health_check().await {
+            run_agent_sandboxed(state, task_id, prompt, workspace_name, tx).await;
+            return;
+        }
+    }
+
+    // Fallback: host execution when Docker is unavailable (dev only)
+    tracing::warn!("Docker unavailable — falling back to host execution (dev mode)");
+    run_agent_host(state, task_id, prompt, workspace_name, tx).await;
+}
+
+/// Run agent task inside a Docker sandbox container.
+async fn run_agent_sandboxed(
+    state: AppState,
+    task_id: TaskId,
+    prompt: &str,
+    _workspace_name: &str,
+    tx: tokio::sync::broadcast::Sender<OutboundChunk>,
+) {
+    use crate::sandbox::SandboxOrchestrator;
+
+    state.send_and_persist(&task_id, &tx, OutboundChunk::UserMessage(prompt.to_string())).await;
+    let _ = tx.send(OutboundChunk::TextDelta("Starting sandboxed agent...".to_string()));
+
+    // Update status to Building
+    {
+        let mut mgr = state.tasks.write().await;
+        mgr.running(&task_id);
+    }
+    state.pg_update_status(&task_id, "Building", None).await;
+    let _ = tx.send(OutboundChunk::StatusIndicator(ChannelStatus::Processing));
+
+    let config = state.config.read().await.clone();
+
+    // Get sandbox orchestrator
+    let orchestrator = match SandboxOrchestrator::new() {
+        Ok(o) => o,
+        Err(e) => {
+            let msg = format!("Docker unavailable for sandbox: {e}");
+            state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
+            state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
+            let mut mgr = state.tasks.write().await;
+            mgr.fail_task(&task_id, msg.clone());
+            state.pg_update_status(&task_id, "Failed", Some(&msg)).await;
+            return;
+        }
+    };
+
+    // Build sandbox config from McclawdConfig
+    let sandbox_cfg = mcclawd_core::skills::SandboxConfig {
+        workspace_dir: config.workspaces_dir().to_string_lossy().to_string(),
+        agentgateway_url: config.mcp.agentgateway_url.clone(),
+        memory_limit: config.sandbox.memory_limit,
+        cpu_limit: config.sandbox.cpu_limit,
+        network: config.sandbox.network.clone(),
+        ..Default::default()
+    };
+
+    // Collect secrets for container
+    let mut secrets_map = std::collections::HashMap::new();
+    if let Some(backend) = state.secrets.read().await.as_ref() {
+        if let Ok(Some(key)) = backend.get("ANTHROPIC_API_KEY").await {
+            secrets_map.insert("ANTHROPIC_API_KEY".to_string(), key);
+        }
+    }
+
+    // Stream logs to broadcast channel
+    let (log_tx, mut log_rx) = tokio::sync::mpsc::channel::<String>(256);
+    let tx_clone = tx.clone();
+    let task_id_clone = task_id.clone();
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        while let Some(line) = log_rx.recv().await {
+            state_clone.send_and_persist(
+                &task_id_clone,
+                &tx_clone,
+                OutboundChunk::TextDelta(line),
+            ).await;
+        }
+    });
+
+    // Run the agent task in Docker
+    let _ = tx.send(OutboundChunk::TextDelta("Building sandbox image...".to_string()));
+    state.pg_update_status(&task_id, "Running", None).await;
+
+    match orchestrator
+        .run_agent_task(
+            &task_id,
+            &config.sandbox.base_image,
+            prompt,
+            &sandbox_cfg,
+            &secrets_map,
+            log_tx,
+        )
+        .await
+    {
+        Ok(exit_code) => {
+            if exit_code == 0 {
+                state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
+                let mut mgr = state.tasks.write().await;
+                mgr.complete_task(&task_id);
+                state.pg_update_status(&task_id, "Completed", None).await;
+            } else {
+                let msg = format!("Sandbox agent exited with code {exit_code}");
+                state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
+                state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
+                let mut mgr = state.tasks.write().await;
+                mgr.fail_task(&task_id, msg.clone());
+                state.pg_update_status(&task_id, "Failed", Some(&msg)).await;
+            }
+        }
+        Err(e) => {
+            let msg = format!("Sandbox execution failed: {e}");
+            state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
+            state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
+            let mut mgr = state.tasks.write().await;
+            mgr.fail_task(&task_id, msg.clone());
+            state.pg_update_status(&task_id, "Failed", Some(&msg)).await;
+        }
+    }
+}
+
+/// Run agent in-process on the host (original behavior).
+async fn run_agent_host(
     state: AppState,
     task_id: TaskId,
     prompt: &str,
@@ -226,33 +385,24 @@ async fn run_agent(
     };
     let prompt = text_augmented.as_str();
 
-    // 2. Get API key from secrets backend
+    // 2. Get API key — try vault first, fall back to env var directly
     let api_key = {
-        let secrets_guard = state.secrets.read().await;
-        match secrets_guard.as_ref() {
-            Some(backend) => match backend.get("ANTHROPIC_API_KEY").await {
-                Ok(Some(key)) => key,
-                Ok(None) => {
-                    let msg = "ANTHROPIC_API_KEY not found in secrets. Add it via Config > Secrets.".to_string();
-                    state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
-                    state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
-                    let mut mgr = state.tasks.write().await;
-                    mgr.fail_task(&task_id, msg.clone());
-                    state.pg_update_status(&task_id, "Failed", Some(&msg)).await;
-                    return;
-                }
-                Err(e) => {
-                    let msg = format!("Failed to read secrets: {e}");
-                    state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
-                    state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
-                    let mut mgr = state.tasks.write().await;
-                    mgr.fail_task(&task_id, msg.clone());
-                    state.pg_update_status(&task_id, "Failed", Some(&msg)).await;
-                    return;
-                }
-            },
+        let vault_key = {
+            let secrets_guard = state.secrets.read().await;
+            match secrets_guard.as_ref() {
+                Some(backend) => backend.get("ANTHROPIC_API_KEY").await.ok().flatten(),
+                None => None,
+            }
+        };
+        // Prefer vault, fall back to env var (belt + suspenders)
+        let key = vault_key
+            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty());
+        match key {
+            Some(k) => k,
             None => {
-                let msg = "Secrets vault not unlocked. Please log out and log in again.".to_string();
+                let msg = "ANTHROPIC_API_KEY not found. Set it in Config > Secrets or .env file.".to_string();
                 state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
                 state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
                 let mut mgr = state.tasks.write().await;
@@ -288,7 +438,8 @@ async fn run_agent(
     }
 
     // 4. Stream with conversation history — enables multi-turn follow-ups
-    broadcast(&tx, OutboundChunk::StatusIndicator(ChannelStatus::Processing));
+    // Persist Processing so it replays on WS reconnect — frontend needs it to enter streaming mode
+    state.send_and_persist(&task_id, &tx, OutboundChunk::StatusIndicator(ChannelStatus::Processing)).await;
 
     let chat_history = state.get_chat_history(&task_id).await;
     if !chat_history.is_empty() {
@@ -320,6 +471,69 @@ async fn run_agent(
                 // Tool results auto-injected by Rig
             }
             Ok(MultiTurnStreamItem::FinalResponse(final_resp)) => {
+                // Record token usage from the LLM response
+                let usage = final_resp.usage();
+                let model_name = config.agent.model.clone();
+                let prompt_preview: String = prompt.chars().take(50).collect();
+                let cost = mcclawd_core::providers::estimate_cost_usd(
+                    &model_name,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                );
+                {
+                    let pool = state.provider_pool.read().await;
+                    pool.record_usage_detailed(
+                        "anthropic",
+                        usage.total_tokens,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        cost,
+                        Some((&task_id.0, &prompt_preview, &model_name)),
+                    );
+                }
+                tracing::info!(
+                    task_id = %task_id.0,
+                    model = %model_name,
+                    input_tokens = usage.input_tokens,
+                    output_tokens = usage.output_tokens,
+                    cost_usd = cost,
+                    "Usage recorded"
+                );
+
+                // Persist usage to database
+                {
+                    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                    let model_entry = mcclawd_core::providers::ModelUsageEntry {
+                        model: model_name.clone(),
+                        input_tokens: usage.input_tokens,
+                        output_tokens: usage.output_tokens,
+                        total_tokens: usage.total_tokens,
+                        estimated_cost_usd: cost,
+                        request_count: 1,
+                    };
+                    let task_entry = mcclawd_core::providers::TaskUsageEntry {
+                        task_id: task_id.0.clone(),
+                        prompt_preview: prompt_preview.clone(),
+                        model: model_name.clone(),
+                        total_tokens: usage.total_tokens,
+                        estimated_cost_usd: cost,
+                    };
+                    let store = state.pg_store.clone();
+                    let today_c = today.clone();
+                    // Spawn DB writes so they don't block streaming
+                    tokio::spawn(async move {
+                        if let Err(e) = store.upsert_daily_usage("admin", &today_c, cost, usage.total_tokens).await {
+                            tracing::warn!("Failed to persist daily usage: {e}");
+                        }
+                        if let Err(e) = store.upsert_model_usage("admin", &model_entry).await {
+                            tracing::warn!("Failed to persist model usage: {e}");
+                        }
+                        if let Err(e) = store.insert_task_usage("admin", &task_entry).await {
+                            tracing::warn!("Failed to persist task usage: {e}");
+                        }
+                    });
+                }
+
                 // Persist the complete response as a TextBlock for clean history replay
                 if !accumulated_text.is_empty() {
                     state.persist_only(&task_id, OutboundChunk::TextBlock(accumulated_text.clone())).await;
@@ -374,6 +588,10 @@ pub async fn get_task(
 #[derive(Debug, Deserialize)]
 pub struct SendMessageRequest {
     pub message: String,
+    /// If set, truncate chat history to this many messages before appending.
+    /// Used for edit/retry: discard everything after the edited message.
+    #[serde(default)]
+    pub truncate_history_to: Option<usize>,
 }
 
 /// POST /api/tasks/{id}/message — send a follow-up message to an existing task
@@ -410,6 +628,36 @@ pub async fn send_message(
         None => state.create_task_stream(&task_id).await,
     };
 
+    // Truncate chat history if requested (edit/retry — discard messages after edit point)
+    if let Some(keep) = body.truncate_history_to {
+        let mut history = state.get_chat_history(&task_id).await;
+        if keep < history.len() {
+            tracing::info!(task_id = %task_id.0, keep, total = history.len(), "Truncating chat history for edit/retry");
+            history.truncate(keep);
+            state.set_chat_history(&task_id, history).await;
+        }
+        // Also truncate persisted events
+        let mut events = state.get_task_events(&task_id).await;
+        // Keep only events up to the Nth UserMessage
+        let mut user_msg_count = 0;
+        let mut cut_at = events.len();
+        for (i, ev) in events.iter().enumerate() {
+            if matches!(ev, mcclawd_channels::OutboundChunk::UserMessage(_)) {
+                user_msg_count += 1;
+                // keep = number of chat turns (user+assistant pairs) to keep
+                // Each UserMessage starts a new turn
+                if user_msg_count > keep / 2 {
+                    cut_at = i;
+                    break;
+                }
+            }
+        }
+        if cut_at < events.len() {
+            events.truncate(cut_at);
+            state.set_task_events(&task_id, events).await;
+        }
+    }
+
     // Mark task as running again
     {
         let mut mgr = state.tasks.write().await;
@@ -428,6 +676,100 @@ pub async fn send_message(
     Ok(StatusCode::ACCEPTED)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DeleteAllQuery {
+    /// Optional status filter: "Completed", "Failed", "Running", "Pending"
+    pub status: Option<String>,
+    /// Optional tag filter: delete only tasks with this tag
+    pub tag: Option<String>,
+}
+
+/// DELETE /api/tasks — delete all tasks (or filter by ?status=... and/or ?tag=...)
+pub async fn delete_all_tasks(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<DeleteAllQuery>,
+) -> Json<serde_json::Value> {
+    let mut mgr = state.tasks.write().await;
+
+    // If tag filter is provided, use the dedicated delete_by_tag method
+    // (optionally combined with status filter)
+    let to_delete: Vec<TaskId> = if let Some(ref tag) = query.tag {
+        let all = mgr.all_tasks().iter().map(|t| (t.id.clone(), t.status.clone(), t.tags.clone())).collect::<Vec<_>>();
+        all.into_iter()
+            .filter(|(_, status, tags)| {
+                let tag_match = tags.iter().any(|tg| tg == tag);
+                let status_match = if let Some(ref filter) = query.status {
+                    let status_str = match status {
+                        TaskStatus::Pending => "Pending",
+                        TaskStatus::Building => "Building",
+                        TaskStatus::Running => "Running",
+                        TaskStatus::Completed => "Completed",
+                        TaskStatus::Failed(_) => "Failed",
+                        TaskStatus::Restarting { .. } => "Restarting",
+                        TaskStatus::SwarmRunning { .. } => "SwarmRunning",
+                    };
+                    status_str.eq_ignore_ascii_case(filter)
+                } else {
+                    true
+                };
+                tag_match && status_match
+            })
+            .map(|(id, _, _)| id)
+            .collect()
+    } else {
+        let all = mgr.all_tasks().iter().map(|t| (t.id.clone(), t.status.clone())).collect::<Vec<_>>();
+        all.into_iter()
+            .filter(|(_, status)| {
+                if let Some(ref filter) = query.status {
+                    let status_str = match status {
+                        TaskStatus::Pending => "Pending",
+                        TaskStatus::Building => "Building",
+                        TaskStatus::Running => "Running",
+                        TaskStatus::Completed => "Completed",
+                        TaskStatus::Failed(_) => "Failed",
+                        TaskStatus::Restarting { .. } => "Restarting",
+                        TaskStatus::SwarmRunning { .. } => "SwarmRunning",
+                    };
+                    status_str.eq_ignore_ascii_case(filter)
+                } else {
+                    true
+                }
+            })
+            .map(|(id, _)| id)
+            .collect()
+    };
+
+    let count = to_delete.len();
+    for id in &to_delete {
+        mgr.delete_task(id);
+    }
+    drop(mgr);
+
+    // Bulk-delete from Postgres by tag (fire-and-forget) when tag filter is present
+    if let Some(ref tag) = query.tag {
+        let store = state.pg_store.clone();
+        let tag_c = tag.clone();
+        tokio::spawn(async move {
+            if let Err(e) = store.delete_tasks_by_tag("admin", Some(&tag_c)).await {
+                tracing::warn!(error = %e, "Failed to bulk-delete tasks by tag from DB");
+            }
+        });
+    }
+
+    // Clean up associated state for each deleted task
+    for id in &to_delete {
+        // Individual pg delete only when no tag filter (tag filter handled in bulk above)
+        if query.tag.is_none() {
+            state.pg_delete_task(id).await;
+        }
+        state.task_streams.write().await.remove(id);
+        state.task_chat_history.write().await.remove(id);
+        state.task_events.write().await.remove(id);
+    }
+
+    Json(serde_json::json!({ "deleted": count }))
+}
+
 /// DELETE /api/tasks/{id} — cancel running task or remove completed/failed task
 pub async fn delete_task(
     State(state): State<AppState>,
@@ -436,10 +778,14 @@ pub async fn delete_task(
     let mut mgr = state.tasks.write().await;
     let task_id = TaskId(id);
 
-    if let Some(task) = mgr.get_task(&task_id) {
-        if matches!(task.status, TaskStatus::Running) {
-            mgr.fail_task(&task_id, "Cancelled by user".to_string());
-        }
+    // Return 404 if task doesn't exist
+    let task = match mgr.get_task(&task_id) {
+        Some(t) => t.clone(),
+        None => return StatusCode::NOT_FOUND,
+    };
+
+    if matches!(task.status, TaskStatus::Running) {
+        mgr.fail_task(&task_id, "Cancelled by user".to_string());
     }
 
     mgr.delete_task(&task_id);
@@ -447,6 +793,12 @@ pub async fn delete_task(
 
     // Also delete from postgres (cascades to events + chat history)
     state.pg_delete_task(&task_id).await;
+
+    // Clean up broadcast channel
+    state.task_streams.write().await.remove(&task_id);
+
+    // Clean up chat history
+    state.task_chat_history.write().await.remove(&task_id);
 
     StatusCode::NO_CONTENT
 }
@@ -525,14 +877,13 @@ pub async fn upload_attachments(
         })
         .collect();
 
+    // Persist attachment info for history replay, but do NOT broadcast —
+    // the frontend already shows local thumbnails during the current session.
+    // Broadcasting would cause duplicates (Bug: image attachments shown twice).
     if !attachment_infos.is_empty() {
         let chunk = OutboundChunk::Attachments(attachment_infos);
         let task_id_typed = TaskId(id.clone());
-        if let Some(tx) = state.task_streams.read().await.get(&task_id_typed) {
-            state.send_and_persist(&task_id_typed, tx, chunk).await;
-        } else {
-            state.persist_only(&task_id_typed, chunk).await;
-        }
+        state.persist_only(&task_id_typed, chunk).await;
     }
 
     Ok(Json(results))

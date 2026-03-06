@@ -58,11 +58,8 @@ pub async fn scan_skill(skill_path: &Path) -> anyhow::Result<ScanResult> {
     // Check if uvx is available
     let uvx_check = Command::new("which").arg("uvx").output().await;
     if uvx_check.is_err() || !uvx_check.unwrap().status.success() {
-        tracing::debug!("uvx not found — returning NotScanned");
-        return Ok(ScanResult {
-            status: ScanStatus::NotScanned,
-            issues: vec![],
-        });
+        tracing::debug!("uvx not found — falling back to basic static analysis");
+        return basic_scan(skill_path).await;
     }
 
     let output = tokio::time::timeout(
@@ -138,6 +135,51 @@ pub async fn scan_skill(skill_path: &Path) -> anyhow::Result<ScanResult> {
     Ok(ScanResult { status, issues })
 }
 
+/// Basic static analysis fallback when uvx/snyk-agent-scan is not available.
+/// Reads SKILL.md and checks for common security-sensitive patterns.
+async fn basic_scan(skill_path: &Path) -> anyhow::Result<ScanResult> {
+    let skill_md = skill_path.join("SKILL.md");
+    let content = match tokio::fs::read_to_string(&skill_md).await {
+        Ok(c) => c.to_lowercase(),
+        Err(_) => {
+            return Ok(ScanResult {
+                status: ScanStatus::NotScanned,
+                issues: vec![],
+            });
+        }
+    };
+
+    let mut issues = Vec::new();
+
+    // Check for dangerous patterns in skill instructions
+    let patterns: &[(&str, &str, &str, &str)] = &[
+        ("rm -rf", "W001", "warning", "Skill references destructive file deletion (rm -rf)"),
+        ("sudo ", "W002", "warning", "Skill references sudo/elevated privileges"),
+        ("curl.*| sh", "E001", "issue", "Skill pipes remote content to shell (curl | sh)"),
+        ("wget.*| sh", "E002", "issue", "Skill pipes remote content to shell (wget | sh)"),
+        ("eval(", "W003", "warning", "Skill uses eval() which can execute arbitrary code"),
+        ("exec(", "W004", "warning", "Skill uses exec() which can execute arbitrary commands"),
+        (".env", "W005", "warning", "Skill references .env files (potential secret exposure)"),
+        ("api_key", "W006", "warning", "Skill references API keys directly"),
+        ("password", "W007", "warning", "Skill references passwords directly"),
+        ("chmod 777", "E003", "issue", "Skill sets overly permissive file permissions (777)"),
+        ("--no-verify", "W008", "warning", "Skill bypasses verification checks"),
+    ];
+
+    for &(pattern, code, severity, description) in patterns {
+        if content.contains(pattern) {
+            issues.push(ScanIssue {
+                code: code.to_string(),
+                severity: severity.to_string(),
+                description: description.to_string(),
+            });
+        }
+    }
+
+    let status = derive_status(&issues);
+    Ok(ScanResult { status, issues })
+}
+
 /// Derive the aggregate status from the list of issues.
 fn derive_status(issues: &[ScanIssue]) -> ScanStatus {
     if issues.is_empty() {
@@ -195,6 +237,47 @@ mod tests {
             description: "Toxic flow detected".to_string(),
         }];
         assert_eq!(derive_status(&issues), ScanStatus::Critical);
+    }
+
+    #[tokio::test]
+    async fn test_basic_scan_clean() {
+        let dir = std::env::temp_dir().join("mcclawd_test_basic_scan_clean");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: safe-skill\n---\n# Safe Skill\n\n## Purpose\nDoes safe things.\n",
+        )
+        .unwrap();
+        let result = basic_scan(&dir).await.unwrap();
+        assert_eq!(result.status, ScanStatus::Pass);
+        assert!(result.issues.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_basic_scan_warnings() {
+        let dir = std::env::temp_dir().join("mcclawd_test_basic_scan_warn");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: risky-skill\n---\n# Risky\n\nRun sudo rm -rf /tmp/stuff\nUse eval( to process\n",
+        )
+        .unwrap();
+        let result = basic_scan(&dir).await.unwrap();
+        assert!(result.issues.len() >= 2);
+        assert!(
+            result.status == ScanStatus::Warning || result.status == ScanStatus::Critical
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_basic_scan_missing_file() {
+        let dir = std::env::temp_dir().join("mcclawd_test_basic_scan_missing");
+        let _ = std::fs::create_dir_all(&dir);
+        let result = basic_scan(&dir).await.unwrap();
+        assert_eq!(result.status, ScanStatus::NotScanned);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

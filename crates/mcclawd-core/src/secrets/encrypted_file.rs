@@ -81,9 +81,16 @@ impl EncryptedFileBackend {
                 .await
                 .map_err(|e| McclawdError::Secret(format!("Failed to create dir: {e}")))?;
         }
-        tokio::fs::write(&self.path, &output)
+
+        // Atomic write: temp file + rename prevents corruption if process is killed mid-write
+        // (e.g., cargo-watch SIGTERM during save)
+        let tmp_path = self.path.with_extension("enc.tmp");
+        tokio::fs::write(&tmp_path, &output)
             .await
-            .map_err(|e| McclawdError::Secret(format!("Failed to write secrets: {e}")))?;
+            .map_err(|e| McclawdError::Secret(format!("Failed to write secrets temp: {e}")))?;
+        tokio::fs::rename(&tmp_path, &self.path)
+            .await
+            .map_err(|e| McclawdError::Secret(format!("Failed to rename secrets: {e}")))?;
         Ok(())
     }
 }

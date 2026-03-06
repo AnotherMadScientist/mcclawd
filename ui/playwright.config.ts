@@ -8,6 +8,10 @@ export default defineConfig({
   retries: 0,
   timeout: 30_000,
   expect: { timeout: 5_000 },
+  reporter: [
+    ["list"],
+    ["json", { outputFile: "tests/test-results.json" }],
+  ],
   use: {
     baseURL: "http://localhost:8080",
     trace: "on-first-retry",

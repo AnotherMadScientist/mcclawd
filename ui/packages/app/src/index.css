@@ -140,48 +140,105 @@ body {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 
-/* Code blocks */
-.prose-response pre {
-  background: oklch(0.12 0 0);
-  border: 1px solid oklch(0.28 0 0);
-  border-radius: 8px;
-  padding: 1em;
-  margin-top: 0.75em;
-  margin-bottom: 0.75em;
-  overflow-x: auto;
+/* Code blocks — CodeBlock component handles its own wrapper */
+.prose-response .code-block-wrapper pre {
+  margin: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  padding: 1em !important;
   font-size: 0.85em;
   line-height: 1.6;
 }
 
-.prose-response pre code {
-  background: none;
-  border: none;
-  padding: 0;
+.prose-response .code-block-wrapper code {
+  background: none !important;
+  border: none !important;
+  padding: 0 !important;
   font-size: inherit;
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 
-/* Tables */
+/* Tables — responsive with borders and alternating rows */
 .prose-response table {
   width: 100%;
   border-collapse: collapse;
-  margin-top: 0.75em;
-  margin-bottom: 0.75em;
-  font-size: 0.9em;
+  margin-top: 0;
+  margin-bottom: 0;
+  font-size: 0.875em;
+  border: 1px solid oklch(0.3 0 0);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.prose-response thead {
+  background: oklch(0.2 0 0);
 }
 
 .prose-response th {
   font-weight: 600;
   text-align: left;
-  padding: 0.5em 0.75em;
-  border-bottom: 2px solid oklch(0.35 0 0);
+  padding: 0.6em 0.85em;
+  border-bottom: 1px solid oklch(0.35 0 0);
+  border-right: 1px solid oklch(0.28 0 0);
+  color: oklch(0.9 0 0);
+}
+
+.prose-response th:last-child {
+  border-right: none;
 }
 
 .prose-response td {
-  padding: 0.5em 0.75em;
-  border-bottom: 1px solid oklch(0.25 0 0);
+  padding: 0.55em 0.85em;
+  border-bottom: 1px solid oklch(0.22 0 0);
+  border-right: 1px solid oklch(0.22 0 0);
+  vertical-align: top;
+}
+
+.prose-response td:last-child {
+  border-right: none;
 }
 
 .prose-response tr:last-child td {
   border-bottom: none;
+}
+
+.prose-response tbody tr:nth-child(even) {
+  background: oklch(0.17 0 0);
+}
+
+.prose-response tbody tr:hover {
+  background: oklch(0.2 0 0);
+}
+
+/* Headings — size hierarchy with bottom borders on h1/h2 */
+.prose-response h1 {
+  font-size: 1.35em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid oklch(0.3 0 0);
+}
+
+.prose-response h2 {
+  font-size: 1.2em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid oklch(0.26 0 0);
+}
+
+.prose-response h3 {
+  font-size: 1.05em;
+}
+
+/* Blockquotes — italic with left accent border */
+.prose-response blockquote {
+  border-left: 3px solid oklch(0.45 0.08 250);
+  padding-left: 1em;
+  margin-top: 0.75em;
+  margin-bottom: 0.75em;
+  color: oklch(0.65 0 0);
+  font-style: italic;
+}
+
+.prose-response blockquote p {
+  margin-top: 0.3em;
+  margin-bottom: 0.3em;
 }

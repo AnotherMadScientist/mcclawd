@@ -39,19 +39,39 @@ export function TaskDetailPage() {
 
   const isRunning = connected && !done;
 
-  // Mic dictation for follow-up input
+  // Mic dictation for follow-up input.
+  // followUpBeforeMicRef captures the text already in the input BEFORE the mic
+  // session starts, so interim/final results are appended to it rather than
+  // replacing it. We track whether the mic is currently active so we only
+  // update the base ref from typed input, not from interim results.
   const followUpBeforeMicRef = useRef(followUp);
+  const micActiveRef = useRef(false);
+
+  // Keep the base ref in sync with typed input when the mic is not recording.
+  useEffect(() => {
+    if (!micActiveRef.current) {
+      followUpBeforeMicRef.current = followUp;
+    }
+  }, [followUp]);
+
+  const handleMicStart = useCallback(() => {
+    // Snapshot the current text as the base before mic starts.
+    followUpBeforeMicRef.current = followUp;
+    micActiveRef.current = true;
+  }, [followUp]);
 
   const handleFollowUpInterim = useCallback((text: string) => {
     const base = followUpBeforeMicRef.current;
-    setFollowUp(base ? base + " " + text : text);
+    setFollowUp(base ? `${base} ${text}` : text);
   }, []);
 
   const handleFollowUpTranscript = useCallback((text: string) => {
     const base = followUpBeforeMicRef.current;
-    const final_ = base ? base + " " + text : text;
+    const final_ = base ? `${base} ${text}` : text;
     setFollowUp(final_);
+    // Update base to the committed final so subsequent mic sessions append correctly.
     followUpBeforeMicRef.current = final_;
+    micActiveRef.current = false;
   }, []);
 
   const handleSendFollowUp = async () => {
@@ -59,11 +79,15 @@ export function TaskDetailPage() {
     const message = followUp.trim();
     setSending(true);
     try {
-      await api.tasks.sendMessage(id, message);
+      // Upload files BEFORE sending the message — sendMessage spawns
+      // the agent immediately, so files must be on disk first.
       if (attachedFiles.length > 0) {
         await api.tasks.uploadAttachments(id, attachedFiles.map((f) => f.file));
       }
+      await api.tasks.sendMessage(id, message);
       setFollowUp("");
+      followUpBeforeMicRef.current = "";
+      micActiveRef.current = false;
       clearFiles();
       reconnect(message);
     } catch (err) {
@@ -73,31 +97,38 @@ export function TaskDetailPage() {
     }
   };
 
-  const handleRetry = useCallback(async (message: string) => {
+  const handleRetry = useCallback(async (message: string, eventIndex?: number) => {
     if (!id || sending) return;
     setSending(true);
     try {
-      await api.tasks.sendMessage(id, message);
-      reconnect(message);
+      // Count chat history turns before this message for backend truncation
+      const truncateTo = eventIndex !== undefined
+        ? events.slice(0, eventIndex).filter(e => e.type === "user" || e.type === "text").length
+        : undefined;
+      await api.tasks.sendMessage(id, message, truncateTo);
+      reconnect(message, eventIndex);
     } catch (err) {
       console.error("Failed to retry message:", err);
     } finally {
       setSending(false);
     }
-  }, [id, sending, reconnect]);
+  }, [id, sending, reconnect, events]);
 
-  const handleEditRetry = useCallback(async (message: string) => {
+  const handleEditRetry = useCallback(async (message: string, eventIndex?: number) => {
     if (!id || sending) return;
     setSending(true);
     try {
-      await api.tasks.sendMessage(id, message);
-      reconnect(message);
+      const truncateTo = eventIndex !== undefined
+        ? events.slice(0, eventIndex).filter(e => e.type === "user" || e.type === "text").length
+        : undefined;
+      await api.tasks.sendMessage(id, message, truncateTo);
+      reconnect(message, eventIndex);
     } catch (err) {
       console.error("Failed to send edited message:", err);
     } finally {
       setSending(false);
     }
-  }, [id, sending, reconnect]);
+  }, [id, sending, reconnect, events]);
 
   return (
     <div className="max-w-4xl mx-auto flex flex-col h-full">
@@ -149,8 +180,8 @@ export function TaskDetailPage() {
           <StreamEntry
             key={i}
             event={event}
-            onRetry={event.type === "user" ? handleRetry : undefined}
-            onEditRetry={event.type === "user" ? handleEditRetry : undefined}
+            onRetry={event.type === "user" ? (msg: string) => handleRetry(msg, i) : undefined}
+            onEditRetry={event.type === "user" ? (msg: string) => handleEditRetry(msg, i) : undefined}
           />
         ))}
 
@@ -197,6 +228,7 @@ export function TaskDetailPage() {
               <MicButton
                 onTranscript={handleFollowUpTranscript}
                 onInterim={handleFollowUpInterim}
+                onStart={handleMicStart}
                 disabled={sending}
                 size="sm"
               />

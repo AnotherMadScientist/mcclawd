@@ -21,6 +21,8 @@ pub struct TaskRecord {
     pub id: TaskId,
     pub prompt: String,
     pub status: TaskStatus,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// Task manager with history.
@@ -36,23 +38,45 @@ impl TaskManager {
     }
 
     pub fn start_task(&mut self, prompt: String) -> TaskId {
+        self.start_task_with_tags(prompt, Vec::new())
+    }
+
+    pub fn start_task_with_tags(&mut self, prompt: String, tags: Vec<String>) -> TaskId {
         let id = TaskId::new();
         self.tasks.push(TaskRecord {
             id: id.clone(),
             prompt,
             status: TaskStatus::Running,
+            tags,
         });
         id
     }
 
     pub fn create_task(&mut self, prompt: String) -> TaskId {
+        self.create_task_with_tags(prompt, Vec::new())
+    }
+
+    pub fn create_task_with_tags(&mut self, prompt: String, tags: Vec<String>) -> TaskId {
         let id = TaskId::new();
         self.tasks.push(TaskRecord {
             id: id.clone(),
             prompt,
             status: TaskStatus::Pending,
+            tags,
         });
         id
+    }
+
+    /// Delete all tasks matching a given tag. Returns the IDs of deleted tasks.
+    pub fn delete_by_tag(&mut self, tag: &str) -> Vec<TaskId> {
+        let to_delete: Vec<TaskId> = self
+            .tasks
+            .iter()
+            .filter(|t| t.tags.iter().any(|tg| tg == tag))
+            .map(|t| t.id.clone())
+            .collect();
+        self.tasks.retain(|t| !t.tags.iter().any(|tg| tg == tag));
+        to_delete
     }
 
     pub fn building(&mut self, id: &TaskId) {
@@ -121,7 +145,7 @@ impl TaskManager {
         if self.tasks.iter().any(|t| t.id == id) {
             return;
         }
-        self.tasks.push(TaskRecord { id, prompt, status });
+        self.tasks.push(TaskRecord { id, prompt, status, tags: Vec::new() });
     }
 }
 

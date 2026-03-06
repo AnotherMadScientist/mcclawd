@@ -24,6 +24,9 @@ pub struct McclawdConfig {
     pub skills: SkillsConfig,
 
     #[serde(default)]
+    pub sandbox: SandboxConfig,
+
+    #[serde(default)]
     pub compat: CompatConfig,
 }
 
@@ -82,6 +85,18 @@ pub struct SkillsConfig {
     /// Directory for local skill catalog cache.
     #[serde(default = "default_skills_cache_dir")]
     pub cache_dir: PathBuf,
+
+    /// Version pins: skill_name -> version. Pinned skills are not upgraded automatically.
+    #[serde(default)]
+    pub pinned_versions: std::collections::HashMap<String, String>,
+
+    /// Max characters of skill context to inject into agent system prompt (Gap 6).
+    #[serde(default = "default_max_skill_context_chars")]
+    pub max_skill_context_chars: usize,
+}
+
+fn default_max_skill_context_chars() -> usize {
+    50_000
 }
 
 impl Default for SkillsConfig {
@@ -90,6 +105,8 @@ impl Default for SkillsConfig {
             managed_dir: default_skills_managed_dir(),
             clawhub_api: default_clawhub_api(),
             cache_dir: default_skills_cache_dir(),
+            pinned_versions: std::collections::HashMap::new(),
+            max_skill_context_chars: default_max_skill_context_chars(),
         }
     }
 }
@@ -202,6 +219,48 @@ fn default_mcp_servers() -> Vec<McpServerConfig> {
     ]
 }
 
+/// Configuration for Docker sandbox execution.
+///
+/// All agent execution runs inside Docker containers — there is no host-mode fallback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    /// Docker image to use as base for agent containers.
+    #[serde(default = "default_sandbox_image")]
+    pub base_image: String,
+    /// Memory limit for containers (bytes). Default: 512MB.
+    #[serde(default = "default_sandbox_memory")]
+    pub memory_limit: Option<i64>,
+    /// CPU limit in nano-CPUs. Default: 1 CPU (1_000_000_000).
+    #[serde(default)]
+    pub cpu_limit: Option<i64>,
+    /// Docker network name for agent + MCP communication. Default: "mcclawd_tools".
+    #[serde(default = "default_sandbox_network")]
+    pub network: String,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            base_image: default_sandbox_image(),
+            memory_limit: default_sandbox_memory(),
+            cpu_limit: None,
+            network: default_sandbox_network(),
+        }
+    }
+}
+
+fn default_sandbox_image() -> String {
+    "mcclawd-sandbox:latest".to_string()
+}
+
+fn default_sandbox_memory() -> Option<i64> {
+    Some(512 * 1024 * 1024) // 512MB
+}
+
+fn default_sandbox_network() -> String {
+    "mcclawd_tools".to_string()
+}
+
 /// OpenClaw compatibility settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompatConfig {
@@ -254,6 +313,19 @@ impl McclawdConfig {
         }
     }
 
+    /// Write the current config to a TOML file on disk.
+    pub fn save(&self, path: &Path) -> crate::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| crate::McclawdError::Config(format!("Cannot create config dir: {e}")))?;
+        }
+        let toml_str = toml::to_string_pretty(self)
+            .map_err(|e| crate::McclawdError::Config(format!("Failed to serialize config: {e}")))?;
+        std::fs::write(path, toml_str)
+            .map_err(|e| crate::McclawdError::Config(format!("Failed to write config: {e}")))?;
+        Ok(())
+    }
+
     pub fn workspaces_dir(&self) -> PathBuf {
         self.data_dir.join("workspaces")
     }
@@ -276,6 +348,7 @@ impl Default for McclawdConfig {
             providers: ProvidersConfig::default(),
             mcp: McpConfig::default(),
             skills: SkillsConfig::default(),
+            sandbox: SandboxConfig::default(),
             compat: CompatConfig::default(),
         }
     }
@@ -324,6 +397,8 @@ max_turns = 10
             managed_dir: PathBuf::from("/tmp/skills"),
             clawhub_api: "https://test.clawhub.com".to_string(),
             cache_dir: PathBuf::from("/tmp/cache"),
+            pinned_versions: Default::default(),
+            max_skill_context_chars: 50_000,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: SkillsConfig = serde_json::from_str(&json).unwrap();
@@ -366,5 +441,49 @@ openclaw_config = false
         // Verifies the function runs without panicking.
         // Actual file presence depends on the environment.
         let _result = detect_openclaw_config();
+    }
+
+    #[test]
+    fn test_config_save_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut config = McclawdConfig::default();
+        config.agent.model = "gpt-4o".to_string();
+        config.agent.max_turns = 42;
+        config.agent.default_workspace = "myws".to_string();
+
+        config.save(&path).unwrap();
+        let loaded = McclawdConfig::load(&path).unwrap();
+
+        assert_eq!(loaded.agent.model, "gpt-4o");
+        assert_eq!(loaded.agent.max_turns, 42);
+        assert_eq!(loaded.agent.default_workspace, "myws");
+    }
+
+    #[test]
+    fn test_config_save_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("deep").join("config.toml");
+
+        let config = McclawdConfig::default();
+        config.save(&path).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_config_save_preserves_other_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut config = McclawdConfig::default();
+        config.agent.model = "custom-model".to_string();
+        config.mcp.agentgateway_url = "http://custom:5000".to_string();
+
+        config.save(&path).unwrap();
+        let loaded = McclawdConfig::load(&path).unwrap();
+
+        assert_eq!(loaded.agent.model, "custom-model");
+        assert_eq!(loaded.mcp.agentgateway_url, "http://custom:5000");
     }
 }

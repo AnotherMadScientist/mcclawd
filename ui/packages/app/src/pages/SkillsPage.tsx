@@ -22,6 +22,7 @@ import { api } from "../api/client";
 import { getToken } from "../api/client";
 import type { InstalledSkill, ClawHubSkillMeta, ScanResult } from "../api/types";
 import { TiptapSkillEditor } from "../components/TiptapSkillEditor";
+import { ErrorState } from "../components/ErrorState";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -159,8 +160,11 @@ function BrowseCard({
   const accentColor = getTagColor(skill.tags);
 
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onClick}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
       className={`relative rounded-xl bg-card border transition-colors text-left w-full overflow-hidden flex flex-col ${
         isSelected
           ? "border-primary ring-1 ring-primary/30"
@@ -261,7 +265,7 @@ function BrowseCard({
           )}
         </div>
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -383,38 +387,6 @@ function slugify(name: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-function generateSkillFromDescription(name: string, description: string): string {
-  const slug = slugify(name) || "my-skill";
-  return `---
-name: ${slug}
-version: 0.1.0
-author: me
-description: ${description}
-tags:
-  - custom
----
-
-# ${slug}
-
-## Description
-${description}
-
-## Instructions
-[Describe step-by-step how this skill works]
-
-## Tools Required
-[List any MCP tools this skill needs]
-
-## Examples
-\`\`\`
-User: [example prompt]
-Assistant: [example response]
-\`\`\`
-
-## Configuration
-[Any configuration options]
-`;
-}
 
 function parseSkillName(text: string): string {
   const match = text.match(/^name:\s*(.+)$/m);
@@ -425,25 +397,37 @@ function parseSkillName(text: string): string {
 // Create Skill Dialog — description-first AI flow + editable with section bars
 // ---------------------------------------------------------------------------
 
-function CreateSkillDialog({ onClose }: { onClose: () => void }) {
+function CreateSkillDialog({
+  onClose,
+  onNotify,
+  onSaved,
+}: {
+  onClose: () => void;
+  onNotify: (type: "success" | "error", message: string) => void;
+  onSaved: () => void;
+}) {
   const [mode, setMode] = useState<"describe" | "edit">("describe");
   const [skillName, setSkillName] = useState("");
   const [description, setDescription] = useState("");
-  const [generating, setGenerating] = useState(false);
   const [text, setText] = useState(SKILL_TEMPLATE);
+
+  const saveSkill = useMutation({
+    mutationFn: () => {
+      const name = parseSkillName(text) || slugify(skillName) || "my-skill";
+      return api.skills.create(name, text);
+    },
+    onSuccess: (data) => {
+      onNotify("success", `Created skill "${data.name}"`);
+      onSaved();
+      onClose();
+    },
+    onError: (err: Error) => onNotify("error", `Save failed: ${err.message}`),
+  });
 
   const folderName = mode === "edit" ? (parseSkillName(text) || slugify(skillName) || "my-skill") : (slugify(skillName) || "my-skill");
 
   function handleGenerate() {
-    if (!skillName.trim() && !description.trim()) return;
-    setGenerating(true);
-    // Simulate async generation (replace with real API call when System Agent is ready)
-    setTimeout(() => {
-      const generated = generateSkillFromDescription(skillName, description);
-      setText(generated);
-      setGenerating(false);
-      setMode("edit");
-    }, 800);
+    onNotify("error", "AI generation coming soon — edit the template manually");
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
@@ -454,7 +438,7 @@ function CreateSkillDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-6" onClick={onClose}>
-      <div className="bg-card border border-border rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+      <div data-testid="create-skill-dialog" role="dialog" className="bg-card border border-border rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
           <div>
@@ -535,20 +519,11 @@ function CreateSkillDialog({ onClose }: { onClose: () => void }) {
                 <div className="flex flex-col gap-2">
                   <button
                     onClick={handleGenerate}
-                    disabled={generating || (!skillName.trim() && !description.trim())}
+                    disabled={!skillName.trim() && !description.trim()}
                     className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
                   >
-                    {generating ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Generating SKILL.md...
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="w-4 h-4" />
-                        Generate SKILL.md
-                      </>
-                    )}
+                    <Sparkles className="w-4 h-4" />
+                    Generate SKILL.md
                   </button>
                   <button
                     onClick={() => { setText(SKILL_TEMPLATE); setMode("edit"); }}
@@ -578,12 +553,21 @@ function CreateSkillDialog({ onClose }: { onClose: () => void }) {
             <div className="flex gap-2">
               <button
                 onClick={() => navigator.clipboard.writeText(text)}
-                className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition-opacity"
+                className="px-3 py-1.5 rounded-lg bg-muted text-xs font-medium hover:bg-muted/80 transition-colors"
               >
-                Copy to Clipboard
+                Copy
               </button>
-              <button onClick={onClose} className="px-3 py-1.5 rounded-lg bg-muted text-xs font-medium hover:bg-muted/80 transition-colors">
-                Close
+              <button
+                onClick={() => saveSkill.mutate()}
+                disabled={saveSkill.isPending || !text.trim()}
+                data-testid="create-skill-save"
+                className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+              >
+                {saveSkill.isPending ? (
+                  <><Loader2 className="w-3 h-3 animate-spin" />Saving...</>
+                ) : (
+                  "Save Skill"
+                )}
               </button>
             </div>
           )}
@@ -748,11 +732,10 @@ function SkillDetailDialog({
     queryFn: () => api.skills.content(name).then((r) => r.content).catch(() => null),
   });
 
-  // Security scan query (only for installed skills)
+  // Security scan query (for all skills — backend handles both installed and uninstalled)
   const { data: scanResult } = useQuery({
     queryKey: ["skill-scan", name],
     queryFn: () => api.skills.scan(name).catch(() => null),
-    enabled: !!installedInfo,
   });
 
   const handleScan = async () => {
@@ -767,7 +750,7 @@ function SkillDetailDialog({
       } else if (result.status === "Critical") {
         onNotify("error", `Scan found ${result.issues.length} critical issue(s)`);
       } else {
-        onNotify("error", "Scanner not available (uvx/snyk-agent-scan not installed)");
+        onNotify("error", "Scan completed — no results available");
       }
     } catch {
       onNotify("error", "Scan failed");
@@ -782,6 +765,8 @@ function SkillDetailDialog({
       queryClient.invalidateQueries({ queryKey: ["skills"] });
       queryClient.invalidateQueries({ queryKey: ["skill-content", name] });
       onNotify("success", `Installed "${name}"`);
+      // Auto-scan after install
+      queryClient.invalidateQueries({ queryKey: ["skill-scan", name] });
     },
     onError: (err: Error) => onNotify("error", `Install failed: ${err.message}`),
   });
@@ -804,7 +789,9 @@ function SkillDetailDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-6" onClick={onClose}>
       <div
-        className="bg-card border border-border rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col"
+        data-testid="skill-detail"
+        role="dialog"
+        className="bg-card border border-border rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -854,19 +841,16 @@ function SkillDetailDialog({
                 )}
               </div>
             )}
-            {installedInfo && (
-              <>
-                <SecurityBadge scanResult={scanResult} />
-                <button
-                  onClick={handleScan}
-                  disabled={scanning}
-                  className="px-3 py-1.5 rounded-lg bg-muted text-xs font-medium hover:bg-muted/80 transition-colors disabled:opacity-50 flex items-center gap-1.5"
-                >
-                  {scanning ? <Loader2 className="w-3 h-3 animate-spin" /> : <Shield className="w-3 h-3" />}
-                  Scan
-                </button>
-              </>
-            )}
+            {/* Show scan badge + button for all skills, not just installed */}
+            <SecurityBadge scanResult={scanResult} />
+            <button
+              onClick={handleScan}
+              disabled={scanning}
+              className="px-3 py-1.5 rounded-lg bg-muted text-xs font-medium hover:bg-muted/80 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+            >
+              {scanning ? <Loader2 className="w-3 h-3 animate-spin" /> : <Shield className="w-3 h-3" />}
+              Scan
+            </button>
             {installedInfo ? (
               <button
                 onClick={() => uninstall.mutate()}
@@ -893,7 +877,7 @@ function SkillDetailDialog({
         </div>
 
         {/* Body — full SKILL.md with section annotations */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 min-h-0 overflow-y-auto">
           {(metaLoading || contentLoading) && (
             <div className="flex flex-col items-center justify-center py-16 gap-2">
               <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
@@ -998,12 +982,12 @@ export function SkillsPage() {
         .then((result) => {
           setScanResults((prev) => ({ ...prev, [name]: result }));
         })
-        .catch(() => {
-          /* scan not available */
+        .catch((err) => {
+          notify("error", `Scan failed: ${err.message || "unavailable"}`);
         })
         .finally(() => setScanningSkill(null));
     },
-    [],
+    [notify],
   );
 
   useEffect(() => {
@@ -1013,14 +997,24 @@ export function SkillsPage() {
 
   // ---- Queries ----
 
-  const { data: installed = [], isLoading: installedLoading } = useQuery({
+  const {
+    data: installed = [],
+    isLoading: installedLoading,
+    isError: installedError,
+    refetch: refetchInstalled,
+  } = useQuery({
     queryKey: ["skills"],
     queryFn: api.skills.list,
   });
 
   const installedNames = new Set(installed.map((s) => s.name));
 
-  const { data: catalog, isLoading: catalogLoading } = useQuery({
+  const {
+    data: catalog,
+    isLoading: catalogLoading,
+    isError: catalogError,
+    refetch: refetchCatalog,
+  } = useQuery({
     queryKey: ["catalog", debouncedQuery],
     queryFn: () => api.skills.catalog(debouncedQuery, 0, 50),
     refetchInterval: syncProgress !== null ? 2000 : false,
@@ -1099,7 +1093,7 @@ export function SkillsPage() {
         if (result && result.status !== "NotScanned") {
           setScanResults((prev) => ({ ...prev, [skill.name]: result }));
         }
-      }).catch(() => { /* ignore — scan not available */ });
+      }).catch((err) => { console.warn(`Scan unavailable for ${skill.name}:`, err.message); });
     }
   }, [installed]);
 
@@ -1157,7 +1151,11 @@ export function SkillsPage() {
         </div>
       </div>
 
-      {notification && <NotificationBanner notification={notification} />}
+      {notification && (
+        <div className="fixed top-4 right-4 z-[60]">
+          <NotificationBanner notification={notification} />
+        </div>
+      )}
 
       {/* Main layout: browse left, installed right */}
       <div className="flex gap-4">
@@ -1173,7 +1171,7 @@ export function SkillsPage() {
             />
           </div>
 
-          {!catalogLoading && skills.length > 0 && (
+          {!catalogLoading && !catalogError && skills.length > 0 && (
             <p className="text-xs text-muted-foreground">
               {debouncedQuery ? `${skills.length} of ${catalogTotal} skills` : `${catalogTotal.toLocaleString()} skills`}
             </p>
@@ -1185,7 +1183,11 @@ export function SkillsPage() {
             </div>
           )}
 
-          {!catalogLoading && skills.length === 0 && (
+          {!catalogLoading && catalogError && (
+            <ErrorState message="Failed to load skill catalog" onRetry={() => refetchCatalog()} />
+          )}
+
+          {!catalogLoading && !catalogError && skills.length === 0 && (
             <div className="rounded-xl border border-border bg-card p-8">
               <div className="flex flex-col items-center justify-center py-12">
                 <RefreshCw className="w-10 h-10 text-muted-foreground mb-3" />
@@ -1197,7 +1199,7 @@ export function SkillsPage() {
             </div>
           )}
 
-          {!catalogLoading && skills.length > 0 && (
+          {!catalogLoading && !catalogError && skills.length > 0 && (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2.5">
               {skills.map((skill: ClawHubSkillMeta) => (
                 <BrowseCard
@@ -1238,7 +1240,19 @@ export function SkillsPage() {
               </div>
             )}
 
-            {!installedLoading && installed.length === 0 && (
+            {!installedLoading && installedError && (
+              <div className="py-4 text-center">
+                <p className="text-xs text-destructive">Failed to load</p>
+                <button
+                  onClick={() => refetchInstalled()}
+                  className="text-xs text-primary hover:underline mt-1"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+
+            {!installedLoading && !installedError && installed.length === 0 && (
               <div className="flex flex-col items-center py-6 text-center">
                 <Puzzle className="w-8 h-8 text-muted-foreground/40 mb-2" />
                 <p className="text-xs text-muted-foreground">None yet</p>
@@ -1276,7 +1290,11 @@ export function SkillsPage() {
         />
       )}
       {showCreateDialog && (
-        <CreateSkillDialog onClose={() => setShowCreateDialog(false)} />
+        <CreateSkillDialog
+          onClose={() => setShowCreateDialog(false)}
+          onNotify={notify}
+          onSaved={() => queryClient.invalidateQueries({ queryKey: ["skills"] })}
+        />
       )}
     </div>
   );

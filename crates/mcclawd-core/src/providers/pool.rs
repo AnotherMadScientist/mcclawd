@@ -2,8 +2,20 @@
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const SECONDS_PER_DAY: u64 = 86400;
+const SECONDS_PER_MONTH: u64 = 30 * 86400;
+
+fn now_epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
 /// Supported LLM provider kinds.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -70,6 +82,71 @@ impl UsageRecord {
     }
 }
 
+/// Budget tracking with windowed daily/monthly spend counters and auto-reset.
+#[derive(Debug)]
+struct BudgetTracker {
+    daily_cost_millicents: AtomicU64,
+    monthly_cost_millicents: AtomicU64,
+    /// Epoch second when the current daily period started.
+    daily_period_start: AtomicU64,
+    /// Epoch second when the current monthly period started.
+    monthly_period_start: AtomicU64,
+}
+
+impl BudgetTracker {
+    fn new() -> Self {
+        let now = now_epoch_secs();
+        Self {
+            daily_cost_millicents: AtomicU64::new(0),
+            monthly_cost_millicents: AtomicU64::new(0),
+            daily_period_start: AtomicU64::new(now),
+            monthly_period_start: AtomicU64::new(now),
+        }
+    }
+
+    /// Record a cost, auto-resetting if the period has elapsed.
+    fn record_cost(&self, cost_usd: f64) {
+        self.maybe_reset();
+        let millicents = (cost_usd * 100_000.0) as u64;
+        self.daily_cost_millicents
+            .fetch_add(millicents, Ordering::Relaxed);
+        self.monthly_cost_millicents
+            .fetch_add(millicents, Ordering::Relaxed);
+    }
+
+    /// Reset counters if the daily or monthly period has elapsed.
+    fn maybe_reset(&self) {
+        let now = now_epoch_secs();
+        let daily_start = self.daily_period_start.load(Ordering::Relaxed);
+        if now.saturating_sub(daily_start) >= SECONDS_PER_DAY {
+            self.daily_cost_millicents.store(0, Ordering::Relaxed);
+            self.daily_period_start.store(now, Ordering::Relaxed);
+        }
+        let monthly_start = self.monthly_period_start.load(Ordering::Relaxed);
+        if now.saturating_sub(monthly_start) >= SECONDS_PER_MONTH {
+            self.monthly_cost_millicents.store(0, Ordering::Relaxed);
+            self.monthly_period_start.store(now, Ordering::Relaxed);
+        }
+    }
+
+    /// Add to monthly cost only (for hydrating past days in the current month).
+    fn record_monthly_only(&self, cost_usd: f64) {
+        let millicents = (cost_usd * 100_000.0) as u64;
+        self.monthly_cost_millicents
+            .fetch_add(millicents, Ordering::Relaxed);
+    }
+
+    fn daily_spend_usd(&self) -> f64 {
+        self.maybe_reset();
+        self.daily_cost_millicents.load(Ordering::Relaxed) as f64 / 100_000.0
+    }
+
+    fn monthly_spend_usd(&self) -> f64 {
+        self.maybe_reset();
+        self.monthly_cost_millicents.load(Ordering::Relaxed) as f64 / 100_000.0
+    }
+}
+
 /// Aggregated usage summary across all providers.
 #[derive(Debug, Clone, Serialize)]
 pub struct UsageSummary {
@@ -88,21 +165,265 @@ pub struct ProviderUsage {
     pub requests: u64,
 }
 
+/// Budget alert severity levels.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum BudgetAlertLevel {
+    /// Within budget (< 80% used).
+    Ok,
+    /// Approaching budget limit (>= 80% used).
+    Warning,
+    /// Budget limit exceeded (>= 100% used).
+    Exceeded,
+}
+
+/// Detail for a single budget dimension (daily or monthly).
+#[derive(Debug, Clone, Serialize)]
+pub struct BudgetAlertDetail {
+    pub level: BudgetAlertLevel,
+    pub spent_usd: f64,
+    pub limit_usd: f64,
+    pub percent_used: f64,
+}
+
+/// Budget alert status across all dimensions.
+#[derive(Debug, Clone, Serialize)]
+pub struct BudgetAlerts {
+    pub daily: Option<BudgetAlertDetail>,
+    pub monthly: Option<BudgetAlertDetail>,
+    pub per_task_limit_usd: Option<f64>,
+}
+
+/// Estimate cost in USD for a given model and token counts.
+/// Approximate pricing for display purposes only.
+pub fn estimate_cost_usd(model: &str, input_tokens: u64, output_tokens: u64) -> f64 {
+    match model {
+        m if m.contains("opus") => {
+            (input_tokens as f64 * 15.0 + output_tokens as f64 * 75.0) / 1_000_000.0
+        }
+        m if m.contains("sonnet") => {
+            (input_tokens as f64 * 3.0 + output_tokens as f64 * 15.0) / 1_000_000.0
+        }
+        m if m.contains("haiku") => {
+            (input_tokens as f64 * 0.25 + output_tokens as f64 * 1.25) / 1_000_000.0
+        }
+        _ => (input_tokens as f64 * 3.0 + output_tokens as f64 * 15.0) / 1_000_000.0, // default to sonnet pricing
+    }
+}
+
+/// Per-model usage breakdown entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelUsageEntry {
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub estimated_cost_usd: f64,
+    pub request_count: u64,
+}
+
+/// Per-task usage entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskUsageEntry {
+    pub task_id: String,
+    pub prompt_preview: String,
+    pub model: String,
+    pub total_tokens: u64,
+    pub estimated_cost_usd: f64,
+}
+
+/// A single day's aggregated usage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyUsage {
+    /// ISO-8601 date string, e.g. "2026-03-06".
+    pub date: String,
+    pub cost_usd: f64,
+    pub tokens: u64,
+}
+
+/// Enhanced usage summary with per-model and per-task breakdowns.
+#[derive(Debug, Clone, Serialize)]
+pub struct DetailedUsageSummary {
+    pub by_model: Vec<ModelUsageEntry>,
+    pub by_task: Vec<TaskUsageEntry>,
+    pub total: ModelUsageEntry,
+    pub period: String,
+    /// Daily usage history (up to 365 entries), oldest first.
+    pub daily_history: Vec<DailyUsage>,
+}
+
+/// Account credit/cost information from Anthropic Admin API or local tracking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountCredits {
+    /// Source of the data: "admin_api" or "local_tracking".
+    pub source: String,
+    /// Actual or estimated cost this month in USD.
+    pub monthly_cost_usd: f64,
+    /// Whether real data is available (admin API key configured).
+    pub data_available: bool,
+}
+
+/// Flat budget info for the frontend.
+#[derive(Debug, Clone, Serialize)]
+pub struct BudgetInfo {
+    pub daily_limit_usd: Option<f64>,
+    pub monthly_limit_usd: Option<f64>,
+    pub daily_spent_usd: f64,
+    pub monthly_spent_usd: f64,
+    pub alerts: Vec<String>,
+    /// Optional account credit/cost info from Anthropic Admin API or local tracking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_credits: Option<AccountCredits>,
+}
+
+const MAX_TASK_USAGE_ENTRIES: usize = 50;
+
+fn budget_alert_detail(spent: f64, limit: f64) -> BudgetAlertDetail {
+    let percent = if limit > 0.0 {
+        (spent / limit) * 100.0
+    } else {
+        0.0
+    };
+    let level = if percent >= 100.0 {
+        BudgetAlertLevel::Exceeded
+    } else if percent >= 80.0 {
+        BudgetAlertLevel::Warning
+    } else {
+        BudgetAlertLevel::Ok
+    };
+    BudgetAlertDetail {
+        level,
+        spent_usd: spent,
+        limit_usd: limit,
+        percent_used: percent,
+    }
+}
+
+/// Persisted usage snapshot (saved to JSON file).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PersistedUsage {
+    daily_history: Vec<DailyUsage>,
+    model_usage: Vec<ModelUsageEntry>,
+    task_usage: Vec<TaskUsageEntry>,
+}
+
 /// Provider pool managing multiple LLM providers with budget and rate controls.
 pub struct ProviderPool {
     config: ProviderPoolConfig,
     usage: DashMap<String, Arc<UsageRecord>>,
+    budget_tracker: BudgetTracker,
+    /// Per-model usage tracking (model_name -> ModelUsageEntry).
+    model_usage: DashMap<String, ModelUsageEntry>,
+    /// Recent per-task usage entries (bounded to MAX_TASK_USAGE_ENTRIES).
+    task_usage: Mutex<Vec<TaskUsageEntry>>,
+    /// Daily aggregated usage history (bounded to 365 entries), oldest first.
+    daily_history: Mutex<Vec<DailyUsage>>,
+    /// Optional path to persist usage data as JSON file (fallback when no DB).
+    data_dir: Option<PathBuf>,
 }
 
 impl ProviderPool {
     /// Create a new provider pool from configuration.
     pub fn new(config: ProviderPoolConfig) -> Self {
+        Self::with_data_dir(config, None)
+    }
+
+    /// Create a new provider pool with optional file-based persistence directory.
+    pub fn with_data_dir(config: ProviderPoolConfig, data_dir: Option<PathBuf>) -> Self {
         let usage = DashMap::new();
         // Pre-populate usage records for all configured providers.
         for provider in &config.providers {
             usage.insert(provider.name.clone(), Arc::new(UsageRecord::new()));
         }
-        Self { config, usage }
+        let mut pool = Self {
+            config,
+            usage,
+            budget_tracker: BudgetTracker::new(),
+            model_usage: DashMap::new(),
+            task_usage: Mutex::new(Vec::new()),
+            daily_history: Mutex::new(Vec::new()),
+            data_dir: data_dir.clone(),
+        };
+        // Load persisted usage from file if available
+        if let Some(ref dir) = data_dir {
+            pool.load_from_file(dir);
+        }
+        pool
+    }
+
+    /// Load usage data from a JSON file in the given directory.
+    fn load_from_file(&mut self, dir: &std::path::Path) {
+        let path = dir.join("usage_history.json");
+        if !path.exists() {
+            return;
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(content) => match serde_json::from_str::<PersistedUsage>(&content) {
+                Ok(data) => {
+                    if let Ok(mut h) = self.daily_history.lock() {
+                        *h = data.daily_history;
+                    }
+                    for entry in data.model_usage {
+                        self.model_usage.insert(entry.model.clone(), entry);
+                    }
+                    if let Ok(mut t) = self.task_usage.lock() {
+                        *t = data.task_usage;
+                    }
+                    // Hydrate budget tracker
+                    self.hydrate_budget_from_history();
+                    tracing::info!("Usage data loaded from {}", path.display());
+                }
+                Err(e) => tracing::warn!("Failed to parse usage_history.json: {e}"),
+            },
+            Err(e) => tracing::warn!("Failed to read usage_history.json: {e}"),
+        }
+    }
+
+    /// Save current usage data to JSON file (if data_dir is configured).
+    fn save_to_file(&self) {
+        let Some(ref dir) = self.data_dir else { return };
+        let data = PersistedUsage {
+            daily_history: self.daily_history.lock().map(|h| h.clone()).unwrap_or_default(),
+            model_usage: self.model_usage.iter().map(|e| e.value().clone()).collect(),
+            task_usage: self.task_usage.lock().map(|t| t.clone()).unwrap_or_default(),
+        };
+        let path = dir.join("usage_history.json");
+        match serde_json::to_string(&data) {
+            Ok(json) => {
+                let tmp = path.with_extension("json.tmp");
+                if std::fs::write(&tmp, &json).is_ok() {
+                    let _ = std::fs::rename(&tmp, &path);
+                }
+            }
+            Err(e) => tracing::warn!("Failed to serialize usage data: {e}"),
+        }
+    }
+
+    /// Hydrate budget tracker from loaded daily history.
+    fn hydrate_budget_from_history(&self) {
+        if let Ok(history) = self.daily_history.lock() {
+            let today = {
+                let now = now_epoch_secs();
+                let days = now / 86400;
+                let z = days as i64 + 719468;
+                let era = if z >= 0 { z } else { z - 146096 } / 146097;
+                let doe = z - era * 146097;
+                let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+                let y = yoe + era * 400;
+                let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+                let mp = (5 * doy + 2) / 153;
+                let d = doy - (153 * mp + 2) / 5 + 1;
+                let m = if mp < 10 { mp + 3 } else { mp - 9 };
+                let y = if m <= 2 { y + 1 } else { y };
+                format!("{:04}-{:02}-{:02}", y, m, d)
+            };
+            for entry in history.iter() {
+                if entry.date == today {
+                    self.budget_tracker.record_cost(entry.cost_usd);
+                } else if entry.date.starts_with(&today[..7]) {
+                    self.budget_tracker.record_monthly_only(entry.cost_usd);
+                }
+            }
+        }
     }
 
     /// Select the best available provider for a model.
@@ -156,17 +477,118 @@ impl ProviderPool {
         )
     }
 
-    /// Record usage for a provider.
+    /// Record usage for a provider (backward-compatible: no model tracking).
     pub fn record_usage(&self, provider_name: &str, tokens: u64, cost_usd: f64) {
+        self.record_usage_detailed(provider_name, tokens, 0, 0, cost_usd, None);
+    }
+
+    /// Record detailed usage with model and optional task info.
+    pub fn record_usage_detailed(
+        &self,
+        provider_name: &str,
+        total_tokens: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: f64,
+        task_info: Option<(&str, &str, &str)>, // (task_id, prompt_preview, model)
+    ) {
+        // Provider-level tracking (existing)
         let record = self
             .usage
             .entry(provider_name.to_string())
             .or_insert_with(|| Arc::new(UsageRecord::new()));
-        record.tokens.fetch_add(tokens, Ordering::Relaxed);
-        // Convert USD to millicents: $1.00 = 100_000 millicents.
+        record.tokens.fetch_add(total_tokens, Ordering::Relaxed);
         let millicents = (cost_usd * 100_000.0) as u64;
-        record.cost_millicents.fetch_add(millicents, Ordering::Relaxed);
+        record
+            .cost_millicents
+            .fetch_add(millicents, Ordering::Relaxed);
         record.requests.fetch_add(1, Ordering::Relaxed);
+        self.budget_tracker.record_cost(cost_usd);
+
+        // Per-model tracking
+        if let Some((_, _, model)) = task_info {
+            let mut entry = self
+                .model_usage
+                .entry(model.to_string())
+                .or_insert_with(|| ModelUsageEntry {
+                    model: model.to_string(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    total_tokens: 0,
+                    estimated_cost_usd: 0.0,
+                    request_count: 0,
+                });
+            entry.input_tokens += input_tokens;
+            entry.output_tokens += output_tokens;
+            entry.total_tokens += total_tokens;
+            entry.estimated_cost_usd += cost_usd;
+            entry.request_count += 1;
+        }
+
+        // Per-task tracking
+        if let Some((task_id, prompt_preview, model)) = task_info {
+            if let Ok(mut tasks) = self.task_usage.lock() {
+                // Update existing entry or add new
+                if let Some(existing) = tasks.iter_mut().find(|t| t.task_id == task_id) {
+                    existing.total_tokens += total_tokens;
+                    existing.estimated_cost_usd += cost_usd;
+                } else {
+                    tasks.push(TaskUsageEntry {
+                        task_id: task_id.to_string(),
+                        prompt_preview: prompt_preview.to_string(),
+                        model: model.to_string(),
+                        total_tokens,
+                        estimated_cost_usd: cost_usd,
+                    });
+                    // Keep bounded
+                    if tasks.len() > MAX_TASK_USAGE_ENTRIES {
+                        tasks.remove(0);
+                    }
+                }
+            }
+        }
+
+        // Daily history tracking
+        if cost_usd > 0.0 {
+            let today = {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                // seconds since epoch → days since epoch → naive date string
+                let days = now / 86400;
+                // days since 1970-01-01 → year/month/day via Zeller-like calc
+                let z = days as i64 + 719468;
+                let era = if z >= 0 { z } else { z - 146096 } / 146097;
+                let doe = z - era * 146097;
+                let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+                let y = yoe + era * 400;
+                let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+                let mp = (5 * doy + 2) / 153;
+                let d = doy - (153 * mp + 2) / 5 + 1;
+                let m = if mp < 10 { mp + 3 } else { mp - 9 };
+                let y = if m <= 2 { y + 1 } else { y };
+                format!("{:04}-{:02}-{:02}", y, m, d)
+            };
+            if let Ok(mut history) = self.daily_history.lock() {
+                if let Some(last) = history.last_mut() {
+                    if last.date == today {
+                        last.cost_usd += cost_usd;
+                        last.tokens += total_tokens;
+                    } else {
+                        history.push(DailyUsage { date: today, cost_usd, tokens: total_tokens });
+                        if history.len() > 365 {
+                            history.remove(0);
+                        }
+                    }
+                } else {
+                    history.push(DailyUsage { date: today, cost_usd, tokens: total_tokens });
+                }
+            }
+        }
+
+        // Persist to file after every update
+        self.save_to_file();
     }
 
     /// Get current usage summary across all providers.
@@ -205,32 +627,216 @@ impl ProviderPool {
         }
     }
 
+    /// Get detailed usage breakdown by model and task.
+    pub fn get_detailed_usage(&self) -> DetailedUsageSummary {
+        let mut by_model: Vec<ModelUsageEntry> = self
+            .model_usage
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        by_model.sort_by(|a, b| {
+            b.estimated_cost_usd
+                .partial_cmp(&a.estimated_cost_usd)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let by_task = self
+            .task_usage
+            .lock()
+            .map(|tasks| {
+                let mut t = tasks.clone();
+                t.reverse(); // most recent first
+                t
+            })
+            .unwrap_or_default();
+
+        let total = ModelUsageEntry {
+            model: "all".to_string(),
+            input_tokens: by_model.iter().map(|m| m.input_tokens).sum(),
+            output_tokens: by_model.iter().map(|m| m.output_tokens).sum(),
+            total_tokens: by_model.iter().map(|m| m.total_tokens).sum(),
+            estimated_cost_usd: by_model.iter().map(|m| m.estimated_cost_usd).sum(),
+            request_count: by_model.iter().map(|m| m.request_count).sum(),
+        };
+
+        let daily_history = self
+            .daily_history
+            .lock()
+            .map(|h| h.clone())
+            .unwrap_or_default();
+
+        DetailedUsageSummary {
+            by_model,
+            by_task,
+            total,
+            period: "daily".to_string(),
+            daily_history,
+        }
+    }
+
+    /// Hydrate in-memory usage data from persisted DB records.
+    /// Called once on startup after loading from PostgreSQL.
+    /// Only replaces file-loaded data when Postgres has records; preserves
+    /// file-based data as fallback when Postgres tables are empty.
+    pub fn hydrate_usage(
+        &self,
+        daily: Vec<DailyUsage>,
+        models: Vec<ModelUsageEntry>,
+        tasks: Vec<TaskUsageEntry>,
+    ) {
+        // Daily history — only replace if DB has data (preserve file-loaded fallback)
+        if !daily.is_empty() {
+            if let Ok(mut history) = self.daily_history.lock() {
+                *history = daily;
+            }
+        }
+        // Model usage (merges via and_modify — already correct)
+        for entry in models {
+            self.model_usage
+                .entry(entry.model.clone())
+                .and_modify(|e| {
+                    e.input_tokens += entry.input_tokens;
+                    e.output_tokens += entry.output_tokens;
+                    e.total_tokens += entry.total_tokens;
+                    e.estimated_cost_usd += entry.estimated_cost_usd;
+                    e.request_count += entry.request_count;
+                })
+                .or_insert(entry);
+        }
+        // Task usage — only replace if DB has data (preserve file-loaded fallback)
+        if !tasks.is_empty() {
+            if let Ok(mut task_vec) = self.task_usage.lock() {
+                *task_vec = tasks;
+            }
+        }
+        // Update budget tracker from hydrated history
+        self.hydrate_budget_from_history();
+        tracing::info!("Provider pool hydrated from database");
+    }
+
+    /// Get flat budget info for the frontend.
+    pub fn get_budget_info(&self) -> BudgetInfo {
+        let budget = &self.config.budget;
+        let daily_limit = budget.as_ref().and_then(|b| b.daily_limit_usd);
+        let monthly_limit = budget.as_ref().and_then(|b| b.monthly_limit_usd);
+        let daily_spent = self.budget_tracker.daily_spend_usd();
+        let monthly_spent = self.budget_tracker.monthly_spend_usd();
+
+        let mut alerts = Vec::new();
+        if let Some(limit) = daily_limit {
+            let pct = if limit > 0.0 {
+                (daily_spent / limit) * 100.0
+            } else {
+                0.0
+            };
+            if pct >= 100.0 {
+                alerts.push(format!("Daily budget exceeded (${:.2} / ${:.2})", daily_spent, limit));
+            } else if pct >= 80.0 {
+                alerts.push(format!(
+                    "Daily spend at {:.0}% of limit (${:.2} / ${:.2})",
+                    pct, daily_spent, limit
+                ));
+            }
+        }
+        if let Some(limit) = monthly_limit {
+            let pct = if limit > 0.0 {
+                (monthly_spent / limit) * 100.0
+            } else {
+                0.0
+            };
+            if pct >= 100.0 {
+                alerts.push(format!(
+                    "Monthly budget exceeded (${:.2} / ${:.2})",
+                    monthly_spent, limit
+                ));
+            } else if pct >= 80.0 {
+                alerts.push(format!(
+                    "Monthly spend at {:.0}% of limit (${:.2} / ${:.2})",
+                    pct, monthly_spent, limit
+                ));
+            }
+        }
+
+        BudgetInfo {
+            daily_limit_usd: daily_limit,
+            monthly_limit_usd: monthly_limit,
+            daily_spent_usd: daily_spent,
+            monthly_spent_usd: monthly_spent,
+            alerts,
+            account_credits: None,
+        }
+    }
+
     /// Check if the pool is within budget limits.
     ///
     /// Returns `true` if no budget is configured or if spending is within limits.
-    /// Currently checks total spending against daily_limit_usd (simplified —
-    /// a production implementation would track per-day/per-month windows).
+    /// Uses windowed daily/monthly counters with automatic reset.
     pub fn check_budget(&self) -> bool {
         let budget = match &self.config.budget {
             Some(b) => b,
             None => return true, // No budget = no limit.
         };
 
-        let usage = self.get_usage();
-
         if let Some(daily) = budget.daily_limit_usd {
-            if usage.total_cost_usd >= daily {
+            if self.budget_tracker.daily_spend_usd() >= daily {
                 return false;
             }
         }
 
         if let Some(monthly) = budget.monthly_limit_usd {
-            if usage.total_cost_usd >= monthly {
+            if self.budget_tracker.monthly_spend_usd() >= monthly {
                 return false;
             }
         }
 
         true
+    }
+
+    /// Check if a task with the given estimated cost is within the per-task budget.
+    ///
+    /// Returns `true` if no per-task limit is configured or if the cost is within limit.
+    pub fn check_task_budget(&self, estimated_cost_usd: f64) -> bool {
+        let budget = match &self.config.budget {
+            Some(b) => b,
+            None => return true,
+        };
+        match budget.per_task_limit_usd {
+            Some(limit) => estimated_cost_usd <= limit,
+            None => true,
+        }
+    }
+
+    /// Update the budget configuration.
+    pub fn update_budget(&mut self, budget: Option<BudgetConfig>) {
+        self.config.budget = budget;
+    }
+
+    /// Get current budget alert status across all dimensions.
+    pub fn get_budget_alerts(&self) -> BudgetAlerts {
+        let budget = match &self.config.budget {
+            Some(b) => b,
+            None => {
+                return BudgetAlerts {
+                    daily: None,
+                    monthly: None,
+                    per_task_limit_usd: None,
+                }
+            }
+        };
+
+        let daily = budget
+            .daily_limit_usd
+            .map(|limit| budget_alert_detail(self.budget_tracker.daily_spend_usd(), limit));
+
+        let monthly = budget
+            .monthly_limit_usd
+            .map(|limit| budget_alert_detail(self.budget_tracker.monthly_spend_usd(), limit));
+
+        BudgetAlerts {
+            daily,
+            monthly,
+            per_task_limit_usd: budget.per_task_limit_usd,
+        }
     }
 
     /// Check if a specific provider is within its rate limit.
@@ -564,5 +1170,207 @@ mod tests {
         let pool = make_pool(vec![], None);
         // Unknown provider = no limit = true.
         assert!(pool.check_rate_limit("nonexistent"));
+    }
+
+    // --- Budget enforcement tests ---
+
+    #[test]
+    fn per_task_budget_within_limit() {
+        let pool = make_pool(
+            vec![make_provider(
+                "anthropic",
+                ProviderKind::Anthropic,
+                vec!["claude-sonnet-4-5"],
+                10,
+            )],
+            Some(BudgetConfig {
+                daily_limit_usd: None,
+                monthly_limit_usd: None,
+                per_task_limit_usd: Some(0.50),
+            }),
+        );
+        assert!(pool.check_task_budget(0.30));
+    }
+
+    #[test]
+    fn per_task_budget_exceeded() {
+        let pool = make_pool(
+            vec![make_provider(
+                "anthropic",
+                ProviderKind::Anthropic,
+                vec!["claude-sonnet-4-5"],
+                10,
+            )],
+            Some(BudgetConfig {
+                daily_limit_usd: None,
+                monthly_limit_usd: None,
+                per_task_limit_usd: Some(0.50),
+            }),
+        );
+        assert!(!pool.check_task_budget(0.75));
+    }
+
+    #[test]
+    fn per_task_budget_no_limit() {
+        let pool = make_pool(
+            vec![make_provider(
+                "anthropic",
+                ProviderKind::Anthropic,
+                vec!["claude-sonnet-4-5"],
+                10,
+            )],
+            None,
+        );
+        // No budget at all — any cost is fine.
+        assert!(pool.check_task_budget(1000.0));
+    }
+
+    #[test]
+    fn budget_tracker_increments() {
+        let pool = make_pool(
+            vec![make_provider(
+                "anthropic",
+                ProviderKind::Anthropic,
+                vec!["claude-sonnet-4-5"],
+                10,
+            )],
+            Some(BudgetConfig {
+                daily_limit_usd: Some(10.0),
+                monthly_limit_usd: Some(100.0),
+                per_task_limit_usd: None,
+            }),
+        );
+        pool.record_usage("anthropic", 1000, 2.0);
+        pool.record_usage("anthropic", 500, 1.0);
+
+        let alerts = pool.get_budget_alerts();
+        let daily = alerts.daily.unwrap();
+        assert!((daily.spent_usd - 3.0).abs() < 0.001);
+        assert_eq!(daily.limit_usd, 10.0);
+        assert_eq!(daily.level, BudgetAlertLevel::Ok);
+
+        let monthly = alerts.monthly.unwrap();
+        assert!((monthly.spent_usd - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn budget_alert_warning_at_80_percent() {
+        let pool = make_pool(
+            vec![make_provider(
+                "anthropic",
+                ProviderKind::Anthropic,
+                vec!["claude-sonnet-4-5"],
+                10,
+            )],
+            Some(BudgetConfig {
+                daily_limit_usd: Some(10.0),
+                monthly_limit_usd: None,
+                per_task_limit_usd: None,
+            }),
+        );
+        pool.record_usage("anthropic", 5000, 8.5); // 85% of $10
+
+        let alerts = pool.get_budget_alerts();
+        let daily = alerts.daily.unwrap();
+        assert_eq!(daily.level, BudgetAlertLevel::Warning);
+        assert!(daily.percent_used >= 80.0);
+    }
+
+    #[test]
+    fn budget_alert_exceeded_at_100_percent() {
+        let pool = make_pool(
+            vec![make_provider(
+                "anthropic",
+                ProviderKind::Anthropic,
+                vec!["claude-sonnet-4-5"],
+                10,
+            )],
+            Some(BudgetConfig {
+                daily_limit_usd: Some(10.0),
+                monthly_limit_usd: None,
+                per_task_limit_usd: None,
+            }),
+        );
+        pool.record_usage("anthropic", 10000, 12.0); // 120% of $10
+
+        let alerts = pool.get_budget_alerts();
+        let daily = alerts.daily.unwrap();
+        assert_eq!(daily.level, BudgetAlertLevel::Exceeded);
+    }
+
+    #[test]
+    fn budget_alerts_no_config() {
+        let pool = make_pool(
+            vec![make_provider(
+                "anthropic",
+                ProviderKind::Anthropic,
+                vec!["claude-sonnet-4-5"],
+                10,
+            )],
+            None,
+        );
+        let alerts = pool.get_budget_alerts();
+        assert!(alerts.daily.is_none());
+        assert!(alerts.monthly.is_none());
+        assert!(alerts.per_task_limit_usd.is_none());
+    }
+
+    #[test]
+    fn update_budget_changes_limits() {
+        let mut pool = make_pool(
+            vec![make_provider(
+                "anthropic",
+                ProviderKind::Anthropic,
+                vec!["claude-sonnet-4-5"],
+                10,
+            )],
+            None,
+        );
+        // No budget initially.
+        assert!(pool.check_budget());
+
+        // Set a tight budget.
+        pool.update_budget(Some(BudgetConfig {
+            daily_limit_usd: Some(1.0),
+            monthly_limit_usd: None,
+            per_task_limit_usd: None,
+        }));
+        pool.record_usage("anthropic", 10000, 2.0);
+        assert!(!pool.check_budget());
+    }
+
+    #[test]
+    fn daily_reset_clears_daily_counter() {
+        let pool = make_pool(
+            vec![make_provider(
+                "anthropic",
+                ProviderKind::Anthropic,
+                vec!["claude-sonnet-4-5"],
+                10,
+            )],
+            Some(BudgetConfig {
+                daily_limit_usd: Some(5.0),
+                monthly_limit_usd: None,
+                per_task_limit_usd: None,
+            }),
+        );
+        pool.record_usage("anthropic", 10000, 6.0);
+        assert!(!pool.check_budget()); // Over daily limit.
+
+        // Simulate daily reset by backdating the period start.
+        pool.budget_tracker
+            .daily_period_start
+            .store(now_epoch_secs() - SECONDS_PER_DAY - 1, Ordering::Relaxed);
+
+        // After reset, daily counter should be 0 again.
+        assert!(pool.check_budget());
+    }
+
+    #[test]
+    fn budget_alert_level_serialization() {
+        let json = serde_json::to_string(&BudgetAlertLevel::Warning).unwrap();
+        assert_eq!(json, "\"Warning\"");
+        let parsed: BudgetAlertLevel = serde_json::from_str("\"Exceeded\"").unwrap();
+        assert_eq!(parsed, BudgetAlertLevel::Exceeded);
     }
 }

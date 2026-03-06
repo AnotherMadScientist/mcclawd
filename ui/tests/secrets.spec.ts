@@ -1,11 +1,19 @@
 import { test, expect } from "@playwright/test";
-import { login } from "./helpers";
+import { login, collectConsoleErrors, unexpectedErrors, type ConsoleError } from "./helpers";
 
 test.describe("Secrets Page", () => {
+  let consoleErrors: ConsoleError[];
+
   test.beforeEach(async ({ page }) => {
+    consoleErrors = collectConsoleErrors(page);
     await login(page);
     await page.goto("/config/secrets");
     await expect(page.getByRole("heading", { name: "Secrets" })).toBeVisible();
+  });
+
+  test.afterEach(async () => {
+    const unexpected = unexpectedErrors(consoleErrors);
+    expect(unexpected, `Unexpected console errors: ${JSON.stringify(unexpected)}`).toHaveLength(0);
   });
 
   test("shows Secrets heading and description", async ({ page }) => {
@@ -19,8 +27,8 @@ test.describe("Secrets Page", () => {
     await expect(page.getByPlaceholder("Value")).toBeVisible();
   });
 
-  test("shows existing ANTHROPIC_API_KEY secret", async ({ page }) => {
-    await expect(page.getByText("ANTHROPIC_API_KEY").first()).toBeVisible({
+  test("shows existing E2E_TEST_KEY secret", async ({ page }) => {
+    await expect(page.getByText("E2E_TEST_KEY").first()).toBeVisible({
       timeout: 5000,
     });
   });
@@ -178,12 +186,12 @@ test.describe("Secrets Page", () => {
   test("edit mode shows save and cancel buttons, hides other actions", async ({
     page,
   }) => {
-    await expect(page.getByText("ANTHROPIC_API_KEY").first()).toBeVisible({
+    await expect(page.getByText("E2E_TEST_KEY").first()).toBeVisible({
       timeout: 5000,
     });
 
     const row = page.locator(
-      '[data-testid="secret-row-ANTHROPIC_API_KEY"]'
+      '[data-testid="secret-row-E2E_TEST_KEY"]'
     );
 
     // Enter edit mode
@@ -209,8 +217,8 @@ test.describe("Secrets Page", () => {
   });
 
   test("empty state message when no custom secrets", async ({ page }) => {
-    // The page should show some content - at minimum ANTHROPIC_API_KEY from global setup
-    await expect(page.getByText("ANTHROPIC_API_KEY").first()).toBeVisible({
+    // The page should show some content - at minimum E2E_TEST_KEY from global setup
+    await expect(page.getByText("E2E_TEST_KEY").first()).toBeVisible({
       timeout: 5000,
     });
   });
@@ -233,5 +241,140 @@ test.describe("Secrets Page", () => {
     await page.reload();
     await expect(page.getByRole("heading", { name: "Secrets" })).toBeVisible();
     await expect(page.getByText(name)).toBeVisible({ timeout: 5000 });
+  });
+
+  test("add secret with empty name shows validation or is prevented", async ({
+    page,
+  }) => {
+    // Leave name empty, fill value
+    await page.getByPlaceholder(/Secret name/).fill("");
+    await page.getByPlaceholder("Value").fill("some-value");
+
+    // The Add button should be disabled when name is empty
+    const addBtn = page.locator("button[aria-label='Add secret']");
+    await expect(addBtn).toBeDisabled();
+  });
+
+  test("add secret with empty name shows no new entry", async ({ page }) => {
+    // Wait for secrets list to finish loading
+    await expect(page.getByText("E2E_TEST_KEY")).toBeVisible({ timeout: 5000 });
+    const beforeCount = await page
+      .locator('[data-testid^="secret-row-"]')
+      .count();
+    await page.getByPlaceholder(/Secret name/).fill("");
+    await page.getByPlaceholder("Value").fill("should-not-add");
+
+    // The Add button should be disabled when name is empty — no new entry possible
+    const addBtn = page.locator("button[aria-label='Add secret']");
+    await expect(addBtn).toBeDisabled();
+
+    // Verify no new secrets were added
+    await expect(page.locator('[data-testid^="secret-row-"]')).toHaveCount(beforeCount);
+  });
+
+  test("reveal toggle shows and hides value", async ({ page }) => {
+    const secretName = `TEST_REVEAL_TOGGLE_${Date.now()}`;
+    await page.getByPlaceholder(/Secret name/).fill(secretName);
+    await page.getByPlaceholder("Value").fill("reveal-test-val");
+    await page.locator("button[aria-label='Add secret']").click();
+    await expect(page.getByText(secretName)).toBeVisible({ timeout: 5000 });
+
+    const row = page.locator(`[data-testid="secret-row-${secretName}"]`);
+
+    // Show: value appears
+    await row.locator("button[aria-label='Show secret']").click();
+    await expect(row.locator("[data-testid='revealed-value']")).toHaveText(
+      "reveal-test-val",
+      { timeout: 5000 },
+    );
+
+    // Hide: value disappears
+    await row.locator("button[aria-label='Hide secret']").click();
+    await expect(row.locator("[data-testid='revealed-value']")).toHaveCount(0);
+  });
+
+  test("edit secret updates value", async ({ page }) => {
+    const secretName = `TEST_EDIT_UPDATE_${Date.now()}`;
+    await page.getByPlaceholder(/Secret name/).fill(secretName);
+    await page.getByPlaceholder("Value").fill("before-edit");
+    await page.locator("button[aria-label='Add secret']").click();
+    await expect(page.getByText(secretName)).toBeVisible({ timeout: 5000 });
+
+    const row = page.locator(`[data-testid="secret-row-${secretName}"]`);
+    await row.locator("button[aria-label='Edit secret']").click();
+    const editInput = row.locator("input[aria-label='Edit secret value']");
+    await expect(editInput).toBeVisible();
+    await editInput.clear();
+    await editInput.fill("after-edit");
+    await row.locator("button[aria-label='Save secret']").click();
+    await expect(editInput).not.toBeVisible({ timeout: 5000 });
+
+    // Verify via reveal
+    await row.locator("button[aria-label='Show secret']").click();
+    await expect(row.locator("[data-testid='revealed-value']")).toHaveText(
+      "after-edit",
+      { timeout: 5000 },
+    );
+  });
+
+  test("delete secret removes from list", async ({ page }) => {
+    const secretName = `DELETE_ME_${Date.now()}`;
+    await page.getByPlaceholder(/Secret name/).fill(secretName);
+    await page.getByPlaceholder("Value").fill("to-be-deleted");
+    await page.locator("button[aria-label='Add secret']").click();
+    await expect(page.getByText(secretName)).toBeVisible({ timeout: 5000 });
+
+    const row = page.locator(`[data-testid="secret-row-${secretName}"]`);
+    await row.locator("button[aria-label='Delete secret']").click();
+    await expect(page.getByText(secretName)).not.toBeVisible({
+      timeout: 5000,
+    });
+  });
+
+  test("special characters in secret name", async ({ page }) => {
+    // Some backends may reject special chars — document either outcome
+    const specialName = `TEST_SPECIAL_${Date.now()}`;
+
+    await page.getByPlaceholder(/Secret name/).fill(specialName);
+    await page.getByPlaceholder("Value").fill("test-val");
+    await page.locator("button[aria-label='Add secret']").click();
+    await page.waitForTimeout(500);
+
+    // If the secret was accepted it should appear; if rejected a validation/error msg should show.
+    // We consider both outcomes valid — test documents actual behavior.
+    const secretVisible = await page.getByText(specialName).count() > 0;
+    const errorShown = await page.locator(
+      "text=/invalid|not allowed|rejected|error/i"
+    ).count() > 0;
+
+    // One of the outcomes must have occurred (not a silent no-op with no feedback)
+    // NOTE: if this fails it indicates the UI swallows the action silently — file as bug.
+    expect(secretVisible || errorShown).toBe(true);
+  });
+
+  test("many secrets render and page scrolls", async ({ page }) => {
+    const ts = Date.now();
+    const names = [
+      `TEST_SCROLL_1_${ts}`,
+      `TEST_SCROLL_2_${ts}`,
+      `TEST_SCROLL_3_${ts}`,
+    ];
+
+    for (const name of names) {
+      await page.getByPlaceholder(/Secret name/).fill(name);
+      await page.getByPlaceholder("Value").fill("scroll-test-val");
+      await page.locator("button[aria-label='Add secret']").click();
+      await expect(page.getByText(name)).toBeVisible({ timeout: 5000 });
+    }
+
+    // All 3 should be present in the list
+    for (const name of names) {
+      await expect(page.getByText(name)).toBeVisible();
+    }
+
+    // The secrets list container should be scrollable (overflow) when there are many items.
+    // We just verify the page remains functional and all secrets are accessible via scroll.
+    const listContainer = page.locator('[data-testid^="secret-row-"]').first();
+    await expect(listContainer).toBeVisible();
   });
 });

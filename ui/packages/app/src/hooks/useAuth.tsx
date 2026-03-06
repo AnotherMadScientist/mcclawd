@@ -63,8 +63,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 }
 
+// Safe default for HMR edge case where Layout renders before AuthProvider remounts
+const AUTH_DEFAULT: AuthContextType = {
+  isAuthenticated: false,
+  setupComplete: null,
+  register: async () => {},
+  login: async () => {},
+  logout: () => {},
+};
+
 export function useAuth() {
   const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
+  if (!ctx) {
+    // During Vite HMR, components may briefly render outside AuthProvider.
+    // Return safe default instead of throwing to avoid cascading errors.
+    if (import.meta.env.DEV) {
+      console.warn("useAuth called outside AuthProvider (HMR race) — using safe default");
+      return AUTH_DEFAULT;
+    }
+    throw new Error("useAuth must be used within AuthProvider");
+  }
   return ctx;
 }

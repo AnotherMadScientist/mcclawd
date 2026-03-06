@@ -7,6 +7,7 @@ pub mod audit;
 pub mod dlp;
 pub mod pipeline;
 pub mod secret_scanner;
+pub mod user_hook;
 
 use async_trait::async_trait;
 
@@ -15,6 +16,7 @@ pub use audit::{AuditAction, AuditEvent, AuditHook, AuditSink, FileAuditSink, Tr
 pub use dlp::{DlpAction, DlpConfig, DlpHook, DlpPattern};
 pub use pipeline::HookPipeline;
 pub use secret_scanner::{SecretScannerConfig, SecretScannerHook};
+pub use user_hook::{UserHook, UserHookAction, UserHookConfig, UserHookTrigger, UserHookType};
 
 /// Hook called before/after tool dispatch.
 /// Phase 0: audit logging via tracing.

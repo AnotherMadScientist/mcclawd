@@ -24,6 +24,10 @@ export function useTaskStream(taskId: string | undefined) {
   // When true, the next TextDelta creates a new text event instead of appending.
   // Set on every StatusIndicator(Processing) so each LLM turn is a separate block.
   const newBlockRef = useRef(true);
+  // Tracks whether we have seen a Processing indicator in this session.
+  // Used as a race-condition fallback: if the first TextDelta arrives before Processing
+  // (e.g. WS connected after the broadcast was sent), auto-enter streaming mode.
+  const seenProcessingRef = useRef(false);
   // Prevent auto-reconnect after intentional close (unmount, user-initiated reconnect).
   const intentionalCloseRef = useRef(false);
   const doneRef = useRef(false);
@@ -54,6 +58,11 @@ export function useTaskStream(taskId: string | undefined) {
         retryCountRef.current += 1;
         setTimeout(() => {
           if (!intentionalCloseRef.current && !doneRef.current) {
+            // Clear events before reconnect — history will be replayed fresh, preventing duplication
+            setEvents([]);
+            streamingRef.current = false;
+            seenProcessingRef.current = false;
+            newBlockRef.current = true;
             connect();
           }
         }, delay);
@@ -97,6 +106,16 @@ export function useTaskStream(taskId: string | undefined) {
             },
           ]);
         } else if ("TextDelta" in chunk) {
+          // Race-condition fallback: if Processing was dropped (WS connected after broadcast),
+          // auto-enter streaming mode on first LLM TextDelta. Pre-Processing status messages
+          // ("Starting agent...", "Workspace loaded", etc.) arrive before any LLM content and
+          // keep streamingRef false, so they correctly show as transient spinners. Once the LLM
+          // actually starts responding, we must be in streaming mode.
+          if (!streamingRef.current && seenProcessingRef.current) {
+            streamingRef.current = true;
+            newBlockRef.current = true;
+            setStatusMessage(null);
+          }
           if (streamingRef.current) {
             // Streaming LLM response — accumulate into text event
             setStatusMessage(null);
@@ -131,6 +150,7 @@ export function useTaskStream(taskId: string | undefined) {
           setStatusMessage(null);
         } else if ("StatusIndicator" in chunk) {
           if (chunk.StatusIndicator === "Processing") {
+            seenProcessingRef.current = true;
             streamingRef.current = true;
             newBlockRef.current = true;
             setStatusMessage("Agent is thinking...");
@@ -161,6 +181,12 @@ export function useTaskStream(taskId: string | undefined) {
     intentionalCloseRef.current = false;
     doneRef.current = false;
     retryCountRef.current = 0;
+    // Clear events on fresh mount / taskId change so history replay starts clean.
+    // Prevents duplication from React StrictMode double-mount and taskId transitions.
+    setEvents([]);
+    streamingRef.current = false;
+    seenProcessingRef.current = false;
+    newBlockRef.current = true;
     const cleanup = connect();
     return () => {
       intentionalCloseRef.current = true;
@@ -168,14 +194,24 @@ export function useTaskStream(taskId: string | undefined) {
     };
   }, [connect]);
 
-  /** Reconnect for follow-up — show user message immediately, server persists it */
+  /** Reconnect for follow-up — show user message immediately, server persists it.
+   *  If truncateToIndex is set, discard events from that index onward (edit/retry). */
   const reconnect = useCallback(
-    (userMessage?: string) => {
+    (userMessage?: string, truncateToIndex?: number) => {
       intentionalCloseRef.current = true; // don't auto-reconnect the old WS
       if (wsRef.current) {
         wsRef.current.close();
       }
-      if (userMessage) {
+      if (truncateToIndex !== undefined) {
+        // Edit/retry: discard everything from the edited message onward
+        setEvents((prev) => {
+          const truncated = prev.slice(0, truncateToIndex);
+          if (userMessage) {
+            return [...truncated, { type: "user" as const, content: userMessage, timestamp: new Date() }];
+          }
+          return truncated;
+        });
+      } else if (userMessage) {
         setEvents((prev) => [
           ...prev,
           { type: "user", content: userMessage, timestamp: new Date() },
@@ -185,6 +221,7 @@ export function useTaskStream(taskId: string | undefined) {
       setConnected(false);
       setStatusMessage("Starting agent...");
       streamingRef.current = false;
+      seenProcessingRef.current = false;
       newBlockRef.current = true;
       skipHistoryRef.current = true;
       retryCountRef.current = 0;

@@ -154,6 +154,50 @@ fn row_to_status(status: &str, error_message: Option<&str>) -> TaskStatus {
     }
 }
 
+/// Connect to PostgreSQL with retry (required dependency).
+/// Retries 3 times with exponential backoff (1s, 2s, 4s) before failing.
+async fn connect_postgres(database_url: &str) -> anyhow::Result<PgTaskStore> {
+    let mut last_err = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            let delay = std::time::Duration::from_secs(1 << attempt);
+            tracing::info!("Retrying PostgreSQL connection in {}s (attempt {}/3)...", delay.as_secs(), attempt + 1);
+            tokio::time::sleep(delay).await;
+        }
+        let connect_result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(10)
+                .connect(database_url),
+        )
+        .await;
+
+        match connect_result {
+            Ok(Ok(pool)) => {
+                sqlx::migrate!("../mcclawd-core/migrations")
+                    .run(&pool)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("PostgreSQL migration failed: {e}"))?;
+                tracing::info!("PostgreSQL connected, migrations applied");
+                return Ok(PgTaskStore::new(pool));
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("PostgreSQL connection attempt {} failed: {e}", attempt + 1);
+                last_err = Some(format!("connection error: {e}"));
+            }
+            Err(_) => {
+                tracing::warn!("PostgreSQL connection attempt {} timed out", attempt + 1);
+                last_err = Some("connection timed out after 5s".to_string());
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "PostgreSQL is required but unavailable after 3 attempts: {}. \
+         Set database_url in ~/.mcclawd/config.toml or run: docker compose up -d postgres",
+        last_err.unwrap_or_default()
+    ))
+}
+
 pub async fn execute(port: u16) -> anyhow::Result<()> {
     kill_stale_server(port);
 
@@ -163,42 +207,18 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
         .join("config.toml");
     let config = McclawdConfig::load(&config_path)?;
 
-    // Initialize postgres if database_url is configured (5s timeout — never hang)
-    let pg_store = if let Some(ref database_url) = config.database_url {
-        tracing::info!("Connecting to PostgreSQL...");
-        let connect_result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            sqlx::postgres::PgPoolOptions::new()
-                .max_connections(10)
-                .connect(database_url),
-        )
-        .await;
-        match connect_result {
-            Ok(Ok(pool)) => {
-                match sqlx::migrate!("../mcclawd-core/migrations").run(&pool).await {
-                    Ok(_) => {
-                        tracing::info!("PostgreSQL connected, migrations applied");
-                        Some(PgTaskStore::new(pool))
-                    }
-                    Err(e) => {
-                        tracing::warn!("PostgreSQL migration failed, running in-memory only: {e}");
-                        None
-                    }
-                }
-            }
-            Ok(Err(e)) => {
-                tracing::warn!("PostgreSQL connection failed, running in-memory only: {e}");
-                None
-            }
-            Err(_) => {
-                tracing::warn!("PostgreSQL connection timed out after 5s, running in-memory only");
-                None
-            }
-        }
-    } else {
-        tracing::info!("No database_url configured — running in-memory only");
-        None
-    };
+    // PostgreSQL is a required dependency — fail loudly if unavailable.
+    // Priority: DATABASE_URL env var > config.toml > localhost fallback.
+    // In Docker Compose, set DATABASE_URL=postgresql://mcclawd:mcclawd@postgres:5432/mcclawd
+    // to use the service name on the internal network.
+    let database_url = std::env::var("DATABASE_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| config.database_url.clone())
+        .unwrap_or_else(|| {
+            "postgresql://mcclawd:mcclawd@localhost:5432/mcclawd".to_string()
+        });
+    let pg_store = connect_postgres(&database_url).await?;
 
     // Initialize supervisor if Docker is available
     let supervisor = match SandboxOrchestrator::new() {
@@ -227,86 +247,185 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
         }
     };
 
-    let mut state = AppState::new(config, supervisor)?;
-    state.pg_store = pg_store.clone();
+    let mut state = AppState::new(config, supervisor, pg_store.clone())?;
 
-    // Auto-unlock vault if vault.key exists — server must never run with locked vault
+    // Hydrate usage data from database on startup
+    match (
+        pg_store.load_daily_usage().await,
+        pg_store.load_model_usage().await,
+        pg_store.load_task_usage().await,
+    ) {
+        (Ok(daily), Ok(models), Ok(tasks)) => {
+            let pool = state.provider_pool.read().await;
+            let n_daily = daily.len();
+            let n_models = models.len();
+            let n_tasks = tasks.len();
+            pool.hydrate_usage(daily, models, tasks);
+            tracing::info!(
+                daily_records = n_daily,
+                model_records = n_models,
+                task_records = n_tasks,
+                "Usage data hydrated from database"
+            );
+        }
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+            tracing::warn!("Failed to load usage data from database: {e}");
+        }
+    }
+
+    // Open vault and auto-seed API keys from .env on every startup.
+    // Vault is long-lived on disk — survives server restarts and re-registrations.
+    // If vault.key is missing, create it. If secrets.enc is missing or corrupt, recreate.
+    // Then seed ANTHROPIC_API_KEY and ANTHROPIC_ADMIN_KEY from env if not already present.
     {
         let (data_dir, secrets_path) = {
             let c = state.config.read().await;
             (c.data_dir.clone(), c.secrets_path())
         };
         let vault_key_path = data_dir.join("vault.key");
-        if vault_key_path.exists() {
-            match tokio::fs::read(&vault_key_path).await {
-                Ok(vault_key_bytes) => {
-                    let passphrase: String =
-                        vault_key_bytes.iter().map(|b| format!("{b:02x}")).collect();
-                    let backend = match EncryptedFileBackend::new(&secrets_path, &passphrase) {
+
+        // Ensure vault.key exists (create if missing — first-time or after full reset)
+        if !vault_key_path.exists() {
+            let key: [u8; 32] = rand::random();
+            if let Some(parent) = vault_key_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            fs::write(&vault_key_path, key).map_err(|e| {
+                anyhow::anyhow!("Failed to create vault.key: {e}")
+            })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(
+                    &vault_key_path,
+                    fs::Permissions::from_mode(0o600),
+                );
+            }
+            tracing::info!("Created vault.key (first-time setup)");
+        }
+
+        // Read vault key and open/create secrets.enc
+        match fs::read(&vault_key_path) {
+            Ok(vault_key_bytes) => {
+                let passphrase: String =
+                    vault_key_bytes.iter().map(|b| format!("{b:02x}")).collect();
+
+                let backend = if secrets_path.exists() {
+                    match EncryptedFileBackend::new(&secrets_path, &passphrase) {
                         Ok(b) => {
-                            tracing::info!("Vault auto-unlocked on startup");
+                            tracing::info!("Vault unlocked");
                             b
                         }
-                        Err(_) => {
-                            // secrets.enc corrupted or mismatched — create fresh empty vault
-                            match EncryptedFileBackend::new_empty(&secrets_path, &passphrase) {
-                                Ok(b) => {
-                                    tracing::warn!(
-                                        "Created fresh vault on startup (old secrets.enc was unreadable)"
-                                    );
-                                    b
-                                }
-                                Err(e) => {
-                                    tracing::error!("Failed to create vault on startup: {e}");
-                                    return Err(e.into());
-                                }
-                            }
+                        Err(e) => {
+                            // secrets.enc is corrupted or key mismatch — recreate
+                            tracing::warn!("Vault decrypt failed ({e}), recreating secrets.enc");
+                            let _ = fs::remove_file(&secrets_path);
+                            EncryptedFileBackend::new_empty(&secrets_path, &passphrase)
+                                .map_err(|e| anyhow::anyhow!("Failed to create vault: {e}"))?
                         }
-                    };
-                    // Auto-seed ANTHROPIC_API_KEY from env if not already in vault
-                    if let Ok(env_key) = std::env::var("ANTHROPIC_API_KEY") {
-                        if !env_key.is_empty() {
-                            match backend.get("ANTHROPIC_API_KEY").await {
-                                Ok(Some(v)) if !v.is_empty() => {}
+                    }
+                } else {
+                    tracing::info!("Creating new secrets vault");
+                    EncryptedFileBackend::new_empty(&secrets_path, &passphrase)
+                        .map_err(|e| anyhow::anyhow!("Failed to create vault: {e}"))?
+                };
+
+                // Auto-seed API keys from environment (idempotent — skips if already present)
+                for env_key in &["ANTHROPIC_API_KEY", "ANTHROPIC_ADMIN_KEY"] {
+                    if let Ok(val) = std::env::var(env_key) {
+                        if !val.is_empty() {
+                            match backend.get(env_key).await {
+                                Ok(Some(existing)) if existing == val => {}
                                 _ => {
-                                    if let Err(e) = backend.set("ANTHROPIC_API_KEY", &env_key).await {
-                                        tracing::warn!("Failed to seed ANTHROPIC_API_KEY from env: {e}");
+                                    if let Err(e) = backend.set(env_key, &val).await {
+                                        tracing::warn!("Failed to seed {env_key}: {e}");
                                     } else {
-                                        tracing::info!("Seeded ANTHROPIC_API_KEY from environment into vault");
+                                        tracing::info!("{env_key} seeded into vault from environment");
                                     }
                                 }
                             }
                         }
                     }
-                    let mut secrets = state.secrets.write().await;
-                    *secrets = Some(Arc::new(backend));
                 }
-                Err(e) => {
-                    tracing::warn!("vault.key exists but could not be read: {e}");
-                }
+
+                let mut secrets = state.secrets.write().await;
+                *secrets = Some(Arc::new(backend));
             }
-        } else {
-            tracing::info!("No vault.key found — vault locked until first WebAuthn registration");
+            Err(e) => {
+                tracing::error!("vault.key unreadable: {e}");
+            }
         }
     }
 
     // Hydrate in-memory TaskManager from postgres on startup
-    if let Some(ref store) = pg_store {
-        match store.list_tasks().await {
-            Ok(rows) => {
-                let mut mgr = state.tasks.write().await;
-                for (id, prompt, status, error_message) in &rows {
-                    let task_id = TaskId(id.clone());
-                    let task_status = row_to_status(status, error_message.as_deref());
-                    mgr.restore_task(task_id, prompt.clone(), task_status);
-                }
-                tracing::info!(count = rows.len(), "Restored {} tasks from postgres", rows.len());
+    match pg_store.list_tasks().await {
+        Ok(rows) => {
+            let mut mgr = state.tasks.write().await;
+            for (id, prompt, status, error_message, _tags) in &rows {
+                let task_id = TaskId(id.clone());
+                let task_status = row_to_status(status, error_message.as_deref());
+                mgr.restore_task(task_id, prompt.clone(), task_status);
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to load tasks from postgres");
-            }
+            tracing::info!(count = rows.len(), "Restored {} tasks from postgres", rows.len());
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to load tasks from postgres");
         }
     }
+
+    // Hydrate scan cache from postgres
+    match pg_store.load_scan_cache("admin").await {
+        Ok(rows) => {
+            for (skill_name, result_json) in rows {
+                if let Ok(result) = serde_json::from_value::<mcclawd_core::scanner::ScanResult>(result_json) {
+                    state.scan_cache.insert(skill_name, result);
+                }
+            }
+            tracing::info!(count = state.scan_cache.len(), "Scan cache hydrated from database");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to load scan cache from database");
+        }
+    }
+
+    // Hydrate scheduled tasks from postgres
+    match pg_store.load_scheduled_tasks("admin").await {
+        Ok(rows) => {
+            let count = rows.len();
+            for (id, name, cron_expr, prompt, workspace, enabled) in rows {
+                let req = mcclawd_tasks::scheduler::CreateScheduleRequest {
+                    name,
+                    cron_expression: cron_expr,
+                    prompt,
+                    workspace,
+                    enabled,
+                };
+                // Restore directly into the scheduler with the original ID
+                state.scheduler.restore_schedule(id, req).await;
+            }
+            tracing::info!(count, "Scheduled tasks hydrated from database");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to load scheduled tasks from database");
+        }
+    }
+
+    // Hydrate swarm run history from postgres (read-only — completed runs for display)
+    match pg_store.load_swarm_runs("admin").await {
+        Ok(rows) => {
+            let count = rows.len();
+            for (id, _name, status, result) in &rows {
+                let result_str = result.as_ref().and_then(|v| v.as_str().map(|s| s.to_string()));
+                state.swarm_registry.restore_run(id.clone(), status, result_str);
+            }
+            tracing::info!(count, "Swarm runs hydrated from database");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to load swarm runs from database");
+        }
+    }
+
+    state.config_path = Some(config_path);
 
     let app = routes::api_router(state.clone())
         .with_state(state)

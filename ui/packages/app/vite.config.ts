@@ -11,6 +11,20 @@ export default defineConfig({
         target: "http://localhost:9090",
         changeOrigin: true,
         ws: true,
+        timeout: 30000,
+        configure: (proxy) => {
+          proxy.on("error", (err, _req, res) => {
+            console.warn("[vite proxy] Backend error:", err.message);
+            if (res && "writeHead" in res && !res.headersSent) {
+              (res as import("http").ServerResponse).writeHead(503, {
+                "Content-Type": "application/json",
+              });
+              (res as import("http").ServerResponse).end(
+                JSON.stringify({ error: "Backend unavailable" }),
+              );
+            }
+          });
+        },
       },
     },
   },

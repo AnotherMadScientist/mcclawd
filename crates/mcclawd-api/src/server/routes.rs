@@ -12,6 +12,7 @@ use super::channels;
 use super::config_routes;
 use super::mcp_routes;
 use super::providers;
+use super::schedule_routes;
 use super::secrets;
 use super::security;
 use super::skills_routes;
@@ -52,7 +53,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
     // Protected routes — all require valid JWT
     let protected = Router::new()
         // Tasks
-        .route("/api/tasks", get(tasks::list_tasks).post(tasks::create_task))
+        .route("/api/tasks", get(tasks::list_tasks).post(tasks::create_task).delete(tasks::delete_all_tasks))
         .route(
             "/api/tasks/{id}",
             get(tasks::get_task).delete(tasks::delete_task),
@@ -92,13 +93,44 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             get(config_routes::get_config).put(config_routes::put_config),
         )
         // MCP
-        .route("/api/mcp/servers", get(mcp_routes::list_mcp_servers))
+        .route(
+            "/api/mcp/servers",
+            get(mcp_routes::list_mcp_servers).post(mcp_routes::add_mcp_server),
+        )
+        .route(
+            "/api/mcp/servers/{name}",
+            delete(mcp_routes::remove_mcp_server),
+        )
+        .route(
+            "/api/mcp/servers/{name}/restart",
+            post(mcp_routes::restart_mcp_server),
+        )
+        .route(
+            "/api/mcp/servers/{name}/status",
+            get(mcp_routes::mcp_server_status),
+        )
         // Swarms
         .route(
             "/api/swarms",
             get(swarms::list_swarms).post(swarms::create_swarm),
         )
-        .route("/api/swarms/{id}", get(swarms::get_swarm))
+        .route(
+            "/api/swarms/{id}",
+            get(swarms::get_swarm).delete(swarms::cancel_swarm),
+        )
+        // Schedules
+        .route(
+            "/api/schedules",
+            get(schedule_routes::list_schedules).post(schedule_routes::create_schedule),
+        )
+        .route(
+            "/api/schedules/{id}",
+            get(schedule_routes::get_schedule).delete(schedule_routes::delete_schedule),
+        )
+        .route(
+            "/api/schedules/{id}/toggle",
+            put(schedule_routes::toggle_schedule),
+        )
         // Channels
         .route("/api/channels", get(channels::list_channels))
         .route("/api/channels/{id}", get(channels::get_channel))
@@ -122,6 +154,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/api/skills", get(skills_routes::list_installed))
         .route("/api/skills/search", get(skills_routes::search_clawhub))
         .route("/api/skills/install", post(skills_routes::install_skill))
+        .route("/api/skills/create", post(skills_routes::create_skill))
         // Catalog cache endpoints (must be before /api/skills/{name} to avoid capture)
         .route("/api/skills/catalog", get(skills_routes::browse_catalog))
         .route(
@@ -135,10 +168,30 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             get(skills_routes::skill_content),
         )
         .route("/api/skills/{name}/scan", get(skills_routes::scan_skill))
+        .route("/api/skills/updates", get(skills_routes::get_skill_updates))
         .route("/api/skills/{name}", delete(skills_routes::uninstall_skill))
         // Providers
         .route("/api/providers", get(providers::list_providers))
+        .route("/api/providers/models", get(providers::list_models))
+        .route("/api/providers/pricing", get(providers::model_pricing))
         .route("/api/providers/usage", get(providers::provider_usage))
+        .route(
+            "/api/providers/usage/detailed",
+            get(providers::provider_usage_detailed),
+        )
+        .route("/api/providers/budget", put(providers::update_budget))
+        .route(
+            "/api/providers/budget/alerts",
+            get(providers::budget_alerts),
+        )
+        .route(
+            "/api/providers/budget/info",
+            get(providers::budget_info),
+        )
+        .route(
+            "/api/providers/credits",
+            get(providers::provider_credits),
+        )
         // Config reload
         .route("/api/config/reload", post(providers::reload_config))
         // LLM health check (tiny API call to verify key works)

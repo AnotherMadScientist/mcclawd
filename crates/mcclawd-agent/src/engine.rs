@@ -62,8 +62,12 @@ impl AgentEngine {
             .tool(memory_store.clone())
             .tool(memory_recall);
 
-        // Wire in MCP tools from each directly-connected server
-        let bundles = crate::mcp_integration::connect_mcp_tools(config).await?;
+        // Wire in MCP tools: try env-var path first (inside container),
+        // fall back to config-based connection (host/dev mode)
+        let bundles = match crate::mcp_integration::connect_from_env().await? {
+            Some(b) => b,
+            None => crate::mcp_integration::connect_mcp_tools(config).await?,
+        };
         for bundle in &bundles {
             builder = builder.rmcp_tools(bundle.tools.clone(), bundle.peer.clone());
         }

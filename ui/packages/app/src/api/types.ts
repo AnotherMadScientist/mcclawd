@@ -2,6 +2,7 @@ export interface Task {
   id: string;
   prompt: string;
   status: "Running" | "Completed" | { Failed: string };
+  tags?: string[];
 }
 
 export interface WorkspaceFile {
@@ -93,6 +94,87 @@ export interface CacheStats {
   skill_count: number;
   last_refreshed: string | null;
   cache_path: string;
+}
+
+// --- Provider & Budget types ---
+
+export interface Provider {
+  name: string;
+  kind: string;
+  models: string[];
+  enabled: boolean;
+  priority: number;
+}
+
+export interface ModelUsageEntry {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  estimated_cost_usd: number;
+  request_count: number;
+}
+
+export interface TaskUsageEntry {
+  task_id: string;
+  prompt_preview: string;
+  model: string;
+  total_tokens: number;
+  estimated_cost_usd: number;
+}
+
+export interface DailyUsage {
+  date: string; // "YYYY-MM-DD"
+  cost_usd: number;
+  tokens: number;
+}
+
+export interface DetailedUsageSummary {
+  by_model: ModelUsageEntry[];
+  by_task: TaskUsageEntry[];
+  total: ModelUsageEntry;
+  period: string;
+  daily_history: DailyUsage[];
+}
+
+export interface AccountCredits {
+  source: "admin_api" | "local_tracking";
+  monthly_cost_usd: number;
+  data_available: boolean;
+}
+
+export interface BudgetInfo {
+  daily_limit_usd: number | null;
+  monthly_limit_usd: number | null;
+  daily_spent_usd: number;
+  monthly_spent_usd: number;
+  alerts: string[];
+  account_credits?: AccountCredits;
+}
+
+export interface CreditsResponse {
+  available: boolean;
+  monthly_cost_usd: number;
+  source: "admin_api" | "local_tracking";
+  error?: string;
+}
+
+export interface BudgetUpdate {
+  daily_limit_usd?: number | null;
+  monthly_limit_usd?: number | null;
+  per_task_limit_usd?: number | null;
+}
+
+export interface AnthropicModel {
+  id: string;
+  display_name: string;
+  created_at?: string;
+}
+
+export interface ModelPricing {
+  model_id: string;
+  input_price_per_mtok: number;
+  output_price_per_mtok: number;
 }
 
 export type ScanStatus = "Pass" | "Warning" | "Critical" | "NotScanned";

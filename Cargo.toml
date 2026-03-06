@@ -38,6 +38,10 @@ serde_yaml = "0.9"
 
 # Config
 toml = "0.8"
+json5 = "0.4"
+
+# Version comparison (skill versioning)
+semver = "1"
 
 # Error handling
 thiserror = "2"
@@ -68,6 +72,9 @@ url = "2"
 jsonwebtoken = "9"
 chrono = { version = "0.4", features = ["serde"] }
 
+# Cron scheduling
+cron = "0.15"
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 
@@ -95,6 +102,9 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Telegram
 teloxide = { version = "0.13", features = ["macros"] }
+
+# Hashing (image cache keys)
+sha2 = "0.10"
 
 # Docker / sandbox
 bollard = "0.18"

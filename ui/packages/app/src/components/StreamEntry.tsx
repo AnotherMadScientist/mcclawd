@@ -5,6 +5,8 @@ import rehypeHighlight from "rehype-highlight";
 import { AlertCircle, FileText, User, RotateCcw, Pencil, Check, X } from "lucide-react";
 import { cn } from "../lib/utils";
 import type { StreamEvent } from "../hooks/useTaskStream";
+import { MermaidBlock } from "./MermaidBlock";
+import { CodeBlock } from "./CodeBlock";
 
 interface StreamEntryProps {
   event: StreamEvent;
@@ -192,7 +194,40 @@ export function StreamEntry({ event, onRetry, onEditRetry }: StreamEntryProps) {
   return (
     <div className={cn("rounded-lg bg-card border border-border p-4", "agent-response")}>
       <div className="prose-response text-sm text-foreground">
-        <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+        <Markdown
+          remarkPlugins={[remarkGfm]}
+          rehypePlugins={[rehypeHighlight]}
+          components={{
+            code({ className, children, ...props }) {
+              const match = /language-(\w+)/.exec(className || "");
+              const language = match ? match[1] : "";
+              const code = String(children).replace(/\n$/, "");
+              if (language === "mermaid") {
+                return <MermaidBlock code={code} />;
+              }
+              if (language || code.includes("\n")) {
+                return <CodeBlock language={language} code={code} />;
+              }
+              // Inline code
+              return (
+                <code className={className} {...props}>
+                  {children}
+                </code>
+              );
+            },
+            pre({ children }) {
+              // Suppress default <pre> wrapper — CodeBlock provides its own
+              return <>{children}</>;
+            },
+            table({ children }) {
+              return (
+                <div className="overflow-x-auto my-3">
+                  <table className="min-w-full">{children}</table>
+                </div>
+              );
+            },
+          }}
+        >
           {event.content}
         </Markdown>
       </div>

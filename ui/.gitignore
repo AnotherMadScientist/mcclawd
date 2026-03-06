@@ -3,3 +3,4 @@ dist/
 .vite/
 *.tsbuildinfo
 tests/.auth-token.json
+tests/test-results.json

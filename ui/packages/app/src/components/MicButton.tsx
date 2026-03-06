@@ -5,14 +5,16 @@ const HOLD_THRESHOLD_MS = 300;
 interface MicButtonProps {
   onTranscript: (text: string) => void;
   onInterim?: (text: string) => void;
+  onStart?: () => void;
   disabled?: boolean;
   size?: "sm" | "md";
 }
 
-export function MicButton({ onTranscript, onInterim, disabled, size = "sm" }: MicButtonProps) {
+export function MicButton({ onTranscript, onInterim, onStart, disabled, size = "sm" }: MicButtonProps) {
   const [isListening, setIsListening] = useState(false);
   const [micLevel, setMicLevel] = useState(0);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const finalTranscriptRef = useRef("");
   const mouseDownTimeRef = useRef<number>(0);
   const isHoldingRef = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -70,27 +72,35 @@ export function MicButton({ onTranscript, onInterim, disabled, size = "sm" }: Mi
   const startListening = useCallback(() => {
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
+    if (!SpeechRecognition) {
+      console.warn("SpeechRecognition API not available in this browser. Try Chrome or Edge.");
+      return;
+    }
 
+    finalTranscriptRef.current = "";
     const recognition = new SpeechRecognition();
-    recognition.continuous = false;
+    recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = "en-US";
 
     recognition.onresult = (event: SpeechRecognitionEvent) => {
-      const transcript = Array.from(event.results)
-        .map((result) => result[0]?.transcript ?? "")
-        .join("");
+      let finalText = "";
+      let interimText = "";
 
-      const lastResult = event.results[event.results.length - 1];
-      if (lastResult?.isFinal) {
-        setIsListening(false);
-        stopAudioMeter();
-        if (transcript.trim()) {
-          onTranscript(transcript);
+      for (let i = 0; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (!result) continue;
+        if (result.isFinal) {
+          finalText += result[0]?.transcript ?? "";
+        } else {
+          interimText += result[0]?.transcript ?? "";
         }
-      } else {
-        onInterim?.(transcript);
+      }
+
+      finalTranscriptRef.current = finalText;
+      const fullText = (finalText + interimText).trim();
+      if (fullText) {
+        onInterim?.(fullText);
       }
     };
 
@@ -100,6 +110,10 @@ export function MicButton({ onTranscript, onInterim, disabled, size = "sm" }: Mi
     };
 
     recognition.onend = () => {
+      const final_ = finalTranscriptRef.current.trim();
+      if (final_) {
+        onTranscript(final_);
+      }
       setIsListening(false);
       stopAudioMeter();
     };
@@ -108,7 +122,8 @@ export function MicButton({ onTranscript, onInterim, disabled, size = "sm" }: Mi
     recognition.start();
     setIsListening(true);
     startAudioMeter();
-  }, [onTranscript, onInterim, startAudioMeter, stopAudioMeter]);
+    onStart?.();
+  }, [onTranscript, onInterim, onStart, startAudioMeter, stopAudioMeter]);
 
   const stopListening = useCallback(() => {
     if (recognitionRef.current) {
@@ -169,6 +184,7 @@ export function MicButton({ onTranscript, onInterim, disabled, size = "sm" }: Mi
           ? "border-destructive bg-destructive/10 text-destructive"
           : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
       } disabled:opacity-50`}
+      aria-label="Mic"
       title={isListening ? "Click to stop / Release to stop" : "Click or hold to record"}
     >
       <div className={`relative ${iconSize}`}>

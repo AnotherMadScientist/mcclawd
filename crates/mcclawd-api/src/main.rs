@@ -67,6 +67,21 @@ enum SecretsAction {
     List,
     /// Delete a secret
     Delete { key: String },
+    /// Initialize vault, import .env keys, and seed API keys
+    Init {
+        /// Path to .env file (default: .env in current directory)
+        #[arg(short, long)]
+        env_file: Option<String>,
+        /// Non-interactive mode: skip confirmation prompts (default: yes to all)
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// Reset vault completely (deletes vault.key + secrets.enc). Requires confirmation.
+    Reset {
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -83,6 +98,8 @@ enum SkillsAction {
     Upgrade { name: String },
     /// Uninstall a skill by name
     Uninstall { name: String },
+    /// Check all installed skills for available updates
+    CheckUpdates,
 }
 
 #[derive(Subcommand)]
@@ -107,6 +124,9 @@ enum ImportAction {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load .env file before anything reads env vars (auto-seed API keys, database_url, etc.)
+    dotenvy::dotenv().ok();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -129,6 +149,8 @@ async fn main() -> anyhow::Result<()> {
             SecretsAction::Get { key } => commands::secrets::get(&key).await?,
             SecretsAction::List => commands::secrets::list().await?,
             SecretsAction::Delete { key } => commands::secrets::delete(&key).await?,
+            SecretsAction::Init { env_file, yes } => commands::secrets::init(env_file.as_deref(), yes).await?,
+            SecretsAction::Reset { yes } => commands::secrets::reset(yes).await?,
         },
         Commands::Workspace { action } => match action {
             WorkspaceAction::Init { name } => commands::workspace::init(&name).await?,
@@ -144,6 +166,7 @@ async fn main() -> anyhow::Result<()> {
             SkillsAction::Search { query } => commands::skills::search(&query).await?,
             SkillsAction::Upgrade { name } => commands::skills::upgrade(&name).await?,
             SkillsAction::Uninstall { name } => commands::skills::uninstall(&name).await?,
+            SkillsAction::CheckUpdates => commands::skills::check_updates().await?,
         },
         Commands::Import { action } => match action {
             ImportAction::Openclaw { path } => {

@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use mcclawd_agent::workspace::WorkspaceLoader;
 use serde::{Deserialize, Serialize};
 
 use super::state::AppState;
@@ -19,7 +20,14 @@ pub struct WriteFileRequest {
     pub content: String,
 }
 
-const WORKSPACE_FILES: &[&str] = &["SOUL.md", "AGENTS.md", "USER.md"];
+const WORKSPACE_FILES: &[&str] = &[
+    "SOUL.md",
+    "AGENTS.md",
+    "USER.md",
+    "IDENTITY.md",
+    "TOOLS.md",
+    "HEARTBEAT.md",
+];
 
 /// GET /api/workspace — list workspace files
 pub async fn list_files() -> Json<Vec<WorkspaceFile>> {
@@ -34,6 +42,9 @@ pub async fn list_files() -> Json<Vec<WorkspaceFile>> {
 }
 
 /// GET /api/workspace/{file} — read a workspace file
+///
+/// If the workspace directory or file doesn't exist, auto-scaffolds with rich
+/// OpenClaw-compatible defaults from WorkspaceLoader::scaffold().
 pub async fn get_file(
     State(state): State<AppState>,
     Path(file): Path<String>,
@@ -47,16 +58,27 @@ pub async fn get_file(
     let workspace_dir = config.data_dir.join(&config.agent.default_workspace);
     let file_path = workspace_dir.join(&file);
 
-    match tokio::fs::read_to_string(&file_path).await {
-        Ok(content) => Ok(Json(WorkspaceFile {
-            name: file,
-            content: Some(content),
-        })),
-        Err(_) => Ok(Json(WorkspaceFile {
-            name: file,
-            content: Some(String::new()),
-        })),
-    }
+    // Try reading the file; if it doesn't exist or is empty, scaffold the workspace
+    let content = match tokio::fs::read_to_string(&file_path).await {
+        Ok(content) if !content.trim().is_empty() => content,
+        _ => {
+            // Auto-scaffold: create workspace with rich defaults
+            let ws_name = config.agent.default_workspace.clone();
+            let loader = WorkspaceLoader::new(config.data_dir.clone());
+            if let Err(e) = loader.scaffold(&ws_name) {
+                tracing::warn!("Failed to scaffold workspace '{}': {e}", ws_name);
+            }
+            // Re-read after scaffold
+            tokio::fs::read_to_string(&file_path)
+                .await
+                .unwrap_or_default()
+        }
+    };
+
+    Ok(Json(WorkspaceFile {
+        name: file,
+        content: Some(content),
+    }))
 }
 
 /// PUT /api/workspace/{file} — write a workspace file
@@ -80,7 +102,18 @@ pub async fn put_file(
 
     let file_path = workspace_dir.join(&file);
     match tokio::fs::write(&file_path, body.content.as_bytes()).await {
-        Ok(_) => StatusCode::OK,
+        Ok(_) => {
+            // Fire-and-forget: persist to Postgres
+            let store = state.pg_store.clone();
+            let filename = file.clone();
+            let content = body.content.clone();
+            tokio::spawn(async move {
+                if let Err(e) = store.save_workspace_file("admin", "default", &filename, &content).await {
+                    tracing::warn!("Failed to persist workspace file to DB: {e}");
+                }
+            });
+            StatusCode::OK
+        }
         Err(e) => {
             tracing::error!("Failed to write workspace file: {e}");
             StatusCode::INTERNAL_SERVER_ERROR

@@ -1,6 +1,6 @@
 //! Context assembly — builds the system prompt from workspace files + installed skills.
 //!
-//! Priority order: SOUL.md → USER.md → AGENTS.md → installed skills.
+//! Priority order: SOUL.md → IDENTITY.md → USER.md → AGENTS.md → TOOLS.md → HEARTBEAT.md → installed skills.
 //! Each section is separated by a horizontal rule to give the LLM clear boundaries.
 
 use crate::workspace::Workspace;
@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 pub struct ContextBuilder {
     workspace: Workspace,
     skills_dir: Option<PathBuf>,
+    /// Max chars of skill content injected into the prompt (Gap 6 token budget).
+    max_skill_chars: usize,
 }
 
 impl ContextBuilder {
@@ -17,6 +19,7 @@ impl ContextBuilder {
         Self {
             workspace,
             skills_dir: None,
+            max_skill_chars: 50_000,
         }
     }
 
@@ -26,8 +29,14 @@ impl ContextBuilder {
         self
     }
 
+    /// Override the 50_000-char skill context budget (Gap 6).
+    pub fn with_max_skill_chars(mut self, limit: usize) -> Self {
+        self.max_skill_chars = limit;
+        self
+    }
+
     /// Build the system prompt from workspace files.
-    /// Priority order: SOUL.md → USER.md → AGENTS.md → installed skills → capabilities.
+    /// Priority order: SOUL.md → IDENTITY.md → USER.md → AGENTS.md → TOOLS.md → HEARTBEAT.md → installed skills → capabilities.
     pub fn build_system_prompt(&self) -> String {
         let mut sections = vec![];
 
@@ -36,19 +45,35 @@ impl ContextBuilder {
             sections.push(soul.clone());
         }
 
-        // 2. USER.md (user preferences + context)
+        // 2. IDENTITY.md (agent persona + capability summary)
+        if let Some(identity) = &self.workspace.identity {
+            sections.push(format!("\n---\n\n{}", identity));
+        }
+
+        // 3. USER.md (user preferences + context)
         if let Some(user) = &self.workspace.user {
             sections.push(format!("\n---\n\n{}", user));
         }
 
-        // 3. AGENTS.md (informational in Phase 0 — skill assignments + swarm config)
+        // 4. AGENTS.md (informational in Phase 0 — skill assignments + swarm config)
         if let Some(agents) = &self.workspace.agents {
             sections.push(format!("\n---\n\n{}", agents));
         }
 
-        // 4. Installed skills (inject SKILL.md content)
+        // 5. TOOLS.md (tool usage guidelines)
+        if let Some(tools) = &self.workspace.tools {
+            sections.push(format!("\n---\n\n{}", tools));
+        }
+
+        // 6. HEARTBEAT.md (scheduled task context, if present)
+        if let Some(heartbeat) = &self.workspace.heartbeat {
+            sections.push(format!("\n---\n\n{}", heartbeat));
+        }
+
+        // 7. Installed skills — with relevance filter + char budget (Gap 6)
         if let Some(skills_dir) = &self.skills_dir {
-            let skills_content = load_installed_skills(skills_dir);
+            let assigned = extract_assigned_skills(self.workspace.agents.as_deref());
+            let skills_content = load_installed_skills(skills_dir, &assigned, self.max_skill_chars);
             if !skills_content.is_empty() {
                 sections.push(format!(
                     "\n---\n\n## Installed Skills\n\nYou have the following skills available. Follow the instructions in each skill when relevant to the user's request.\n\n{}",
@@ -66,26 +91,99 @@ impl ContextBuilder {
     }
 }
 
-/// Load all installed skills' SKILL.md content from the skills directory.
-/// Returns a combined string with each skill separated by a horizontal rule.
-fn load_installed_skills(skills_dir: &Path) -> String {
-    let mut skill_sections = vec![];
+/// Extract skill names assigned in AGENTS.md `## Skill Assignments` section.
+/// Returns empty vec if none found — caller injects all skills in that case.
+fn extract_assigned_skills(agents_md: Option<&str>) -> Vec<String> {
+    let content = match agents_md {
+        Some(c) => c,
+        None => return vec![],
+    };
+    let mut in_section = false;
+    let mut assigned = Vec::new();
+    for line in content.lines() {
+        if line.trim_start().starts_with("## Skill Assignments") {
+            in_section = true;
+            continue;
+        }
+        if in_section {
+            if line.starts_with("## ") { break; }
+            if let Some(name) = line.trim().strip_prefix("- ") {
+                let name = name.trim().to_string();
+                if !name.is_empty() { assigned.push(name); }
+            }
+        }
+    }
+    assigned
+}
 
+/// Load installed skills with relevance filter and character budget (Gap 6).
+/// Assigned skills appear first; total output capped at `max_chars`.
+fn load_installed_skills(skills_dir: &Path, assigned: &[String], max_chars: usize) -> String {
     let entries = match std::fs::read_dir(skills_dir) {
-        Ok(entries) => entries,
+        Ok(e) => e,
         Err(_) => return String::new(),
     };
 
-    for entry in entries.flatten() {
-        if !entry.path().is_dir() {
-            continue;
-        }
-        let skill_md = entry.path().join("SKILL.md");
-        if let Ok(content) = std::fs::read_to_string(&skill_md) {
+    let mut skills: Vec<(String, String)> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
-            skill_sections.push(format!("### Skill: {}\n\n{}", name, content.trim()));
+            let content = std::fs::read_to_string(entry.path().join("SKILL.md")).ok()?;
+            Some((name, content))
+        })
+        .collect();
+
+    skills.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Priority: assigned first, then rest
+    let (mut priority, rest): (Vec<_>, Vec<_>) = if assigned.is_empty() {
+        (skills, vec![])
+    } else {
+        skills.into_iter().partition(|(n, _)| assigned.contains(n))
+    };
+    priority.extend(rest);
+
+    let mut output = String::new();
+    let mut budget = max_chars;
+    let mut truncated = 0usize;
+
+    for (name, content) in &priority {
+        let block = format!("### Skill: {}\n\n{}", name, content.trim());
+        let sep = if output.is_empty() { "" } else { "\n\n---\n\n" };
+        let addition = format!("{}{}", sep, block);
+        if addition.len() <= budget {
+            output.push_str(&addition);
+            budget = budget.saturating_sub(addition.len());
+        } else {
+            // Inject summary only
+            let desc = extract_skill_summary(content.trim());
+            let summary = format!("{}\n\n*(instructions omitted — context budget)*", format!("### Skill: {}\n\n{}", name, desc));
+            let sum_add = format!("{}{}", sep, summary);
+            if sum_add.len() <= budget {
+                output.push_str(&sum_add);
+                budget = budget.saturating_sub(sum_add.len());
+            }
+            truncated += 1;
         }
     }
 
-    skill_sections.join("\n\n---\n\n")
+    if truncated > 0 {
+        output.push_str(&format!("\n\n*{} skill(s) truncated due to context budget.*", truncated));
+    }
+    output
+}
+
+fn extract_skill_summary(content: &str) -> String {
+    let mut in_desc = false;
+    for line in content.lines() {
+        if line.starts_with("## Description") { in_desc = true; continue; }
+        if in_desc {
+            if line.starts_with("## ") { break; }
+            let t = line.trim();
+            if !t.is_empty() { return t.to_string(); }
+        }
+    }
+    content.lines().find(|l| !l.trim().is_empty() && !l.starts_with('#'))
+        .unwrap_or("(no description)").trim().to_string()
 }

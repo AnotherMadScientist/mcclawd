@@ -4,12 +4,13 @@ import { FileText, Save } from "lucide-react";
 import { api } from "../api/client";
 import { cn } from "../lib/utils";
 
-const files = ["SOUL.md", "AGENTS.md", "USER.md"];
+const files = ["SOUL.md", "AGENTS.md", "USER.md", "IDENTITY.md", "TOOLS.md", "HEARTBEAT.md"];
 
 export function WorkspacePage() {
   const [selected, setSelected] = useState("SOUL.md");
   const [content, setContent] = useState("");
   const [dirty, setDirty] = useState(false);
+  const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const queryClient = useQueryClient();
 
   const { data, isLoading } = useQuery({
@@ -29,6 +30,12 @@ export function WorkspacePage() {
     onSuccess: () => {
       setDirty(false);
       queryClient.invalidateQueries({ queryKey: ["workspace", selected] });
+      setToast({ msg: "Saved successfully", ok: true });
+      setTimeout(() => setToast(null), 2500);
+    },
+    onError: () => {
+      setToast({ msg: "Failed to save", ok: false });
+      setTimeout(() => setToast(null), 2500);
     },
   });
 
@@ -42,6 +49,9 @@ export function WorkspacePage() {
   };
 
   const handleTabSwitch = (file: string) => {
+    if (dirty && !window.confirm("You have unsaved changes. Discard them?")) {
+      return;
+    }
     setDirty(false);
     setSelected(file);
   };
@@ -77,13 +87,18 @@ export function WorkspacePage() {
         />
         <button
           onClick={handleSave}
-          disabled={save.isPending}
-          className="absolute top-3 right-3 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-primary/10 text-primary hover:bg-primary/20 text-sm transition-colors"
+          disabled={save.isPending || !dirty}
+          className="absolute top-3 right-3 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-primary/10 text-primary hover:bg-primary/20 text-sm transition-colors disabled:opacity-40"
         >
           <Save className="w-4 h-4" />
           {save.isPending ? "Saving..." : "Save"}
         </button>
       </div>
+      {toast && (
+        <p className={`text-xs ${toast.ok ? "text-emerald-500" : "text-destructive"}`}>
+          {toast.msg}
+        </p>
+      )}
     </div>
   );
 }

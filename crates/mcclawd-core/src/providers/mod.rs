@@ -9,6 +9,8 @@
 pub mod pool;
 
 pub use pool::{
-    BudgetConfig, ProviderEntry, ProviderKind, ProviderPool, ProviderPoolConfig, ProviderUsage,
-    UsageRecord, UsageSummary,
+    estimate_cost_usd, AccountCredits, BudgetAlertDetail, BudgetAlertLevel, BudgetAlerts,
+    BudgetConfig, BudgetInfo, DailyUsage, DetailedUsageSummary, ModelUsageEntry, ProviderEntry,
+    ProviderKind, ProviderPool, ProviderPoolConfig, ProviderUsage, TaskUsageEntry, UsageRecord,
+    UsageSummary,
 };

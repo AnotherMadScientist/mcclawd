@@ -35,6 +35,18 @@ export function TaskCard({ task }: { task: Task }) {
               {task.prompt}
             </p>
             <p className="text-xs text-muted-foreground mt-1">ID: {task.id.slice(0, 8)}</p>
+            {task.tags && task.tags.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-1.5">
+                {task.tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
           <div className={cn("flex items-center gap-1.5 text-xs font-medium", color)}>
             <Icon className={cn("w-4 h-4", pulse && "animate-pulse")} />
@@ -45,8 +57,11 @@ export function TaskCard({ task }: { task: Task }) {
       <button
         onClick={(e) => {
           e.stopPropagation();
-          remove.mutate();
+          if (window.confirm("Delete this task?")) {
+            remove.mutate();
+          }
         }}
+        aria-label="Delete task"
         className="p-2 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
         title="Delete task"
       >

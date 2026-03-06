@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Plus, Trash2, Eye, EyeOff, Pencil, Check, X } from "lucide-react";
+import { KeyRound, Plus, Trash2, Eye, EyeOff, Pencil, Check, X, Copy } from "lucide-react";
 import { api } from "../api/client";
 
 export function SecretsPage() {
@@ -9,7 +9,17 @@ export function SecretsPage() {
   const [revealed, setRevealed] = useState<Record<string, string>>({});
   const [editing, setEditing] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [copied, setCopied] = useState<string | null>(null);
   const queryClient = useQueryClient();
+
+  const handleCopy = (secretName: string) => {
+    const val = revealed[secretName];
+    if (val === undefined) return;
+    navigator.clipboard.writeText(val).then(() => {
+      setCopied(secretName);
+      setTimeout(() => setCopied(null), 1500);
+    });
+  };
 
   const { data: secrets = [] } = useQuery({
     queryKey: ["secrets"],
@@ -135,9 +145,22 @@ export function SecretsPage() {
                   className="flex-1 px-3 py-1 rounded-lg bg-background border border-border text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/30"
                 />
               ) : revealed[s.name] !== undefined ? (
-                <span className="text-sm font-mono text-muted-foreground" data-testid="revealed-value">
-                  {revealed[s.name]}
-                </span>
+                <>
+                  <span className="text-sm font-mono text-muted-foreground" data-testid="revealed-value">
+                    {revealed[s.name]}
+                  </span>
+                  <button
+                    onClick={() => handleCopy(s.name)}
+                    aria-label="Copy secret value"
+                    className="p-1 rounded text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                  >
+                    {copied === s.name ? (
+                      <span className="text-xs text-emerald-500">Copied!</span>
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                </>
               ) : null}
             </div>
             <div className="flex items-center gap-1 shrink-0">

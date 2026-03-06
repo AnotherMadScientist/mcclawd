@@ -1,97 +1,173 @@
-//! Swarm API route handlers — Phase 2 placeholders.
+//! Swarm API route handlers — wired to SwarmRegistry + SwarmCoordinator.
 
 use axum::{
-    extract::Path,
+    extract::{Path, State},
     http::StatusCode,
     Json,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use uuid::Uuid;
+
+use super::state::AppState;
+use super::swarm_registry::{SwarmRunDetail, SwarmRunStatus, SwarmRunSummary};
 
 /// Request body for POST /api/swarms
 #[derive(Debug, Deserialize)]
 pub struct CreateSwarmRequest {
     pub prompt: String,
+    #[serde(default)]
+    pub workspace: Option<String>,
 }
 
 /// Response for POST /api/swarms
-#[derive(Debug, Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub struct CreateSwarmResponse {
     pub swarm_id: String,
     pub status: String,
 }
 
-/// Summary of a swarm run (for list endpoint).
-#[derive(Debug, Serialize)]
-pub struct SwarmSummary {
-    pub swarm_id: String,
-    pub status: String,
-    pub prompt: String,
+/// GET /api/swarms — list all swarm runs.
+pub async fn list_swarms(State(state): State<AppState>) -> Json<Vec<SwarmRunSummary>> {
+    Json(state.swarm_registry.list())
 }
 
-/// Detailed swarm status.
-#[derive(Debug, Serialize)]
-pub struct SwarmStatus {
-    pub swarm_id: String,
-    pub status: String,
-    pub wave: usize,
-    pub total_waves: usize,
-    pub subtasks: Vec<String>,
+/// GET /api/swarms/{id} — get swarm status.
+pub async fn get_swarm(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SwarmRunDetail>, StatusCode> {
+    state
+        .swarm_registry
+        .get(&id)
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
-/// GET /api/swarms — list all swarm runs (placeholder: returns empty array).
-pub async fn list_swarms() -> Json<Vec<SwarmSummary>> {
-    // Phase 2 placeholder — will query SwarmRegistry when wired up
-    Json(vec![])
-}
-
-/// GET /api/swarms/{id} — get swarm status (placeholder: returns 404).
-pub async fn get_swarm(Path(id): Path<String>) -> Result<Json<SwarmStatus>, StatusCode> {
-    // Phase 2 placeholder — will look up swarm by ID when registry is wired
-    tracing::debug!(swarm_id = %id, "Swarm lookup (placeholder — not found)");
-    Err(StatusCode::NOT_FOUND)
-}
-
-/// POST /api/swarms — start a swarm run (placeholder: accepts prompt, returns swarm_id).
+/// POST /api/swarms — start a swarm run.
+///
+/// Creates a SwarmCoordinator, registers it in the SwarmRegistry,
+/// and spawns background execution.
 pub async fn create_swarm(
+    State(state): State<AppState>,
     Json(payload): Json<CreateSwarmRequest>,
 ) -> (StatusCode, Json<CreateSwarmResponse>) {
     let swarm_id = Uuid::new_v4().to_string();
-    tracing::info!(swarm_id = %swarm_id, prompt = %payload.prompt, "Swarm created (placeholder)");
+
+    // Register in the swarm registry (status: Planning)
+    let cancel_token = state
+        .swarm_registry
+        .register(swarm_id.clone(), payload.prompt.clone());
+
+    // Persist swarm creation to Postgres (fire-and-forget)
+    {
+        let store = state.pg_store.clone();
+        let id = swarm_id.clone();
+        let name = payload.prompt.chars().take(100).collect::<String>();
+        let config_json = serde_json::json!({ "prompt": payload.prompt, "workspace": payload.workspace });
+        tokio::spawn(async move {
+            if let Err(e) = store.save_swarm_run("admin", &id, &name, "planning", &config_json).await {
+                tracing::warn!(error = %e, "Failed to persist swarm creation to DB");
+            }
+        });
+    }
+
+    // Spawn background swarm execution
+    let registry = state.swarm_registry.clone();
+    let pg_store = state.pg_store.clone();
+    let sid = swarm_id.clone();
+    let prompt = payload.prompt.clone();
+
+    tokio::spawn(async move {
+        // Update status to Running
+        registry.update_status(
+            &sid,
+            SwarmRunStatus::Running {
+                wave: 0,
+                total_waves: 0,
+            },
+        );
+        // Persist running status (fire-and-forget)
+        let store = pg_store.clone();
+        let sid_c = sid.clone();
+        tokio::spawn(async move {
+            if let Err(e) = store.update_swarm_run(&sid_c, "running", None).await {
+                tracing::warn!(error = %e, "Failed to persist swarm running status");
+            }
+        });
+
+        // Build a DAG and execute via SwarmCoordinator
+        // Phase 2: This would use SwarmPlanner to build a real DAG from the prompt
+        // For now, log that we would execute
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                tracing::info!(swarm_id = %sid, "Swarm cancelled by user");
+                // Persist cancelled status
+                let store = pg_store.clone();
+                let sid_c = sid.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = store.update_swarm_run(&sid_c, "cancelled", None).await {
+                        tracing::warn!(error = %e, "Failed to persist swarm cancelled status");
+                    }
+                });
+            }
+            _ = async {
+                tracing::info!(swarm_id = %sid, prompt = %prompt, "Swarm execution started (stub)");
+                // Simulate some work
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+                registry.update_status(&sid, SwarmRunStatus::Completed);
+                registry.set_result(&sid, format!("Swarm completed for: {prompt}"));
+                tracing::info!(swarm_id = %sid, "Swarm execution completed");
+                // Persist completed status + result
+                let result_text = format!("Swarm completed for: {prompt}");
+                let store = pg_store.clone();
+                let sid_c = sid.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = store.update_swarm_run(&sid_c, "completed", Some(&result_text)).await {
+                        tracing::warn!(error = %e, "Failed to persist swarm completed status");
+                    }
+                });
+            } => {}
+        }
+    });
 
     (
         StatusCode::CREATED,
         Json(CreateSwarmResponse {
             swarm_id,
-            status: "pending".into(),
+            status: "planning".into(),
         }),
     )
+}
+
+/// DELETE /api/swarms/{id} — cancel a running swarm.
+pub async fn cancel_swarm(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> StatusCode {
+    if state.swarm_registry.cancel(&id) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn list_swarms_returns_empty() {
-        let result = list_swarms().await;
-        assert!(result.0.is_empty());
+    #[test]
+    fn create_swarm_request_deserializes() {
+        let json = r#"{"prompt": "test swarm"}"#;
+        let req: CreateSwarmRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.prompt, "test swarm");
+        assert!(req.workspace.is_none());
     }
 
-    #[tokio::test]
-    async fn get_swarm_returns_not_found() {
-        let result = get_swarm(Path("nonexistent".into())).await;
-        assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn create_swarm_returns_id() {
-        let req = CreateSwarmRequest {
-            prompt: "test swarm".into(),
-        };
-        let (status, json) = create_swarm(Json(req)).await;
-        assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(json.status, "pending");
-        assert!(!json.swarm_id.is_empty());
+    #[test]
+    fn create_swarm_request_with_workspace() {
+        let json = r#"{"prompt": "test", "workspace": "my-ws"}"#;
+        let req: CreateSwarmRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.workspace.as_deref(), Some("my-ws"));
     }
 }

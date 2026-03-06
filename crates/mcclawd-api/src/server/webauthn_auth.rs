@@ -263,20 +263,20 @@ pub async fn register_finish(
     };
     save_credentials(&data_dir, &creds).await?;
 
-    // Generate random 32-byte vault key (restricted permissions)
-    let mut vault_key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut vault_key);
+    // Reuse existing vault.key if present — never regenerate on re-registration.
+    // This preserves secrets.enc across re-registrations (auth and vault are independent).
     let key_path = vault_key_path(&data_dir);
-    write_sensitive_file(&key_path, &vault_key).await?;
-
-    // Delete old secrets.enc — it was encrypted with the previous vault key and is now unreadable
-    let secrets_path = { let config = state.config.read().await; config.secrets_path() };
-    if secrets_path.exists() {
-        let _ = std::fs::remove_file(&secrets_path);
-        tracing::info!("Removed old secrets.enc (new vault key generated)");
+    if !key_path.exists() {
+        // First-time setup: generate random 32-byte vault key
+        let mut vault_key = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut vault_key);
+        write_sensitive_file(&key_path, &vault_key).await?;
+        tracing::info!("Generated new vault key (first-time setup)");
+    } else {
+        tracing::info!("Reusing existing vault key (re-registration preserves secrets)");
     }
 
-    // Unlock vault with the new key
+    // Unlock vault (creates empty secrets.enc if missing, reuses existing if present)
     unlock_vault_with_key(&state).await?;
 
     // Issue JWT
@@ -379,7 +379,8 @@ pub async fn login_finish(
 
 /// DELETE /api/auth/credentials — reset biometric credentials (dev only).
 ///
-/// Removes the vault key and WebAuthn credentials so the user can re-register.
+/// Only removes WebAuthn credentials so the user can re-register.
+/// Vault (vault.key + secrets.enc) is PRESERVED — auth and secrets are independent.
 pub async fn reset_credentials(
     State(state): State<AppState>,
 ) -> Result<StatusCode, StatusCode> {
@@ -388,7 +389,7 @@ pub async fn reset_credentials(
         config.data_dir.clone()
     };
 
-    // Remove WebAuthn credentials
+    // Remove WebAuthn credentials only — vault stays intact
     let creds = credentials_path(&data_dir);
     if creds.exists() {
         std::fs::remove_file(&creds).map_err(|e| {
@@ -397,33 +398,9 @@ pub async fn reset_credentials(
         })?;
     }
 
-    // Remove vault key
-    let vault_key = data_dir.join("vault.key");
-    if vault_key.exists() {
-        std::fs::remove_file(&vault_key).map_err(|e| {
-            tracing::error!("Failed to remove vault key: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    }
+    // Vault (vault.key + secrets.enc) intentionally NOT deleted.
+    // Re-registration will reuse existing vault.key, keeping secrets intact.
 
-    // Remove secrets.enc — it was encrypted with the now-deleted vault key
-    let secrets_enc = {
-        let config = state.config.read().await;
-        config.secrets_path()
-    };
-    if secrets_enc.exists() {
-        std::fs::remove_file(&secrets_enc).map_err(|e| {
-            tracing::error!("Failed to remove secrets.enc: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    }
-
-    // Clear in-memory secrets state — vault is now locked
-    {
-        let mut secrets = state.secrets.write().await;
-        *secrets = None;
-    }
-
-    tracing::info!("Biometric credentials reset — all vault state cleared, user must re-register");
+    tracing::info!("Biometric credentials reset — vault preserved, user must re-register");
     Ok(StatusCode::NO_CONTENT)
 }

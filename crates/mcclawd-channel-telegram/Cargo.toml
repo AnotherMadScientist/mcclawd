@@ -21,6 +21,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tokio-util = { workspace = true }
+reqwest = { workspace = true }
 teloxide = { version = "0.13", features = ["macros"], optional = true }
 
 [dev-dependencies]

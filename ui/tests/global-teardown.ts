@@ -39,6 +39,18 @@ export default async function globalTeardown() {
     if (toDelete.length > 0) {
       console.log(`Cleaned up ${toDelete.length} test secrets`);
     }
+
+    // Delete all tasks tagged "e2e-test"
+    const taskRes = await fetch(`${baseURL}/api/tasks?tag=e2e-test`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (taskRes.ok) {
+      const result: { deleted: number } = await taskRes.json();
+      if (result.deleted > 0) {
+        console.log(`Cleaned up ${result.deleted} e2e-test tasks`);
+      }
+    }
   } catch {
     // Server may not be running — ignore
   }

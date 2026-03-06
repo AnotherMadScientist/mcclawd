@@ -160,6 +160,23 @@ pub async fn uninstall(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// mc skills check-updates — show which installed skills have newer versions available.
+pub async fn check_updates() -> anyhow::Result<()> {
+    let installer = make_installer()?;
+    let updates = installer.check_for_updates().await?;
+    if updates.is_empty() {
+        println!("All installed skills are up to date.");
+        return Ok(());
+    }
+    println!("{:<20} {:<12} {}", "SKILL", "INSTALLED", "LATEST");
+    println!("{}", "-".repeat(50));
+    for u in &updates {
+        println!("{:<20} {:<12} {}", u.name, u.installed_version, u.latest_version);
+    }
+    println!("\n{} update(s) available. Run `mc skills upgrade <name>` to update.", updates.len());
+    Ok(())
+}
+
 /// Parse "name@version" or "name" into (name, Option<version>).
 fn parse_skill_ref(input: &str) -> (&str, Option<&str>) {
     if let Some(idx) = input.rfind('@') {

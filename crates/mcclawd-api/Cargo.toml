@@ -45,6 +45,7 @@ tokio-util = { workspace = true }
 mime_guess = "2"
 base64 = { workspace = true }
 libc = "0.2"
+dotenvy = "0.15"
 
 [dev-dependencies]
 tempfile = { workspace = true }

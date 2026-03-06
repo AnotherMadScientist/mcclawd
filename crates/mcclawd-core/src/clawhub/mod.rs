@@ -7,8 +7,10 @@
 
 pub mod cache;
 pub mod client;
+pub mod dep_resolver;
 pub mod installer;
 
 pub use cache::{CacheStats, CachedCatalog, CachedSearchResult, ClawHubCache};
 pub use client::{ClawHubClient, ClawHubSearchResult, ClawHubSkillMeta};
-pub use installer::{InstalledSkillInfo, SkillInstaller, SkillSource};
+pub use dep_resolver::DepResolver;
+pub use installer::{InstalledSkillInfo, SkillInstaller, SkillSource, SkillUpdate};

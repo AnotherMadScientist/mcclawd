@@ -6,11 +6,14 @@ import { homedir } from "os";
 const AUTH_TOKEN_PATH = join(__dirname, ".auth-token.json");
 
 export default async function globalSetup() {
-  // Clean server-side WebAuthn state so we always register fresh.
+  // Clean server-side WebAuthn credentials so we always register fresh.
   // The virtual authenticator is per-browser-session — stale server credentials
   // would cause login to fail (authenticator has no matching credential).
+  // IMPORTANT: Do NOT delete vault.key or secrets.enc — these are long-lived
+  // and managed externally via `mc secrets init`. Deleting them destroys
+  // the real ANTHROPIC_API_KEY and other production secrets.
   const dataDir = join(homedir(), ".mcclawd");
-  for (const f of ["webauthn_credentials.json", "vault.key", "secrets.enc"]) {
+  for (const f of ["webauthn_credentials.json"]) {
     try {
       unlinkSync(join(dataDir, f));
     } catch {
@@ -26,7 +29,9 @@ export default async function globalSetup() {
   await page.goto("http://localhost:8080");
 
   const cdp = await context.newCDPSession(page);
-  await cdp.send("WebAuthn.enable", { enableUI: true });
+  // enableUI: false ensures the virtual authenticator handles ceremonies silently
+  // (enableUI: true would show Chrome's passkey dialog, which can block headless automation)
+  await cdp.send("WebAuthn.enable", { enableUI: false });
   const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", {
     options: {
       protocol: "ctap2",
@@ -61,14 +66,30 @@ export default async function globalSetup() {
   );
   writeFileSync(AUTH_TOKEN_PATH, JSON.stringify({ token }));
 
-  // Seed ANTHROPIC_API_KEY into the fresh vault so secrets tests can find it.
+  // Re-seed ANTHROPIC_API_KEY into the fresh vault.
+  // register_finish generates a new vault key and wipes secrets.enc, so any
+  // previously-stored API key is lost. Re-seed from the env so LLM streaming
+  // works in E2E tests (fixes BUG-005).
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (apiKey) {
+    await fetch("http://localhost:9090/api/secrets", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ name: "ANTHROPIC_API_KEY", value: apiKey }),
+    });
+  }
+
+  // Seed a test-only secret for E2E secret management tests.
   await fetch("http://localhost:9090/api/secrets", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({ name: "ANTHROPIC_API_KEY", value: "test-key-for-e2e" }),
+    body: JSON.stringify({ name: "E2E_TEST_KEY", value: "test-key-for-e2e" }),
   });
 
   await browser.close();

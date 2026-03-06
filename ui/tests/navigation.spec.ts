@@ -1,9 +1,17 @@
 import { test, expect } from "@playwright/test";
-import { login } from "./helpers";
+import { login, collectConsoleErrors, unexpectedErrors } from "./helpers";
 
 test.describe("Navigation & Sidebar", () => {
+  let consoleErrors: ReturnType<typeof collectConsoleErrors>;
+
   test.beforeEach(async ({ page }) => {
+    consoleErrors = collectConsoleErrors(page);
     await login(page);
+  });
+
+  test.afterEach(async () => {
+    const unexpected = unexpectedErrors(consoleErrors);
+    expect(unexpected, `Unexpected console errors: ${JSON.stringify(unexpected)}`).toHaveLength(0);
   });
 
   test("sidebar shows McClawd branding", async ({ page }) => {
@@ -97,5 +105,80 @@ test.describe("Navigation & Sidebar", () => {
 
     await page.goto("/config/settings");
     await expect(page.locator("h1")).toContainText("Settings");
+  });
+
+  test("active sidebar link has visual highlight", async ({ page }) => {
+    await page.goto("/config/secrets");
+    const secretsLink = page.getByRole("link", { name: "Secrets" });
+    await expect(secretsLink).toBeVisible();
+    // shadcn/ui NavLink applies bg-primary or aria-current="page" to the active link
+    const isHighlighted =
+      (await secretsLink.getAttribute("aria-current")) === "page" ||
+      (await secretsLink.evaluate((el) =>
+        el.className.includes("bg-primary") ||
+        el.className.includes("active") ||
+        el.getAttribute("aria-current") === "page"
+      ));
+    expect(
+      isHighlighted,
+      "Active sidebar link should have bg-primary class or aria-current=page"
+    ).toBe(true);
+  });
+
+  test("browser back/forward navigation works", async ({ page }) => {
+    // Start at root
+    await page.goto("/");
+    await expect(page).toHaveURL("/");
+
+    // Navigate to skills
+    await page.goto("/config/skills");
+    await expect(page).toHaveURL("/config/skills");
+
+    // Go back — expect root
+    await page.goBack();
+    await expect(page).toHaveURL("/");
+
+    // Go forward — expect skills
+    await page.goForward();
+    await expect(page).toHaveURL("/config/skills");
+  });
+
+  test("all config sidebar links work", async ({ page }) => {
+    const links = [
+      { name: "Workspace", url: "/config/workspace" },
+      { name: "Skills", url: "/config/skills" },
+      { name: "MCP Servers", url: "/config/mcp" },
+      { name: "Secrets", url: "/config/secrets" },
+      { name: "Settings", url: "/config/settings" },
+    ];
+    for (const { name, url } of links) {
+      await page.goto("/");
+      await page.getByRole("link", { name }).click();
+      await expect(page).toHaveURL(url);
+    }
+  });
+
+  test("browser back navigation works", async ({ page }) => {
+    await page.goto("/config/workspace");
+    await expect(page).toHaveURL("/config/workspace");
+    await page.goto("/config/skills");
+    await expect(page).toHaveURL("/config/skills");
+    await page.goBack();
+    await expect(page).toHaveURL("/config/workspace");
+  });
+
+  test("browser forward navigation works", async ({ page }) => {
+    await page.goto("/config/workspace");
+    await page.goto("/config/skills");
+    await page.goBack();
+    await expect(page).toHaveURL("/config/workspace");
+    await page.goForward();
+    await expect(page).toHaveURL("/config/skills");
+  });
+
+  test("tasks link returns to homepage", async ({ page }) => {
+    await page.goto("/config/workspace");
+    await page.getByRole("link", { name: "Tasks" }).click();
+    await expect(page).toHaveURL("/");
   });
 });

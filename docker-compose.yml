@@ -2,6 +2,23 @@
 # All MCP servers run inside the AgentGateway container (stdio targets).
 # Production: mc manages containers directly via bollard (Phase 1+)
 services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: mcclawd
+      POSTGRES_USER: mcclawd
+      POSTGRES_PASSWORD: mcclawd
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mcclawd -d mcclawd"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: always
+
   agentgateway:
     build:
       context: ./docker/agentgateway
@@ -12,7 +29,13 @@ services:
       - mcclawd-data:/data
     environment:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      # Services on the same Compose network use the service name as hostname
+      - DATABASE_URL=postgresql://mcclawd:mcclawd@postgres:5432/mcclawd
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   mcclawd-data:
+  pgdata:
