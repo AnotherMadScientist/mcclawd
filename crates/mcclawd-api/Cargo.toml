@@ -35,7 +35,7 @@ jsonwebtoken = { workspace = true }
 bollard = { workspace = true }
 tar = { workspace = true }
 futures-util = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["multipart"] }
 webauthn-rs = { workspace = true }
 webauthn-rs-proto = { workspace = true }
 url = { workspace = true }

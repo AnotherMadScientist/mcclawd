@@ -1,31 +1,66 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import { getToken } from "../api/client";
 
 const HOLD_THRESHOLD_MS = 300;
+
+const HAS_SPEECH_RECOGNITION = !!(
+  typeof window !== "undefined" &&
+  (window.SpeechRecognition || window.webkitSpeechRecognition)
+);
 
 interface MicButtonProps {
   onTranscript: (text: string) => void;
   onInterim?: (text: string) => void;
   onStart?: () => void;
+  onError?: (msg: string) => void;
   disabled?: boolean;
   size?: "sm" | "md";
 }
 
-export function MicButton({ onTranscript, onInterim, onStart, disabled, size = "sm" }: MicButtonProps) {
+/** Post recorded audio to backend for Whisper transcription. */
+async function transcribeViaBackend(blob: Blob): Promise<string> {
+  const form = new FormData();
+  form.append("audio", blob, "recording.webm");
+  const token = getToken();
+  const res = await fetch("/api/transcribe", {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: form,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const json = await res.json();
+  return json.text ?? "";
+}
+
+export function MicButton({ onTranscript, onInterim, onStart, onError, disabled, size = "sm" }: MicButtonProps) {
   const [isListening, setIsListening] = useState(false);
   const [micLevel, setMicLevel] = useState(0);
+  const [statusText, setStatusText] = useState<string | null>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
   const finalTranscriptRef = useRef("");
   const mouseDownTimeRef = useRef<number>(0);
   const isHoldingRef = useRef(false);
+  const useFallbackRef = useRef(!HAS_SPEECH_RECOGNITION);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number>(0);
   const mediaStreamRef = useRef<MediaStream | null>(null);
 
-  const startAudioMeter = useCallback(async () => {
+  const reportError = useCallback(
+    (msg: string) => {
+      console.warn("[MicButton]", msg);
+      onError?.(msg);
+      setStatusText(null);
+    },
+    [onError],
+  );
+
+  const startAudioMeter = useCallback(async (existingStream?: MediaStream) => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaStreamRef.current = stream;
+      const stream = existingStream ?? await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!existingStream) mediaStreamRef.current = stream;
       const ctx = new AudioContext();
       audioContextRef.current = ctx;
       const source = ctx.createMediaStreamSource(stream);
@@ -48,9 +83,9 @@ export function MicButton({ onTranscript, onInterim, onStart, disabled, size = "
       };
       tick();
     } catch {
-      // Microphone not available
+      reportError("Microphone access denied");
     }
-  }, []);
+  }, [reportError]);
 
   const stopAudioMeter = useCallback(() => {
     if (animFrameRef.current) {
@@ -69,16 +104,65 @@ export function MicButton({ onTranscript, onInterim, onStart, disabled, size = "
     setMicLevel(0);
   }, []);
 
+  /* ── MediaRecorder fallback (works in all browsers) ── */
+  const startRecorderFallback = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      const recorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
+      chunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      recorder.onstop = async () => {
+        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        if (blob.size < 1000) return; // too short
+        setStatusText("Transcribing...");
+        try {
+          const text = await transcribeViaBackend(blob);
+          if (text.trim()) {
+            onTranscript(text.trim());
+          }
+        } catch (err: unknown) {
+          reportError(`Transcription failed: ${err instanceof Error ? err.message : "unknown"}`);
+        }
+        setStatusText(null);
+      };
+      recorderRef.current = recorder;
+      recorder.start(250); // collect chunks every 250ms
+      setIsListening(true);
+      startAudioMeter(stream);
+      onStart?.();
+    } catch {
+      reportError("Microphone access denied");
+    }
+  }, [onTranscript, onStart, startAudioMeter, reportError]);
+
+  const stopRecorderFallback = useCallback(() => {
+    if (recorderRef.current && recorderRef.current.state !== "inactive") {
+      recorderRef.current.stop();
+    }
+    recorderRef.current = null;
+    setIsListening(false);
+    stopAudioMeter();
+  }, [stopAudioMeter]);
+
+  /* ── SpeechRecognition (Chrome/Edge) ── */
   const startListening = useCallback(() => {
-    const SpeechRecognition =
-      window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      console.warn("SpeechRecognition API not available in this browser. Try Chrome or Edge.");
+    if (useFallbackRef.current) {
+      startRecorderFallback();
+      return;
+    }
+
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      useFallbackRef.current = true;
+      startRecorderFallback();
       return;
     }
 
     finalTranscriptRef.current = "";
-    const recognition = new SpeechRecognition();
+    const recognition = new SR();
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = "en-US";
@@ -104,7 +188,23 @@ export function MicButton({ onTranscript, onInterim, onStart, disabled, size = "
       }
     };
 
-    recognition.onerror = () => {
+    recognition.onerror = (event: Event & { error?: string }) => {
+      const errType = event.error ?? "unknown";
+      console.warn("[MicButton] SpeechRecognition error:", errType);
+
+      // For network/service errors, switch to MediaRecorder fallback permanently
+      if (errType === "network" || errType === "service-not-allowed" || errType === "not-allowed") {
+        useFallbackRef.current = true;
+        reportError(
+          errType === "not-allowed"
+            ? "Microphone permission denied"
+            : "Speech service unavailable — using recording fallback",
+        );
+      } else if (errType === "no-speech") {
+        // Silence — not a real error, just restart or ignore
+      } else {
+        reportError(`Speech recognition error: ${errType}`);
+      }
       setIsListening(false);
       stopAudioMeter();
     };
@@ -123,15 +223,19 @@ export function MicButton({ onTranscript, onInterim, onStart, disabled, size = "
     setIsListening(true);
     startAudioMeter();
     onStart?.();
-  }, [onTranscript, onInterim, onStart, startAudioMeter, stopAudioMeter]);
+  }, [onTranscript, onInterim, onStart, startAudioMeter, stopAudioMeter, startRecorderFallback, reportError]);
 
   const stopListening = useCallback(() => {
+    if (recorderRef.current) {
+      stopRecorderFallback();
+      return;
+    }
     if (recognitionRef.current) {
       recognitionRef.current.stop();
     }
     setIsListening(false);
     stopAudioMeter();
-  }, [stopAudioMeter]);
+  }, [stopAudioMeter, stopRecorderFallback]);
 
   const handleMouseDown = useCallback(() => {
     if (isListening) {
@@ -155,9 +259,8 @@ export function MicButton({ onTranscript, onInterim, onStart, disabled, size = "
   useEffect(() => {
     return () => {
       stopAudioMeter();
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
-      }
+      if (recognitionRef.current) recognitionRef.current.stop();
+      if (recorderRef.current && recorderRef.current.state !== "inactive") recorderRef.current.stop();
     };
   }, [stopAudioMeter]);
 
@@ -185,7 +288,7 @@ export function MicButton({ onTranscript, onInterim, onStart, disabled, size = "
           : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
       } disabled:opacity-50`}
       aria-label="Mic"
-      title={isListening ? "Click to stop / Release to stop" : "Click or hold to record"}
+      title={statusText ?? (isListening ? "Click to stop / Release to stop" : "Click or hold to record")}
     >
       <div className={`relative ${iconSize}`}>
         {isListening && fillHeight > 0 && (

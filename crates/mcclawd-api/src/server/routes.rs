@@ -202,6 +202,8 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             "/api/system-agent/history",
             get(system_agent::history).delete(system_agent::clear_history),
         )
+        // Audio transcription (Whisper fallback for non-Chrome browsers)
+        .route("/api/transcribe", post(tasks::transcribe_audio))
         // Apply JWT auth to all protected routes
         .route_layer(middleware::from_fn_with_state(state, auth::auth_middleware));
 

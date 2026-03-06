@@ -971,3 +971,78 @@ pub async fn attachment_paths(state: &AppState, task_id: &str) -> Vec<PathBuf> {
     }
     paths
 }
+
+/// POST /api/transcribe — accept audio blob, transcribe via OpenAI Whisper API.
+/// Falls back to error if no OPENAI_API_KEY is available.
+pub async fn transcribe_audio(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Extract audio field
+    let mut audio_bytes: Option<Vec<u8>> = None;
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name() == Some("audio") {
+            audio_bytes = Some(
+                field
+                    .bytes()
+                    .await
+                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("read error: {e}")))?
+                    .to_vec(),
+            );
+        }
+    }
+    let audio = audio_bytes.ok_or((StatusCode::BAD_REQUEST, "missing audio field".into()))?;
+    if audio.len() < 1000 {
+        return Err((StatusCode::BAD_REQUEST, "audio too short".into()));
+    }
+
+    // Try OPENAI_API_KEY from vault, then env
+    let openai_key: Option<String> = {
+        let guard = state.secrets.read().await;
+        match guard.as_ref() {
+            Some(b) => b.get("OPENAI_API_KEY").await.ok().flatten(),
+            None => None,
+        }
+    }
+    .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+
+    if let Some(key) = openai_key {
+        // Call OpenAI Whisper API
+        let client = reqwest::Client::new();
+        let part = reqwest::multipart::Part::bytes(audio)
+            .file_name("recording.webm")
+            .mime_str("audio/webm")
+            .unwrap();
+        let form = reqwest::multipart::Form::new()
+            .text("model", "whisper-1")
+            .text("response_format", "json")
+            .part("file", part);
+
+        let resp = client
+            .post("https://api.openai.com/v1/audio/transcriptions")
+            .bearer_auth(&key)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("whisper request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err((StatusCode::BAD_GATEWAY, format!("whisper {status}: {body}")));
+        }
+
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("whisper parse error: {e}")))?;
+
+        let text = json["text"].as_str().unwrap_or("").to_string();
+        return Ok(Json(serde_json::json!({ "text": text })));
+    }
+
+    Err((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "No OPENAI_API_KEY configured. Add it in Settings > Secrets for voice transcription.".into(),
+    ))
+}
