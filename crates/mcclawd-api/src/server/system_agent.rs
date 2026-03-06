@@ -91,10 +91,17 @@ pub async fn clear_history(State(state): State<AppState>) -> StatusCode {
         let mut events = state.task_events.write().await;
         events.remove(&task_id);
     }
-    // Clear chat history
+    // Clear chat history (in-memory + DB)
     {
         let mut history = state.task_chat_history.write().await;
         history.remove(&task_id);
+    }
+    {
+        let store = state.pg_store.clone();
+        let tid = task_id.0.clone();
+        tokio::spawn(async move {
+            let _ = store.set_chat_history(&tid, &[]).await;
+        });
     }
 
     StatusCode::NO_CONTENT
