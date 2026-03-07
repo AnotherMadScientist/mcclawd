@@ -1,8 +1,9 @@
-use crate::sandbox::container::SandboxHandle;
+use crate::sandbox::container::{PersistentHandle, SandboxHandle};
 use crate::server::mcp_lifecycle::McpLifecycleManager;
 
 // McpPorter is in server module, accessed directly
 use super::mcp_porter::McpPorter;
+use super::runner_build::RunnerBuildState;
 use crate::server::pg_store::PgTaskStore;
 use crate::server::swarm_registry::SwarmRegistry;
 use crate::supervisor::AgentSupervisor;
@@ -62,8 +63,12 @@ pub struct AppState {
     /// McpPorter: builds on-demand Docker images, resolves tools, manages agent environments.
     /// None if Docker is unavailable.
     pub mcp_porter: Option<Arc<McpPorter>>,
-    /// Long-lived system agent container handle (started on first WS connection).
-    pub system_agent: Arc<RwLock<Option<SandboxHandle>>>,
+    /// Long-lived system agent persistent container handle (started on first WS connection).
+    pub system_agent: Arc<RwLock<Option<PersistentHandle>>>,
+    /// Per-task persistent container handles (one container per task, lives until task deleted).
+    pub task_containers: Arc<RwLock<HashMap<TaskId, PersistentHandle>>>,
+    /// Runner image build state (progress, logs, status).
+    pub runner_build: Arc<RwLock<RunnerBuildState>>,
 }
 
 impl AppState {
@@ -106,6 +111,8 @@ impl AppState {
                 .and_then(|lm| McpPorter::new(lm).ok())
                 .map(Arc::new),
             system_agent: Arc::new(RwLock::new(None)),
+            task_containers: Arc::new(RwLock::new(HashMap::new())),
+            runner_build: Arc::new(RwLock::new(RunnerBuildState::default())),
         })
     }
 
@@ -273,17 +280,16 @@ impl AppState {
     }
 
     /// Persist a new task to postgres (called after TaskManager::start_task).
+    /// This is synchronous (awaited inline) to guarantee the task is in Postgres
+    /// before the API returns to the client — prevents data loss on cargo-watch restarts.
     pub async fn pg_save_task(&self, task_id: &TaskId, prompt: &str, status: &str, tags: &[String]) {
-        let store = self.pg_store.clone();
-        let tid = task_id.0.clone();
-        let prompt = prompt.to_string();
-        let status = status.to_string();
-        let tags = tags.to_vec();
-        tokio::spawn(async move {
-            if let Err(e) = store.save_task(&tid, &prompt, &status, None, "admin", &tags).await {
-                tracing::warn!(task_id = %tid, error = %e, "Failed to save task to postgres");
-            }
-        });
+        if let Err(e) = self
+            .pg_store
+            .save_task(&task_id.0, prompt, status, None, "admin", tags)
+            .await
+        {
+            tracing::warn!(task_id = %task_id.0, error = %e, "Failed to save task to postgres");
+        }
     }
 
     /// Update task status in postgres.

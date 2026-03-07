@@ -177,6 +177,72 @@ export interface ModelPricing {
   output_price_per_mtok: number;
 }
 
+// --- Docker types ---
+
+export interface DockerBuildStatus {
+  status: "checking" | "image_ready" | "building" | "complete" | "failed";
+  progress_pct: number;
+  logs: string[];
+  error: string | null;
+  image_available: boolean;
+  image_id: string | null;
+  image_size: number | null;
+  build_duration_secs?: number | null;
+  agent_startup_secs?: number | null;
+}
+
+export interface ContainerMount {
+  source: string;
+  destination: string;
+  mode: string;
+}
+
+export interface ContainerAttachmentMeta {
+  name: string;
+  size: number;
+  is_image: boolean;
+}
+
+export interface ContainerInfo {
+  id: string;
+  name: string;
+  task_id: string | null;
+  status: string;
+  state: string;
+  image: string;
+  created: number;
+  ports: string[];
+  mounts: ContainerMount[];
+  env_vars: Record<string, string>;
+  labels: Record<string, string>;
+  attachments?: ContainerAttachmentMeta[];
+  skills?: string[];
+  mcp_tools?: string[];
+  gateway_url?: string | null;
+}
+
+export interface ContainerDetailMount {
+  source: string;
+  destination: string;
+  mode: string;
+  rw: boolean;
+}
+
+export interface ContainerDetail {
+  id: string;
+  name: string;
+  image: string;
+  status: string;
+  running: boolean;
+  started_at: string | null;
+  finished_at: string | null;
+  exit_code: number | null;
+  env: Record<string, string>;
+  mounts: ContainerDetailMount[];
+  network: string[];
+  labels: Record<string, string>;
+}
+
 export type ScanStatus = "Pass" | "Warning" | "Critical" | "NotScanned";
 
 export interface ScanIssue {

@@ -133,6 +133,17 @@ impl crate::traits::Channel for CliChannel {
                     eprintln!("[attachment: {} ({}, {})]", att.name, att.content_type, att.size);
                 }
             }
+            // Runner protocol variants — informational in CLI
+            OutboundChunk::Usage { input_tokens, output_tokens, total_tokens, model } => {
+                eprintln!("[usage: in={input_tokens} out={output_tokens} total={total_tokens} model={}]",
+                    model.as_deref().unwrap_or("unknown"));
+            }
+            OutboundChunk::ChatHistory(_) => {
+                // Chat history is consumed by the host, not displayed in CLI
+            }
+            OutboundChunk::GeneratedFiles(_) => {
+                // Generated files are consumed by the host, not displayed in CLI
+            }
         }
         Ok(())
     }

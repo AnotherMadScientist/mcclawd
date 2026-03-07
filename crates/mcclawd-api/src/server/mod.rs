@@ -20,3 +20,4 @@ pub mod tasks;
 pub mod webauthn_auth;
 pub mod workspace;
 pub mod ws;
+pub mod runner_build;

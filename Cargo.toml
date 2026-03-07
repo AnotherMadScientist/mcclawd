@@ -12,6 +12,7 @@ members = [
     "crates/mcclawd-channel-email",
     "crates/mcclawd-tasks",
     "crates/mcclawd-swarm",
+    "crates/mcclawd-runner",
     "crates/mcclawd-api",
 ]
 

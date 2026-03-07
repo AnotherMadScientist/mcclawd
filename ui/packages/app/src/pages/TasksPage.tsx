@@ -70,7 +70,6 @@ export function TasksPage() {
   }, [tasks]);
 
   const handleDeleteByTag = async (tag: string) => {
-    if (!window.confirm(`Delete all tasks tagged "${tag}"?`)) return;
     setDeletingTag(true);
     try {
       await api.tasks.deleteByTag(tag);

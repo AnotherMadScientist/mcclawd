@@ -23,11 +23,13 @@ use super::tasks;
 use super::webauthn_auth;
 use super::workspace;
 use super::ws;
+use super::runner_build;
 
 pub fn api_router(state: AppState) -> Router<AppState> {
     // Public routes (no auth required)
     let public = Router::new()
         .route("/api/health", get(health))
+        .route("/api/health/llm", get(llm_health))
         .route("/api/auth/login", post(auth::login))
         // WebAuthn endpoints (public — they ARE the auth flow)
         .route("/api/auth/status", get(webauthn_auth::auth_status))
@@ -63,12 +65,24 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             post(tasks::send_message),
         )
         .route(
+            "/api/tasks/{id}/container",
+            get(tasks::get_container_info),
+        )
+        .route(
             "/api/tasks/{id}/attachments",
             get(tasks::list_attachments).post(tasks::upload_attachments),
         )
         .route(
             "/api/tasks/{id}/attachments/{filename}",
             get(tasks::download_attachment),
+        )
+        .route(
+            "/api/tasks/{id}/files",
+            get(tasks::list_generated_files),
+        )
+        .route(
+            "/api/tasks/{id}/files/{filename}",
+            get(tasks::download_generated_file),
         )
         // Workspace
         .route("/api/workspace", get(workspace::list_files))
@@ -194,16 +208,22 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         )
         // Config reload
         .route("/api/config/reload", post(providers::reload_config))
-        // LLM health check (tiny API call to verify key works)
-        .route("/api/health/llm", get(llm_health))
         // System agent
         .route("/api/system-agent/chat", post(system_agent::chat))
         .route(
             "/api/system-agent/history",
             get(system_agent::history).delete(system_agent::clear_history),
         )
-        // Audio transcription (Whisper fallback for non-Chrome browsers)
+        // Voice transcription (ElevenLabs Speech-to-Text)
         .route("/api/transcribe", post(tasks::transcribe_audio))
+        // ElevenLabs signed URL (for voice assistant)
+        .route("/api/elevenlabs/signed-url", get(elevenlabs_signed_url))
+        // Docker management
+        .route("/api/docker/build-status", get(runner_build::get_build_status))
+        .route("/api/docker/build", post(runner_build::trigger_build))
+        .route("/api/docker/build/stream", get(runner_build::build_log_stream))
+        .route("/api/docker/containers", get(runner_build::list_containers))
+        .route("/api/docker/containers/{id}", get(runner_build::get_container).delete(runner_build::delete_container))
         // Apply JWT auth to all protected routes
         .route_layer(middleware::from_fn_with_state(state, auth::auth_middleware));
 
@@ -212,6 +232,76 @@ pub fn api_router(state: AppState) -> Router<AppState> {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+const ELEVENLABS_AGENT_ID: &str = "agent_2201kk3q9wj2ftv888ay99ymtt69";
+
+/// Get a short-lived signed URL for ElevenLabs Conversational AI.
+/// Keeps the agent private — browser never sees the API key.
+async fn elevenlabs_signed_url(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let api_key = {
+        let secrets = state.secrets.read().await;
+        match secrets.as_ref() {
+            Some(backend) => match backend.get("ELEVENLABS_API_KEY").await {
+                Ok(Some(key)) if !key.is_empty() => key,
+                _ => {
+                    return (
+                        StatusCode::OK,
+                        Json(serde_json::json!({ "ok": false, "error": "ELEVENLABS_API_KEY not set" })),
+                    );
+                }
+            },
+            None => {
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "ok": false, "error": "Vault locked" })),
+                );
+            }
+        }
+    };
+
+    let client = reqwest::Client::new();
+    let url = format!(
+        "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id={}",
+        ELEVENLABS_AGENT_ID
+    );
+    let res = client
+        .get(&url)
+        .header("xi-api-key", &api_key)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await;
+
+    match res {
+        Ok(r) if r.status().is_success() => {
+            let body: serde_json::Value = r.json().await.unwrap_or_default();
+            if let Some(signed_url) = body.get("signed_url").and_then(|v| v.as_str()) {
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "ok": true, "signed_url": signed_url })),
+                )
+            } else {
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "ok": false, "error": "No signed_url in response" })),
+                )
+            }
+        }
+        Ok(r) => {
+            let status = r.status().as_u16();
+            let body = r.text().await.unwrap_or_default();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "ok": false, "error": format!("ElevenLabs {status}: {body}") })),
+            )
+        }
+        Err(e) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": false, "error": format!("Network error: {e}") })),
+        ),
+    }
 }
 
 /// Check if the LLM is reachable by doing a tiny Anthropic API call (max_tokens=1).

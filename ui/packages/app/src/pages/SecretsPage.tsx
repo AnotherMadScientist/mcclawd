@@ -24,6 +24,7 @@ export function SecretsPage() {
   const { data: secrets = [] } = useQuery({
     queryKey: ["secrets"],
     queryFn: api.secrets.list,
+    refetchInterval: 5000,
     select: (data) =>
       [...data].sort((a, b) => a.name.localeCompare(b.name)),
   });

@@ -133,7 +133,326 @@ Keep responses short and action-oriented. Confirm what you did, don't explain wh
 }
 
 /// Run the system agent with streaming output.
+///
+/// Tries Docker-sandboxed execution first. Falls back to in-process host execution
+/// when Docker is unavailable (unless strict_sandbox is enabled).
 async fn run_system_agent(
+    state: AppState,
+    task_id: TaskId,
+    prompt: &str,
+    tx: tokio::sync::broadcast::Sender<OutboundChunk>,
+) {
+    let strict = state.config.read().await.sandbox.strict_sandbox;
+
+    // Wait for runner image if build is in progress (up to 5 min)
+    if !crate::server::runner_build::is_image_ready(&state.runner_build).await {
+        let _ = tx.send(OutboundChunk::StatusIndicator(ChannelStatus::Typing));
+        state.send_and_persist(
+            &task_id, &tx,
+            OutboundChunk::TextDelta("Waiting for runner image to build...".into()),
+        ).await;
+        if !crate::server::runner_build::wait_for_image_ready(
+            &state.runner_build,
+            std::time::Duration::from_secs(300),
+        ).await {
+            state.send_and_persist(&task_id, &tx, OutboundChunk::Error(
+                "Runner image not available. Check Docker page in Settings.".into(),
+            )).await;
+            state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
+            return;
+        }
+    }
+
+    // Try Docker-sandboxed execution first
+    if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
+        if orch.health_check().await {
+            run_system_agent_sandboxed(state, task_id, prompt, tx).await;
+            return;
+        }
+    }
+
+    // Docker unavailable — behavior depends on strict_sandbox
+    if strict {
+        state
+            .send_and_persist(
+                &task_id,
+                &tx,
+                OutboundChunk::UserMessage(prompt.to_string()),
+            )
+            .await;
+        let msg = "Docker required for system agent (strict sandbox mode). Start Docker or set strict_sandbox = false.".to_string();
+        tracing::error!(task_id = %task_id.0, "{msg}");
+        state
+            .send_and_persist(&task_id, &tx, OutboundChunk::Error(msg))
+            .await;
+        state
+            .send_and_persist(&task_id, &tx, OutboundChunk::Done)
+            .await;
+        return;
+    }
+
+    // Fall through to in-process host execution
+    tracing::info!("Docker unavailable, running system agent in-process");
+    run_system_agent_host(state, task_id, prompt, tx).await;
+}
+
+/// Ensure the system agent persistent container is running and return its handle.
+/// If already running, returns the existing handle. Otherwise creates a new persistent
+/// container with --server mode, starts a background output reader + forwarder,
+/// and stores the handle in AppState.
+pub async fn ensure_system_agent_container(
+    state: &AppState,
+) -> anyhow::Result<crate::sandbox::PersistentHandle> {
+    // Check if already running and healthy
+    {
+        let guard = state.system_agent.read().await;
+        if let Some(handle) = guard.as_ref() {
+            if handle.is_alive() {
+                tracing::debug!(
+                    container_id = %handle.container_id,
+                    "Reusing healthy system agent handle"
+                );
+                return Ok(handle.clone());
+            }
+            tracing::warn!(
+                container_id = %handle.container_id,
+                "System agent handle is dead — will recreate"
+            );
+        }
+    }
+    // Clear dead handle before recreating
+    *state.system_agent.write().await = None;
+
+    let config = state.config.read().await.clone();
+
+    // Get API key
+    let api_key = {
+        let secrets_guard = state.secrets.read().await;
+        match secrets_guard.as_ref() {
+            Some(backend) => backend
+                .get("ANTHROPIC_API_KEY")
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to read secrets: {e}"))?
+                .ok_or_else(|| anyhow::anyhow!("ANTHROPIC_API_KEY not found"))?,
+            None => anyhow::bail!("Secrets vault not unlocked"),
+        }
+    };
+
+    let mut secrets = std::collections::HashMap::new();
+    secrets.insert("ANTHROPIC_API_KEY".to_string(), api_key);
+
+    // Use McpPorter for correct Docker-internal gateway URL (http://agentgateway:3000).
+    // Falls back to container_gateway_url() if McpPorter unavailable.
+    let agent_env = if let Some(ref porter) = state.mcp_porter {
+        let all_skills = std::collections::HashMap::new();
+        match porter
+            .prepare_system_agent_environment(
+                &all_skills,
+                &config.mcp.servers,
+                &config,
+            )
+            .await
+        {
+            Ok(mut env) => {
+                env.image = "mcclawd-runner:latest".to_string();
+                // System agent gets all tools
+                env.allowed_tools = vec!["*".to_string()];
+                tracing::info!(
+                    gateway_url = %env.gateway_url,
+                    "McpPorter resolved system agent environment"
+                );
+                env
+            }
+            Err(e) => {
+                tracing::warn!("McpPorter failed for system agent, using fallback: {e}");
+                crate::sandbox::AgentEnvironment {
+                    image: "mcclawd-runner:latest".to_string(),
+                    network: config.sandbox.network.clone(),
+                    gateway_url: crate::sandbox::container::container_gateway_url(
+                        &config.mcp.agentgateway_url,
+                    ),
+                    allowed_tools: vec!["*".to_string()],
+                    skill_context: String::new(),
+                }
+            }
+        }
+    } else {
+        crate::sandbox::AgentEnvironment {
+            image: "mcclawd-runner:latest".to_string(),
+            network: config.sandbox.network.clone(),
+            gateway_url: crate::sandbox::container::container_gateway_url(
+                &config.mcp.agentgateway_url,
+            ),
+            allowed_tools: vec!["*".to_string()],
+            skill_context: String::new(),
+        }
+    };
+
+    let workspace_dir = config
+        .workspaces_dir()
+        .join("default")
+        .to_string_lossy()
+        .to_string();
+    let sandbox_cfg = mcclawd_core::skills::SandboxConfig {
+        workspace_dir: workspace_dir.clone(),
+        agentgateway_url: config.mcp.agentgateway_url.clone(),
+        memory_limit: config.sandbox.memory_limit,
+        cpu_limit: config.sandbox.cpu_limit,
+        network: config.sandbox.network.clone(),
+        pids_limit: config.sandbox.pids_limit,
+        ..Default::default()
+    };
+
+    let orch = crate::sandbox::SandboxOrchestrator::new()?;
+
+    let task_id = TaskId(SYSTEM_AGENT_TASK_ID.to_string());
+    let handle = orch
+        .create_persistent_runner_container(
+            &task_id,
+            &agent_env,
+            &workspace_dir,
+            &sandbox_cfg,
+            &secrets,
+            config.agent.max_turns,
+            Some("system"),
+            None,
+        )
+        .await?;
+
+    // Start background output reader → forwarder
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<OutboundChunk>(256);
+
+    let reader_cid = handle.container_id.clone();
+    tokio::spawn(async move {
+        let reader_orch = crate::sandbox::SandboxOrchestrator::new().unwrap();
+        if let Err(e) = reader_orch.stream_agent_output(&reader_cid, chunk_tx).await {
+            tracing::warn!(error = %e, "System agent output reader ended");
+        }
+    });
+
+    // Background forwarder: routes chunks to broadcast channel
+    let fwd_state = state.clone();
+    let fwd_task_id = task_id.clone();
+    tokio::spawn(async move {
+        while let Some(chunk) = chunk_rx.recv().await {
+            // Look up current broadcast channel (may change on reconnect)
+            let tx = {
+                let streams = fwd_state.task_streams.read().await;
+                streams.get(&fwd_task_id).cloned()
+            };
+            if let Some(tx) = tx {
+                match &chunk {
+                    OutboundChunk::Usage { .. } | OutboundChunk::GeneratedFiles(_) => {
+                        // System agent: consume silently (no usage tracking needed)
+                    }
+                    OutboundChunk::ChatHistory(json) => {
+                        // Persist chat history for multi-turn
+                        if let Ok(messages) =
+                            serde_json::from_str::<Vec<rig::completion::message::Message>>(json)
+                        {
+                            fwd_state.set_chat_history(&fwd_task_id, messages).await;
+                        }
+                    }
+                    _ => {
+                        fwd_state
+                            .send_and_persist(&fwd_task_id, &tx, chunk)
+                            .await;
+                    }
+                }
+            }
+        }
+        tracing::info!("System agent forwarder exiting");
+    });
+
+    // Brief delay for the runner to initialize in --server mode
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Store handle
+    *state.system_agent.write().await = Some(handle.clone());
+
+    // Persist to Postgres for reconnection on restart
+    {
+        let store = state.pg_store.clone();
+        let cid = handle.container_id.clone();
+        let wdir = workspace_dir.clone();
+        tokio::spawn(async move {
+            if let Err(e) = store
+                .save_persistent_container(&cid, "system-agent", "system", &wdir)
+                .await
+            {
+                tracing::warn!("Failed to persist system agent container record: {e}");
+            }
+        });
+    }
+
+    tracing::info!(
+        container_id = %handle.container_id,
+        "System agent persistent container ready"
+    );
+    Ok(handle)
+}
+
+/// Run the system agent inside a Docker sandbox container (persistent).
+/// The container stays running across messages — only created on first use.
+async fn run_system_agent_sandboxed(
+    state: AppState,
+    task_id: TaskId,
+    prompt: &str,
+    tx: tokio::sync::broadcast::Sender<OutboundChunk>,
+) {
+    // Persist user message
+    state
+        .send_and_persist(
+            &task_id,
+            &tx,
+            OutboundChunk::UserMessage(prompt.to_string()),
+        )
+        .await;
+    let _ = tx.send(OutboundChunk::StatusIndicator(ChannelStatus::Processing));
+
+    // Get or create persistent container
+    let handle = match ensure_system_agent_container(&state).await {
+        Ok(h) => h,
+        Err(e) => {
+            let msg = format!("Failed to start system agent container: {e}");
+            state
+                .send_and_persist(&task_id, &tx, OutboundChunk::Error(msg))
+                .await;
+            state
+                .send_and_persist(&task_id, &tx, OutboundChunk::Done)
+                .await;
+            return;
+        }
+    };
+
+    // Get chat history for multi-turn
+    let chat_history = state.get_chat_history(&task_id).await;
+    let history_json = if !chat_history.is_empty() {
+        serde_json::to_string(&chat_history).ok()
+    } else {
+        None
+    };
+
+    // Send message to persistent container via stdin
+    if let Err(e) = handle.send_chat(prompt, history_json.as_deref()).await {
+        let msg = format!("Failed to send message to system agent: {e}");
+        state
+            .send_and_persist(&task_id, &tx, OutboundChunk::Error(msg))
+            .await;
+        state
+            .send_and_persist(&task_id, &tx, OutboundChunk::Done)
+            .await;
+        // Container might be dead — clear handle so next message recreates it
+        *state.system_agent.write().await = None;
+        return;
+    }
+
+    // Response chunks are handled by the background forwarder (started in ensure_system_agent_container).
+    // No need to wait for container exit — it stays running!
+}
+
+/// Run the system agent in-process (host mode fallback).
+async fn run_system_agent_host(
     state: AppState,
     task_id: TaskId,
     prompt: &str,

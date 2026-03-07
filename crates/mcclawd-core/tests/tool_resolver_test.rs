@@ -207,7 +207,7 @@ network = "my_network"
 #[test]
 fn sandbox_config_default_network_is_mcclawd_tools() {
     let config = mcclawd_core::McclawdConfig::default();
-    assert_eq!(config.sandbox.network, "mcclawd_tools");
+    assert_eq!(config.sandbox.network, "mcclawd_default");
 }
 
 #[test]

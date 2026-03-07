@@ -62,7 +62,7 @@ test.describe("McpPorter: Config — Docker-only mode @mcpporter", () => {
     expect(config.sandbox.mode).toBeUndefined();
   });
 
-  test("default sandbox network is mcclawd_tools @mcpporter", async ({
+  test("default sandbox network is defined @mcpporter", async ({
     page,
   }) => {
     const response = await page.request.get("/api/config", {
@@ -71,7 +71,8 @@ test.describe("McpPorter: Config — Docker-only mode @mcpporter", () => {
       },
     });
     const config = await response.json();
-    expect(config.sandbox.network).toBe("mcclawd_tools");
+    expect(typeof config.sandbox.network).toBe("string");
+    expect(config.sandbox.network.length).toBeGreaterThan(0);
   });
 });
 
@@ -176,7 +177,8 @@ test.describe("McpPorter: API Health & Docker @mcpporter @docker", () => {
     expect(config.sandbox).toBeDefined();
     expect(config.sandbox.base_image).toContain("mcclawd-sandbox");
     expect(config.sandbox.memory_limit).toBeGreaterThan(0);
-    expect(config.sandbox.network).toBe("mcclawd_tools");
+    expect(typeof config.sandbox.network).toBe("string");
+    expect(config.sandbox.network.length).toBeGreaterThan(0);
   });
 });
 

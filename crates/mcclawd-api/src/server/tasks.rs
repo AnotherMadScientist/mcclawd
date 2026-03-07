@@ -146,8 +146,8 @@ pub async fn create_task(
 /// Run the Rig agent and stream output via broadcast channel.
 ///
 /// All execution runs inside Docker containers via the sandbox orchestrator.
-/// Falls back to in-process host execution only when Docker is unavailable
-/// (development convenience — not production).
+/// When `strict_sandbox` is true (default), tasks fail if Docker is unavailable.
+/// When false (dev mode only), falls back to in-process host execution.
 async fn run_agent(
     state: AppState,
     task_id: TaskId,
@@ -155,7 +155,9 @@ async fn run_agent(
     workspace_name: &str,
     tx: tokio::sync::broadcast::Sender<OutboundChunk>,
 ) {
-    // Try Docker-sandboxed execution first (production path)
+    let strict = state.config.read().await.sandbox.strict_sandbox;
+
+    // Always try Docker-sandboxed execution first
     if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
         if orch.health_check().await {
             run_agent_sandboxed(state, task_id, prompt, workspace_name, tx).await;
@@ -163,12 +165,37 @@ async fn run_agent(
         }
     }
 
-    // Fallback: host execution when Docker is unavailable (dev only)
-    tracing::warn!("Docker unavailable — falling back to host execution (dev mode)");
+    // Docker unavailable — behavior depends on strict_sandbox
+    if strict {
+        let msg = "Docker required (strict sandbox mode). Start Docker or set strict_sandbox = false in config.".to_string();
+        tracing::error!(task_id = %task_id.0, "{msg}");
+        state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
+        state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
+        let mut mgr = state.tasks.write().await;
+        mgr.fail_task(&task_id, msg.clone());
+        state.pg_update_status(&task_id, "Failed", Some(&msg)).await;
+        return;
+    }
+
+    // Non-strict fallback: host execution (dev only)
+    tracing::warn!("Docker unavailable — falling back to host execution (strict_sandbox=false)");
+    let store = state.pg_store.clone();
+    let tid = task_id.0.clone();
+    tokio::spawn(async move {
+        if let Err(e) = store.update_container_info(&tid, "", "host").await {
+            tracing::warn!("Failed to record host execution mode: {e}");
+        }
+    });
+
     run_agent_host(state, task_id, prompt, workspace_name, tx).await;
 }
 
-/// Run agent task inside a Docker sandbox container.
+/// Run agent task inside a Docker sandbox container using the JSONL runner protocol.
+///
+/// Uses persistent containers: the container stays running across messages.
+/// On first message, a new persistent container is created with --server mode.
+/// Follow-up messages reuse the existing container, sending prompts via stdin.
+/// The container is only cleaned up when the task is deleted.
 async fn run_agent_sandboxed(
     state: AppState,
     task_id: TaskId,
@@ -178,44 +205,110 @@ async fn run_agent_sandboxed(
 ) {
     use crate::sandbox::SandboxOrchestrator;
 
-    state.send_and_persist(&task_id, &tx, OutboundChunk::UserMessage(prompt.to_string())).await;
-    let _ = tx.send(OutboundChunk::TextDelta("Starting sandboxed agent...".to_string()));
+    // 1. Persist UserMessage
+    state
+        .send_and_persist(
+            &task_id,
+            &tx,
+            OutboundChunk::UserMessage(prompt.to_string()),
+        )
+        .await;
 
-    // Update status to Building
+    // 2. Update status to Running and notify frontend immediately.
+    //    The StatusIndicator is persisted so the WS client sees it on history
+    //    replay (the WS often connects AFTER the task is already spawned).
     {
         let mut mgr = state.tasks.write().await;
         mgr.running(&task_id);
     }
+    state.pg_update_status(&task_id, "Running", None).await;
+    state
+        .send_and_persist(
+            &task_id,
+            &tx,
+            OutboundChunk::StatusIndicator(ChannelStatus::Processing),
+        )
+        .await;
+
+    // 3. Check if a persistent container already exists for this task
+    let existing_handle = {
+        let containers = state.task_containers.read().await;
+        containers.get(&task_id).cloned()
+    };
+
+    if let Some(handle) = existing_handle {
+        // Reuse existing container — send message via stdin
+        tracing::info!(
+            task_id = %task_id,
+            container_id = %handle.container_id,
+            "Reusing persistent container for follow-up message"
+        );
+
+        let chat_history = state.get_chat_history(&task_id).await;
+        let history_json = if !chat_history.is_empty() {
+            serde_json::to_string(&chat_history).ok()
+        } else {
+            None
+        };
+
+        if let Err(e) = handle.send_chat(prompt, history_json.as_deref()).await {
+            let msg = format!("Failed to send message to container: {e}");
+            state
+                .send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone()))
+                .await;
+            state
+                .send_and_persist(&task_id, &tx, OutboundChunk::Done)
+                .await;
+            // Container might be dead — remove handle so next message recreates it
+            state.task_containers.write().await.remove(&task_id);
+            let mut mgr = state.tasks.write().await;
+            mgr.fail_task(&task_id, msg.clone());
+            state
+                .pg_update_status(&task_id, "Failed", Some(&msg))
+                .await;
+        }
+        // Response chunks are handled by the background forwarder (started when container was created).
+        return;
+    }
+
+    // 4. No existing container — create a new persistent one
+    let _ = tx.send(OutboundChunk::TextDelta(
+        "Starting sandboxed agent...".to_string(),
+    ));
     state.pg_update_status(&task_id, "Building", None).await;
-    let _ = tx.send(OutboundChunk::StatusIndicator(ChannelStatus::Processing));
 
     let config = state.config.read().await.clone();
 
-    // Get sandbox orchestrator
     let orchestrator = match SandboxOrchestrator::new() {
         Ok(o) => o,
         Err(e) => {
             let msg = format!("Docker unavailable for sandbox: {e}");
-            state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
-            state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
+            state
+                .send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone()))
+                .await;
+            state
+                .send_and_persist(&task_id, &tx, OutboundChunk::Done)
+                .await;
             let mut mgr = state.tasks.write().await;
             mgr.fail_task(&task_id, msg.clone());
-            state.pg_update_status(&task_id, "Failed", Some(&msg)).await;
+            state
+                .pg_update_status(&task_id, "Failed", Some(&msg))
+                .await;
             return;
         }
     };
 
-    // Build sandbox config from McclawdConfig
+    // Build sandbox config + secrets map
     let sandbox_cfg = mcclawd_core::skills::SandboxConfig {
         workspace_dir: config.workspaces_dir().to_string_lossy().to_string(),
         agentgateway_url: config.mcp.agentgateway_url.clone(),
         memory_limit: config.sandbox.memory_limit,
         cpu_limit: config.sandbox.cpu_limit,
         network: config.sandbox.network.clone(),
+        pids_limit: config.sandbox.pids_limit,
         ..Default::default()
     };
 
-    // Collect secrets for container
     let mut secrets_map = std::collections::HashMap::new();
     if let Some(backend) = state.secrets.read().await.as_ref() {
         if let Ok(Some(key)) = backend.get("ANTHROPIC_API_KEY").await {
@@ -223,60 +316,294 @@ async fn run_agent_sandboxed(
         }
     }
 
-    // Stream logs to broadcast channel
-    let (log_tx, mut log_rx) = tokio::sync::mpsc::channel::<String>(256);
-    let tx_clone = tx.clone();
-    let task_id_clone = task_id.clone();
-    let state_clone = state.clone();
-    tokio::spawn(async move {
-        while let Some(line) = log_rx.recv().await {
-            state_clone.send_and_persist(
-                &task_id_clone,
-                &tx_clone,
-                OutboundChunk::TextDelta(line),
-            ).await;
+    // Use McpPorter to get correct Docker-internal gateway URL (http://agentgateway:3000),
+    // ensure network exists, and resolve installed skills → MCP tool filtering.
+    // Falls back to manual construction with container_gateway_url() if McpPorter unavailable.
+    let agent_env = if let Some(ref porter) = state.mcp_porter {
+        // TODO: Load installed skills from DB/disk for full skill→MCP tool resolution + caching.
+        // For now, empty skills still gives us correct gateway_url (http://agentgateway:3000)
+        // and network setup. All tools are allowed via "*".
+        let all_skills = std::collections::HashMap::new();
+        match porter
+            .prepare_system_agent_environment(
+                &all_skills,
+                &config.mcp.servers,
+                &config,
+            )
+            .await
+        {
+            Ok(mut env) => {
+                // Override image: McpPorter returns mcclawd-agent:{hash}, but we need the runner
+                env.image = "mcclawd-runner:latest".to_string();
+                tracing::info!(
+                    gateway_url = %env.gateway_url,
+                    tools = ?env.allowed_tools,
+                    skill_context_len = env.skill_context.len(),
+                    "McpPorter resolved agent environment for task"
+                );
+                env
+            }
+            Err(e) => {
+                tracing::warn!("McpPorter failed, using fallback: {e}");
+                crate::sandbox::container::AgentEnvironment {
+                    image: "mcclawd-runner:latest".to_string(),
+                    network: config.sandbox.network.clone(),
+                    gateway_url: crate::sandbox::container::container_gateway_url(
+                        &config.mcp.agentgateway_url,
+                    ),
+                    allowed_tools: vec!["*".to_string()],
+                    skill_context: String::new(),
+                }
+            }
         }
-    });
+    } else {
+        crate::sandbox::container::AgentEnvironment {
+            image: "mcclawd-runner:latest".to_string(),
+            network: config.sandbox.network.clone(),
+            gateway_url: crate::sandbox::container::container_gateway_url(
+                &config.mcp.agentgateway_url,
+            ),
+            allowed_tools: vec!["*".to_string()],
+            skill_context: String::new(),
+        }
+    };
 
-    // Run the agent task in Docker
-    let _ = tx.send(OutboundChunk::TextDelta("Building sandbox image...".to_string()));
-    state.pg_update_status(&task_id, "Running", None).await;
+    // Check for task attachments directory
+    let att_dir = config
+        .data_dir
+        .join("tasks")
+        .join(&task_id.0)
+        .join("attachments");
+    let attachments_dir = if att_dir.is_dir() {
+        Some(att_dir.to_string_lossy().to_string())
+    } else {
+        None
+    };
 
-    match orchestrator
-        .run_agent_task(
+    let _ = tx.send(OutboundChunk::TextDelta(
+        "Creating runner container...".to_string(),
+    ));
+
+    let handle = match orchestrator
+        .create_persistent_runner_container(
             &task_id,
-            &config.sandbox.base_image,
-            prompt,
+            &agent_env,
+            &sandbox_cfg.workspace_dir,
             &sandbox_cfg,
             &secrets_map,
-            log_tx,
+            config.agent.max_turns,
+            None,
+            attachments_dir.as_deref(),
         )
         .await
     {
-        Ok(exit_code) => {
-            if exit_code == 0 {
-                state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
-                let mut mgr = state.tasks.write().await;
-                mgr.complete_task(&task_id);
-                state.pg_update_status(&task_id, "Completed", None).await;
-            } else {
-                let msg = format!("Sandbox agent exited with code {exit_code}");
-                state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
-                state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
-                let mut mgr = state.tasks.write().await;
-                mgr.fail_task(&task_id, msg.clone());
-                state.pg_update_status(&task_id, "Failed", Some(&msg)).await;
-            }
-        }
+        Ok(h) => h,
         Err(e) => {
-            let msg = format!("Sandbox execution failed: {e}");
-            state.send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone())).await;
-            state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
+            let msg = format!("Failed to create runner container: {e}");
+            state
+                .send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone()))
+                .await;
+            state
+                .send_and_persist(&task_id, &tx, OutboundChunk::Done)
+                .await;
             let mut mgr = state.tasks.write().await;
             mgr.fail_task(&task_id, msg.clone());
-            state.pg_update_status(&task_id, "Failed", Some(&msg)).await;
+            state
+                .pg_update_status(&task_id, "Failed", Some(&msg))
+                .await;
+            return;
         }
+    };
+
+    tracing::info!(
+        task_id = %task_id,
+        container_id = %handle.container_id,
+        "Persistent runner container started for agent task"
+    );
+
+    // Persist container tracking info to Postgres
+    {
+        let store = state.pg_store.clone();
+        let tid = task_id.0.clone();
+        let cid = handle.container_id.clone();
+        let wdir = sandbox_cfg.workspace_dir.clone();
+        tokio::spawn(async move {
+            if let Err(e) = store.update_container_info(&tid, &cid, "docker-runner").await {
+                tracing::warn!("Failed to persist container info: {e}");
+            }
+            if let Err(e) = store.save_persistent_container(&cid, &tid, "task", &wdir).await {
+                tracing::warn!("Failed to persist container record: {e}");
+            }
+        });
     }
+
+    // Start background output reader → forwarder (lives as long as the container)
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<OutboundChunk>(256);
+
+    let reader_cid = handle.container_id.clone();
+    tokio::spawn(async move {
+        if let Ok(reader_orch) = SandboxOrchestrator::new() {
+            if let Err(e) = reader_orch.stream_agent_output(&reader_cid, chunk_tx).await {
+                tracing::warn!(error = %e, "Agent output streaming ended with error");
+            }
+        }
+    });
+
+    // Spawn forwarder: receives parsed chunks, handles Usage/ChatHistory specially,
+    // broadcasts + persists all other chunks to WebSocket clients.
+    let fwd_state = state.clone();
+    let fwd_task_id = task_id.clone();
+    let fwd_config = config.clone();
+    let fwd_prompt = prompt.to_string();
+    tokio::spawn(async move {
+        while let Some(chunk) = chunk_rx.recv().await {
+            // Look up current broadcast channel (may change on WS reconnect)
+            let fwd_tx = {
+                let streams = fwd_state.task_streams.read().await;
+                streams.get(&fwd_task_id).cloned()
+            };
+            let Some(fwd_tx) = fwd_tx else { continue };
+
+            match chunk {
+                // Usage: extract and record, do NOT broadcast to WS
+                OutboundChunk::Usage {
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                    model,
+                } => {
+                    let model_name =
+                        model.unwrap_or_else(|| fwd_config.agent.model.clone());
+                    let prompt_preview: String = fwd_prompt.chars().take(50).collect();
+                    let cost = mcclawd_core::providers::estimate_cost_usd(
+                        &model_name,
+                        input_tokens,
+                        output_tokens,
+                    );
+                    {
+                        let pool = fwd_state.provider_pool.read().await;
+                        pool.record_usage_detailed(
+                            "anthropic",
+                            total_tokens,
+                            input_tokens,
+                            output_tokens,
+                            cost,
+                            Some((&fwd_task_id.0, &prompt_preview, &model_name)),
+                        );
+                    }
+                    tracing::info!(
+                        task_id = %fwd_task_id.0,
+                        model = %model_name,
+                        input_tokens, output_tokens, cost_usd = cost,
+                        "Runner usage recorded"
+                    );
+                    // Persist to database
+                    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                    let model_entry = mcclawd_core::providers::ModelUsageEntry {
+                        model: model_name.clone(),
+                        input_tokens,
+                        output_tokens,
+                        total_tokens,
+                        estimated_cost_usd: cost,
+                        request_count: 1,
+                    };
+                    let task_entry = mcclawd_core::providers::TaskUsageEntry {
+                        task_id: fwd_task_id.0.clone(),
+                        prompt_preview,
+                        model: model_name,
+                        total_tokens,
+                        estimated_cost_usd: cost,
+                    };
+                    let store = fwd_state.pg_store.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = store
+                            .upsert_daily_usage("admin", &today, cost, total_tokens)
+                            .await
+                        {
+                            tracing::warn!("Failed to persist daily usage: {e}");
+                        }
+                        if let Err(e) =
+                            store.upsert_model_usage("admin", &model_entry).await
+                        {
+                            tracing::warn!("Failed to persist model usage: {e}");
+                        }
+                        if let Err(e) =
+                            store.insert_task_usage("admin", &task_entry).await
+                        {
+                            tracing::warn!("Failed to persist task usage: {e}");
+                        }
+                    });
+                }
+                // ChatHistory: deserialize and persist for multi-turn, do NOT broadcast
+                OutboundChunk::ChatHistory(json) => {
+                    match serde_json::from_str::<Vec<rig::completion::message::Message>>(
+                        &json,
+                    ) {
+                        Ok(messages) => {
+                            tracing::info!(
+                                task_id = %fwd_task_id.0,
+                                turns = messages.len(),
+                                "Runner chat history received"
+                            );
+                            fwd_state.set_chat_history(&fwd_task_id, messages).await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %fwd_task_id.0,
+                                error = %e,
+                                "Failed to deserialize runner chat history"
+                            );
+                        }
+                    }
+                }
+                // All other chunks: broadcast + persist as normal
+                other => {
+                    fwd_state
+                        .send_and_persist(&fwd_task_id, &fwd_tx, other)
+                        .await;
+                }
+            }
+        }
+        tracing::info!(task_id = %fwd_task_id.0, "Task forwarder exiting");
+    });
+
+    // Store the persistent handle for future messages
+    state
+        .task_containers
+        .write()
+        .await
+        .insert(task_id.clone(), handle.clone());
+
+    // Send the first message to the container
+    let chat_history = state.get_chat_history(&task_id).await;
+    let history_json = if !chat_history.is_empty() {
+        tracing::info!(task_id = %task_id.0, turns = chat_history.len(), "Resuming with conversation history");
+        serde_json::to_string(&chat_history).ok()
+    } else {
+        None
+    };
+
+    if let Err(e) = handle
+        .send_chat(prompt, history_json.as_deref())
+        .await
+    {
+        let msg = format!("Failed to send initial message to container: {e}");
+        state
+            .send_and_persist(&task_id, &tx, OutboundChunk::Error(msg.clone()))
+            .await;
+        state
+            .send_and_persist(&task_id, &tx, OutboundChunk::Done)
+            .await;
+        state.task_containers.write().await.remove(&task_id);
+        let mut mgr = state.tasks.write().await;
+        mgr.fail_task(&task_id, msg.clone());
+        state
+            .pg_update_status(&task_id, "Failed", Some(&msg))
+            .await;
+    }
+
+    // Response chunks are handled by the background forwarder.
+    // The container stays running for follow-up messages!
 }
 
 /// Run agent in-process on the host (original behavior).
@@ -577,12 +904,30 @@ pub async fn get_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<TaskResponse>, StatusCode> {
-    let mgr = state.tasks.read().await;
-    let task_id = TaskId(id);
-    match mgr.get_task(&task_id) {
-        Some(task) => Ok(Json(TaskResponse::from(task))),
-        None => Err(StatusCode::NOT_FOUND),
+    let task_id = TaskId(id.clone());
+
+    // Try in-memory first
+    {
+        let mgr = state.tasks.read().await;
+        if let Some(task) = mgr.get_task(&task_id) {
+            return Ok(Json(TaskResponse::from(task)));
+        }
     }
+
+    // Fall back to Postgres (handles cargo-watch restarts where hydration raced)
+    if let Ok(Some((_, prompt, status, error_message, _tags))) =
+        state.pg_store.get_task(&id).await
+    {
+        let task_status =
+            crate::commands::serve::row_to_status(&status, error_message.as_deref());
+        let mut mgr = state.tasks.write().await;
+        mgr.restore_task(task_id.clone(), prompt, task_status);
+        if let Some(task) = mgr.get_task(&task_id) {
+            return Ok(Json(TaskResponse::from(task)));
+        }
+    }
+
+    Err(StatusCode::NOT_FOUND)
 }
 
 #[derive(Debug, Deserialize)]
@@ -765,6 +1110,22 @@ pub async fn delete_all_tasks(
         state.task_streams.write().await.remove(id);
         state.task_chat_history.write().await.remove(id);
         state.task_events.write().await.remove(id);
+
+        // Shutdown and cleanup persistent container if one exists (BUG-030)
+        let handle = state.task_containers.write().await.remove(id);
+        if let Some(handle) = handle {
+            let _ = handle.shutdown().await;
+            let cid = handle.container_id.clone();
+            let store = state.pg_store.clone();
+            tokio::spawn(async move {
+                if let Err(e) = store.delete_persistent_container(&cid).await {
+                    tracing::warn!("Failed to delete container record: {e}");
+                }
+                if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
+                    let _ = orch.cleanup_container(&cid).await;
+                }
+            });
+        }
     }
 
     Json(serde_json::json!({ "deleted": count }))
@@ -793,6 +1154,25 @@ pub async fn delete_task(
 
     // Also delete from postgres (cascades to events + chat history)
     state.pg_delete_task(&task_id).await;
+
+    // Shutdown and cleanup persistent container if one exists
+    {
+        let mut containers = state.task_containers.write().await;
+        if let Some(handle) = containers.remove(&task_id) {
+            let _ = handle.shutdown().await;
+            // Cleanup container + delete DB record in background
+            let cid = handle.container_id.clone();
+            let store = state.pg_store.clone();
+            tokio::spawn(async move {
+                if let Err(e) = store.delete_persistent_container(&cid).await {
+                    tracing::warn!("Failed to delete container record: {e}");
+                }
+                if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
+                    let _ = orch.cleanup_container(&cid).await;
+                }
+            });
+        }
+    }
 
     // Clean up broadcast channel
     state.task_streams.write().await.remove(&task_id);
@@ -972,77 +1352,212 @@ pub async fn attachment_paths(state: &AppState, task_id: &str) -> Vec<PathBuf> {
     paths
 }
 
-/// POST /api/transcribe — accept audio blob, transcribe via OpenAI Whisper API.
-/// Falls back to error if no OPENAI_API_KEY is available.
+// ── Generated Files (container output) ──────────────────────────────────────
+
+/// Resolve the output files directory for a given task.
+async fn output_files_dir(state: &AppState, task_id: &str) -> PathBuf {
+    let config = state.config.read().await;
+    config.data_dir.join("tasks").join(task_id).join("output")
+}
+
+/// GET /api/tasks/{id}/files — list all generated files for a task
+pub async fn list_generated_files(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<AttachmentMeta>>, StatusCode> {
+    let dir = output_files_dir(&state, &id).await;
+    if !dir.exists() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let mut entries = tokio::fs::read_dir(&dir).await.map_err(|e| {
+        tracing::error!(error = %e, "Failed to read output files dir");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let mut results = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if let Ok(meta) = entry.metadata().await {
+            if meta.is_file() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let content_type = mime_guess::from_path(&name)
+                    .first_or_octet_stream()
+                    .to_string();
+                results.push(AttachmentMeta {
+                    url: format!("/api/tasks/{id}/files/{name}"),
+                    name,
+                    size: meta.len(),
+                    content_type,
+                });
+            }
+        }
+    }
+
+    Ok(Json(results))
+}
+
+/// GET /api/tasks/{id}/files/{filename} — download/serve a single generated file
+pub async fn download_generated_file(
+    State(state): State<AppState>,
+    Path((id, filename)): Path<(String, String)>,
+) -> Result<Response<Body>, StatusCode> {
+    let safe_name = sanitize_filename(&filename);
+    if safe_name.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let dir = output_files_dir(&state, &id).await;
+    let file_path = dir.join(&safe_name);
+
+    // Security: ensure the resolved path is within the output dir
+    let canonical_dir = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+    if let Ok(canonical_file) = file_path.canonicalize() {
+        if !canonical_file.starts_with(&canonical_dir) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+
+    let file = tokio::fs::File::open(&file_path).await.map_err(|_| StatusCode::NOT_FOUND)?;
+    let stream = ReaderStream::new(file);
+
+    let content_type = mime_guess::from_path(&safe_name)
+        .first_or_octet_stream()
+        .to_string();
+
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("inline; filename=\"{safe_name}\""),
+        )
+        .body(Body::from_stream(stream))
+        .unwrap())
+}
+
+/// Response for GET /api/tasks/{id}/container
+#[derive(Debug, Serialize)]
+pub struct ContainerInfoResponse {
+    pub task_id: String,
+    pub container_id: Option<String>,
+    pub execution_mode: String,
+    pub base_image: String,
+    pub network: String,
+    pub strict_sandbox: bool,
+    pub pids_limit: Option<i64>,
+    pub memory_limit: Option<i64>,
+}
+
+/// GET /api/tasks/{id}/container — get container isolation info for a task.
+///
+/// Container metadata persists in Postgres even after the container is removed.
+/// History and artifacts are always persisted independently of container lifecycle.
+/// POST /api/transcribe — speech-to-text via ElevenLabs STT API
 pub async fn transcribe_audio(
     State(state): State<AppState>,
     mut multipart: Multipart,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Extract audio field
-    let mut audio_bytes: Option<Vec<u8>> = None;
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // 1. Extract audio file from multipart
+    let mut audio_data: Option<Vec<u8>> = None;
     while let Ok(Some(field)) = multipart.next_field().await {
         if field.name() == Some("audio") {
-            audio_bytes = Some(
-                field
-                    .bytes()
-                    .await
-                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("read error: {e}")))?
-                    .to_vec(),
-            );
+            audio_data = Some(field.bytes().await.map_err(|e| {
+                tracing::error!(error = %e, "Failed to read audio field");
+                StatusCode::BAD_REQUEST
+            })?.to_vec());
+            break;
         }
     }
-    let audio = audio_bytes.ok_or((StatusCode::BAD_REQUEST, "missing audio field".into()))?;
-    if audio.len() < 1000 {
-        return Err((StatusCode::BAD_REQUEST, "audio too short".into()));
-    }
+    let audio_bytes = audio_data.ok_or(StatusCode::BAD_REQUEST)?;
 
-    // Try OPENAI_API_KEY from vault, then env
-    let openai_key: Option<String> = {
-        let guard = state.secrets.read().await;
-        match guard.as_ref() {
-            Some(b) => b.get("OPENAI_API_KEY").await.ok().flatten(),
-            None => None,
+    // 2. Get ElevenLabs API key from vault
+    let api_key = {
+        let secrets = state.secrets.read().await;
+        match secrets.as_ref() {
+            Some(backend) => match backend.get("ELEVENLABS_API_KEY").await {
+                Ok(Some(key)) if !key.is_empty() => key,
+                _ => {
+                    return Ok(Json(serde_json::json!({
+                        "error": "ELEVENLABS_API_KEY not set"
+                    })));
+                }
+            },
+            None => {
+                return Ok(Json(serde_json::json!({ "error": "Vault locked" })));
+            }
+        }
+    };
+
+    // 3. Call ElevenLabs Speech-to-Text API
+    let client = reqwest::Client::new();
+    let part = reqwest::multipart::Part::bytes(audio_bytes)
+        .file_name("audio.webm")
+        .mime_str("application/octet-stream")
+        .unwrap();
+    let form = reqwest::multipart::Form::new()
+        .part("file", part)
+        .text("model_id", "scribe_v2");
+
+    let res = client
+        .post("https://api.elevenlabs.io/v1/speech-to-text")
+        .header("xi-api-key", &api_key)
+        .multipart(form)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await;
+
+    match res {
+        Ok(r) if r.status().is_success() => {
+            let body: serde_json::Value = r.json().await.unwrap_or_default();
+            let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            Ok(Json(serde_json::json!({ "text": text })))
+        }
+        Ok(r) => {
+            let status = r.status().as_u16();
+            let body = r.text().await.unwrap_or_default();
+            tracing::error!(status, body = %body, "ElevenLabs STT failed");
+            Ok(Json(serde_json::json!({ "error": format!("ElevenLabs {status}: {body}") })))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "ElevenLabs STT network error");
+            Ok(Json(serde_json::json!({ "error": format!("Network error: {e}") })))
         }
     }
-    .or_else(|| std::env::var("OPENAI_API_KEY").ok());
-
-    if let Some(key) = openai_key {
-        // Call OpenAI Whisper API
-        let client = reqwest::Client::new();
-        let part = reqwest::multipart::Part::bytes(audio)
-            .file_name("recording.webm")
-            .mime_str("audio/webm")
-            .unwrap();
-        let form = reqwest::multipart::Form::new()
-            .text("model", "whisper-1")
-            .text("response_format", "json")
-            .part("file", part);
-
-        let resp = client
-            .post("https://api.openai.com/v1/audio/transcriptions")
-            .bearer_auth(&key)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("whisper request failed: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err((StatusCode::BAD_GATEWAY, format!("whisper {status}: {body}")));
-        }
-
-        let json: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("whisper parse error: {e}")))?;
-
-        let text = json["text"].as_str().unwrap_or("").to_string();
-        return Ok(Json(serde_json::json!({ "text": text })));
-    }
-
-    Err((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "No OPENAI_API_KEY configured. Add it in Settings > Secrets for voice transcription.".into(),
-    ))
 }
+
+pub async fn get_container_info(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ContainerInfoResponse>, StatusCode> {
+    // Verify task exists
+    let task_id = TaskId(id.clone());
+    {
+        let mgr = state.tasks.read().await;
+        if mgr.get_task(&task_id).is_none() {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    }
+
+    // Try to load container info from Postgres
+    let (container_id, execution_mode) = match state
+        .pg_store
+        .get_container_info(&id)
+        .await
+    {
+        Ok(Some((cid, mode))) => (Some(cid), mode),
+        Ok(None) => (None, "docker".to_string()),
+        Err(_) => (None, "docker".to_string()),
+    };
+
+    let config = state.config.read().await;
+    Ok(Json(ContainerInfoResponse {
+        task_id: id,
+        container_id,
+        execution_mode,
+        base_image: config.sandbox.base_image.clone(),
+        network: config.sandbox.network.clone(),
+        strict_sandbox: config.sandbox.strict_sandbox,
+        pids_limit: config.sandbox.pids_limit,
+        memory_limit: config.sandbox.memory_limit,
+    }))
+}
+

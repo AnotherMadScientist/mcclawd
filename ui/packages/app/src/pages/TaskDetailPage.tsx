@@ -229,6 +229,10 @@ export function TaskDetailPage() {
                 onTranscript={handleFollowUpTranscript}
                 onInterim={handleFollowUpInterim}
                 onStart={handleMicStart}
+                onError={(msg) => {
+                  console.warn("[Mic]", msg);
+                  handleFollowUpInterim(`[Mic error: ${msg}]`);
+                }}
                 disabled={sending}
                 size="sm"
               />

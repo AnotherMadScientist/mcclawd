@@ -91,6 +91,8 @@ test.describe("Skills Page", () => {
     await page.waitForLoadState("networkidle").catch(() => {});
     const createBtn = page.getByRole("button", { name: "Create" }).first();
     await expect(createBtn).toBeVisible({ timeout: 5000 });
+    // Wait for catalog rendering to settle before clicking
+    await page.waitForTimeout(500);
     await createBtn.click();
 
     // A dialog should appear — check for the create skill dialog
@@ -208,10 +210,18 @@ test.describe("Skills Page", () => {
   });
 
   test("skill card click opens detail view", async ({ page }) => {
-    // NOTE: The Skill Detail panel does not use role=dialog or role=complementary.
-    // It appears to be a custom overlay that lacks a standard ARIA landmark role.
-    // Skipping until the SkillDetailDialog gains a role=dialog or data-testid="skill-detail".
-    test.skip(true, "Skill detail panel lacks role=dialog/complementary; needs ARIA role or data-testid added to component");
+    // Wait for skill cards to load (async catalog fetch)
+    const skillCards = page.locator("div[role='button']").filter({ hasText: /.+/ });
+    try {
+      await expect(skillCards.first()).toBeVisible({ timeout: 10_000 });
+    } catch {
+      test.skip(true, "No skill cards loaded in browse grid");
+      return;
+    }
+    await skillCards.first().click();
+    // Skill detail panel should open with role=dialog
+    const detail = page.locator("[data-testid='skill-detail']");
+    await expect(detail).toBeVisible({ timeout: 5000 });
   });
 
   test("installed skills sidebar shows section", async ({ page }) => {

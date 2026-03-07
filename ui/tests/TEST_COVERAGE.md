@@ -1,6 +1,6 @@
 # McClawd E2E Test Coverage Audit
 
-> Last updated: 2026-03-06 | Total tests: 221 | Skipped: 7 | Console monitoring: 12/13 files | Flaky: 3 (parallel race)
+> Last updated: 2026-03-07 | Total tests: 251 | Skipped: 10 | Console monitoring: 12/13 files | Flaky: 0
 
 ## Summary
 

@@ -12,6 +12,7 @@ import { SkillsPage } from "./pages/SkillsPage";
 import { McpServersPage } from "./pages/McpServersPage";
 import { SecretsPage } from "./pages/SecretsPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { DockerPage } from "./pages/DockerPage";
 
 const queryClient = new QueryClient();
 
@@ -32,6 +33,7 @@ export default function App() {
               <Route path="config/mcp" element={<McpServersPage />} />
               <Route path="config/secrets" element={<SecretsPage />} />
               <Route path="config/settings" element={<SettingsPage />} />
+              <Route path="config/docker" element={<DockerPage />} />
             </Route>
           </Routes>
         </BrowserRouter>

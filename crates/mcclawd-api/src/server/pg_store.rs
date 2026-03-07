@@ -31,7 +31,7 @@ impl PgTaskStore {
     // Tasks
     // -----------------------------------------------------------------------
 
-    /// Insert a new task (upsert) with user_id and tags.
+    /// Insert a new task (upsert) with user_id, tags, and optional container tracking.
     pub async fn save_task(
         &self,
         id: &str,
@@ -55,6 +55,41 @@ impl PgTaskStore {
         .await
         .map_err(pg_err)?;
         Ok(())
+    }
+
+    /// Update the container_id and execution_mode for a task.
+    pub async fn update_container_info(
+        &self,
+        id: &str,
+        container_id: &str,
+        execution_mode: &str,
+    ) -> Result<(), McclawdError> {
+        sqlx::query(
+            "UPDATE tasks SET container_id = $2, execution_mode = $3, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(id)
+        .bind(container_id)
+        .bind(execution_mode)
+        .execute(&self.pool)
+        .await
+        .map_err(pg_err)?;
+        Ok(())
+    }
+
+    /// Get container tracking info (container_id, execution_mode) for a task.
+    pub async fn get_container_info(
+        &self,
+        id: &str,
+    ) -> Result<Option<(String, String)>, McclawdError> {
+        let row = sqlx::query_as::<_, (Option<String>, String)>(
+            "SELECT container_id, execution_mode FROM tasks WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(pg_err)?;
+
+        Ok(row.map(|(cid, mode)| (cid.unwrap_or_default(), mode)))
     }
 
     /// Update task status (and optional error message).
@@ -122,6 +157,22 @@ impl PgTaskStore {
                 .map_err(pg_err)?
         };
         Ok(result.rows_affected())
+    }
+
+    /// Get a single task by ID (for lazy hydration on cache miss).
+    /// Returns (id, prompt, status, error_message, tags) or None.
+    pub async fn get_task(
+        &self,
+        id: &str,
+    ) -> Result<Option<(String, String, String, Option<String>, Vec<String>)>, McclawdError> {
+        let row = sqlx::query_as::<_, (String, String, String, Option<String>, Vec<String>)>(
+            "SELECT id, prompt, status, error_message, COALESCE(tags, '{}') FROM tasks WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(pg_err)?;
+        Ok(row)
     }
 
     /// Load all tasks from the database (for startup hydration).
@@ -771,6 +822,87 @@ impl PgTaskStore {
         .await
         .map_err(pg_err)?;
         Ok(rows)
+    }
+    // -----------------------------------------------------------------------
+    // Persistent containers (survive server restarts)
+    // -----------------------------------------------------------------------
+
+    /// Record a persistent container so we can reconnect on restart.
+    pub async fn save_persistent_container(
+        &self,
+        container_id: &str,
+        task_id: &str,
+        agent_type: &str,
+        workspace_dir: &str,
+    ) -> Result<(), McclawdError> {
+        sqlx::query(
+            "INSERT INTO persistent_containers (container_id, task_id, agent_type, workspace_dir)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (container_id) DO UPDATE SET last_seen_at = NOW()",
+        )
+        .bind(container_id)
+        .bind(task_id)
+        .bind(agent_type)
+        .bind(workspace_dir)
+        .execute(&self.pool)
+        .await
+        .map_err(pg_err)?;
+        Ok(())
+    }
+
+    /// Remove a persistent container record (on cleanup/delete).
+    pub async fn delete_persistent_container(
+        &self,
+        container_id: &str,
+    ) -> Result<(), McclawdError> {
+        sqlx::query("DELETE FROM persistent_containers WHERE container_id = $1")
+            .bind(container_id)
+            .execute(&self.pool)
+            .await
+            .map_err(pg_err)?;
+        Ok(())
+    }
+
+    /// Remove all persistent container records for a task.
+    pub async fn delete_persistent_containers_by_task(
+        &self,
+        task_id: &str,
+    ) -> Result<(), McclawdError> {
+        sqlx::query("DELETE FROM persistent_containers WHERE task_id = $1")
+            .bind(task_id)
+            .execute(&self.pool)
+            .await
+            .map_err(pg_err)?;
+        Ok(())
+    }
+
+    /// Load all persistent container records (for startup reconnection).
+    /// Returns (container_id, task_id, agent_type, workspace_dir).
+    pub async fn load_persistent_containers(
+        &self,
+    ) -> Result<Vec<(String, String, String, String)>, McclawdError> {
+        let rows = sqlx::query_as::<_, (String, String, String, String)>(
+            "SELECT container_id, task_id, agent_type, workspace_dir FROM persistent_containers ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(pg_err)?;
+        Ok(rows)
+    }
+
+    /// Update last_seen_at timestamp (heartbeat).
+    pub async fn touch_persistent_container(
+        &self,
+        container_id: &str,
+    ) -> Result<(), McclawdError> {
+        sqlx::query(
+            "UPDATE persistent_containers SET last_seen_at = NOW() WHERE container_id = $1",
+        )
+        .bind(container_id)
+        .execute(&self.pool)
+        .await
+        .map_err(pg_err)?;
+        Ok(())
     }
 }
 

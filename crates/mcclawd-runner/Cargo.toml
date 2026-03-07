@@ -1,0 +1,25 @@
+[package]
+name = "mcclawd-runner"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "agent-runner"
+path = "src/main.rs"
+
+[dependencies]
+mcclawd-core = { workspace = true }
+mcclawd-agent = { workspace = true }
+mcclawd-tools = { workspace = true }
+mcclawd-channels = { workspace = true }
+rig-core = { workspace = true }
+rmcp = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow = { workspace = true }
+futures = { workspace = true }
+base64 = "0.22"
+mime_guess = "2"

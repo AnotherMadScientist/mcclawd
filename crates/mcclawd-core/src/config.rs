@@ -40,6 +40,7 @@ pub struct AgentConfig {
 
     #[serde(default = "default_workspace")]
     pub default_workspace: String,
+
 }
 
 impl Default for AgentConfig {

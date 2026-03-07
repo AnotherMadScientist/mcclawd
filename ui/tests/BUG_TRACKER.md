@@ -1,13 +1,13 @@
 # McClawd Bug Tracker
 
-> Bugs discovered during E2E testing. Last updated: 2026-03-06.
+> Bugs discovered during E2E testing. Last updated: 2026-03-07.
 
 ## Summary
 
 | Severity | Open | Fixed | Won't Fix |
 |----------|------|-------|-----------|
-| Critical | 0 | 2 | 0 |
-| Major | 6 | 15 | 0 |
+| Critical | 1 | 3 | 0 |
+| Major | 9 | 17 | 0 |
 | Minor | 1 | 7 | 0 |
 
 ## Bugs
@@ -611,9 +611,177 @@
   - `ui/packages/app/src/api/types.ts` — DailyUsage frontend type
 - **Suggested test file:** settings.spec.ts
 
+### BUG-030: Container orphaned when task is deleted
+- **Severity:** Major
+- **Status:** Open
+- **Found:** 2026-03-07
+- **Description:** Deleting a task via `DELETE /api/tasks/{id}` does NOT stop/remove the associated Docker container. The container keeps running, consuming resources. The `delete_task()` handler should also clean up the container (stop + remove via `SandboxOrchestrator::cleanup_container()`) and remove it from `task_containers` map.
+- **Steps to Reproduce:**
+  1. Create a task that runs in a container
+  2. Delete the task via UI or API
+  3. Run `docker ps` — container is still running
+- **Files:**
+  - `crates/mcclawd-api/src/server/tasks.rs` — `delete_task()` handler
+  - `crates/mcclawd-api/src/sandbox/container.rs` — `cleanup_container()`
+  - `crates/mcclawd-api/src/server/state.rs` — `task_containers` map
+- **Suggested test file:** docker-isolation.spec.ts
+
+### BUG-031: Doc upload on new task returns 400 Bad Request — task never runs
+- **Severity:** Critical
+- **Status:** Open
+- **Found:** 2026-03-07
+- **Description:** Creating a new task with a document attachment fails. `POST /api/tasks/{id}/attachments` returns 400 Bad Request repeatedly. The task is created (delay_start=true) but the attachment upload never succeeds, so the task never starts. Multiple retries all fail with 400. Occasionally a 503 is returned too. The WebSocket also disconnects early ("closed before connection established").
+- **Error:** `POST /api/tasks/{id}/attachments 400 (Bad Request)` — seen at `client.ts:109`, called from `NewTaskPage.tsx:122`
+- **Steps to Reproduce:**
+  1. Go to /tasks/new
+  2. Attach any file (txt, pdf, etc.)
+  3. Type a prompt and click "Run Task"
+  4. Observe 400 errors in console — task stays stuck
+- **Root Cause Investigation:**
+  - Check `upload_attachments()` in tasks.rs — what returns 400?
+  - Likely multipart parsing issue or missing content-type boundary
+  - The `delay_start: true` path creates the task first, then uploads — check if task ID is valid at upload time
+  - React-query retry logic fires repeatedly, causing multiple 400s
+- **Files:**
+  - `crates/mcclawd-api/src/server/tasks.rs` — `upload_attachments()` handler
+  - `ui/packages/app/src/pages/NewTaskPage.tsx:122` — upload mutation
+  - `ui/packages/app/src/api/client.ts:109` — `uploadAttachments()` fetch call
+- **Suggested test file:** doc-upload-analyze.spec.ts
+
+### BUG-032: Hold-to-talk not working with ElevenLabs mic
+- **Severity:** Major
+- **Status:** Open
+- **Found:** 2026-03-07
+- **Description:** After migrating MicButton from Whisper/Moonshine/WebSpeech to ElevenLabs React SDK (`useConversation`), the hold-to-talk interaction no longer works. The old MicButton used mouseDown/mouseUp for hold-to-talk with a 300ms threshold. The new implementation only supports click-to-toggle (start/stop session). User speech transcription does not appear in the input area. The `onMessage` callback may not be receiving user transcriptions correctly — the message format from the SDK needs verification.
+- **Steps to Reproduce:**
+  1. Go to any page with mic button (CommandBar, /tasks/new, task detail)
+  2. Click the mic button
+  3. Speak into microphone
+  4. No transcription text appears in the input area
+  5. Hold-to-talk (mouseDown→speak→mouseUp) does not work at all
+- **Root Cause:** MicButton rewritten to use `useConversation` hook. The `onMessage` callback message shape needs verification — may be receiving messages but not parsing them correctly. Also missing hold-to-talk UX (mouseDown/mouseUp handlers removed).
+- **Files:**
+  - `ui/packages/app/src/components/MicButton.tsx` — ElevenLabs useConversation integration
+- **Suggested test file:** command-bar.spec.ts or new mic.spec.ts
+
+### BUG-033: ElevenLabs agent introduction plays every mic button press
+- **Severity:** Minor
+- **Status:** Open
+- **Found:** 2026-03-07
+- **Description:** Each time the user clicks the mic button, a new ElevenLabs ConvAI session starts and the agent plays its introduction/greeting message. The introduction should only play on the very first interaction. Subsequent presses should resume listening without the intro. This is likely controlled by the ElevenLabs agent configuration (first_message setting) or by maintaining a persistent session instead of creating a new one each time.
+- **Steps to Reproduce:**
+  1. Click mic button — agent introduces itself (expected first time)
+  2. Click to stop
+  3. Click mic button again — agent introduces itself again (unexpected)
+- **Root Cause:** `startSession()` creates a brand new conversation each time. Options: (a) override `firstMessage` to empty string after first use, (b) keep session alive and pause/resume instead of start/stop, (c) configure agent in ElevenLabs dashboard to skip intro.
+- **Files:**
+  - `ui/packages/app/src/components/MicButton.tsx` — toggle creates new session each time
+- **Suggested test file:** command-bar.spec.ts
+
+### BUG-034: ElevenLabs WebSocket errors — "WebSocket is already in CLOSING or CLOSED state"
+- **Severity:** Major
+- **Status:** Open
+- **Found:** 2026-03-07
+- **Description:** After clicking the mic button, the ElevenLabs SDK repeatedly logs `WebSocket is already in CLOSING or CLOSED state` from `sendMessage` called by `onInputWorkletMessage`. The audio input worklet continues trying to send audio data over a WebSocket that has already closed or is closing. This causes a flood of console errors and means no audio is being transmitted to ElevenLabs for transcription. The WebSocket connection appears to drop shortly after being established (previously seen as LiveKit `v1 RTC path not found` with `connectionType: "webrtc"`, now manifesting as premature WebSocket closure with `connectionType: "websocket"`).
+- **Steps to Reproduce:**
+  1. Navigate to any page with the mic button (New Task, Task Detail, or Command Bar)
+  2. Click the mic button
+  3. Observe console: repeated `WebSocket is already in CLOSING or CLOSED state` errors
+  4. No transcription text appears in the input area
+- **Console Errors:**
+  ```
+  @elevenlabs_react.js: WebSocket is already in CLOSING or CLOSED state.
+  sendMessage @ @elevenlabs_react.js:25852
+  onInputWorkletMessage @ @elevenlabs_react.js:26355
+  ```
+  (repeated many times as audio worklet keeps sending)
+- **Root Cause:** The ElevenLabs ConvAI WebSocket connection drops after initial handshake. The AudioWorklet continues running and tries to send audio frames, but the WebSocket is already closed. Possible causes: (a) agent ID not configured for public access / auth issue, (b) ElevenLabs SDK version incompatibility, (c) agent needs specific configuration in the ElevenLabs dashboard (e.g., enable "Allow unauthenticated requests").
+- **Files:**
+  - `ui/packages/app/src/components/MicButton.tsx` — `useConversation` hook, `startSession()` call
+- **Suggested test file:** command-bar.spec.ts or new mic.spec.ts
+
+### BUG-035: ElevenLabs ConvAI SDK wrong approach — need Speech-to-Text API instead
+- **Severity:** Major
+- **Status:** Open
+- **Found:** 2026-03-07
+- **Description:** The ElevenLabs `@elevenlabs/react` ConvAI SDK (`useConversation` hook) is fundamentally wrong for the mic button use case. ConvAI is a **bidirectional conversational AI** (agent talks back, greeting plays, full WebRTC/WebSocket session). What's needed is **speech-to-text only**: record audio → transcribe → put text in input. This is the root cause of BUG-032 (no hold-to-talk), BUG-033 (greeting on every press), and BUG-034 (WebSocket errors). **Fix:** Replace `@elevenlabs/react` with browser `MediaRecorder` + backend `POST /api/transcribe` calling ElevenLabs Speech-to-Text API (`POST https://api.elevenlabs.io/v1/speech-to-text`). No SDK, no greeting, push-to-record via mouseDown/mouseUp, fast.
+- **Supersedes:** BUG-032, BUG-033, BUG-034
+- **Files:**
+  - `ui/packages/app/src/components/MicButton.tsx` — rewrite: MediaRecorder + fetch `/api/transcribe`
+  - `crates/mcclawd-api/src/server/routes.rs` — re-add `POST /api/transcribe` (ElevenLabs STT)
+  - `crates/mcclawd-api/src/server/tasks.rs` — new `transcribe_audio` using ElevenLabs STT
+- **Suggested test file:** command-bar.spec.ts or new mic.spec.ts
+
+### BUG-036: Container stdin not delivering chat messages to runner
+- **Severity:** Critical
+- **Status:** fixed
+- **Found:** 2026-03-07
+- **Fixed:** 2026-03-07
+- **Page:** /tasks/:id (all live-agent tests: system-agent-navigation, doc-upload-analyze, doc-upload-discuss)
+- **Description:** PersistentHandle container stdin silently broken — messages sent via `send_chat()` never reached the runner process. Three live-agent E2E tests failed because the LLM never received the prompt.
+- **Root Cause:** Two issues:
+  1. `PersistentHandle::connect()` attached with `stdout: false, stderr: false`. Without output streams, Docker/bollard closed the HTTP upgrade connection, silently breaking stdin writes.
+  2. Runner's `run_server()` emitted `TextDelta("Server mode ready")` + `Done` via `protocol::emit` at startup. The background forwarder persisted these as task events, causing the frontend to show "complete" before the real LLM response arrived.
+- **Fix:**
+  1. `container.rs`: Attach with `stdout: true, stderr: true`, spawn background drain task, add `alive` AtomicBool tracking + `is_alive()` method.
+  2. `runner main.rs`: Removed `protocol::emit` calls from server startup (kept `tracing::info!` for stderr diagnostics only).
+  3. `system_agent.rs`: Dead handle detection in `ensure_system_agent_container()` — recreates container when handle is dead.
+- **Files:**
+  - `crates/mcclawd-api/src/sandbox/container.rs` — PersistentHandle rewrite
+  - `crates/mcclawd-runner/src/main.rs` — removed spurious startup emissions
+  - `crates/mcclawd-api/src/server/system_agent.rs` — dead handle detection
+
+### BUG-037: System agent chat history polluted by test suite — LLM confused
+- **Severity:** Major
+- **Status:** fixed
+- **Found:** 2026-03-07
+- **Fixed:** 2026-03-07
+- **Page:** /tasks/__system__ (system agent navigation test)
+- **Description:** Full test suite sends various messages to the system agent (command-bar tests, navigation commands). By the time the system-agent-navigation test runs, the `__system__` task history is full of unrelated messages. The LLM gets confused by the accumulated context and fails to answer "What is the capital of France?"
+- **Root Cause:** System agent uses a single persistent `__system__` task_id with shared conversation history (by design). Test isolation requires clearing history before assertions that depend on clean LLM context.
+- **Fix:** Added `DELETE /api/system-agent/history` call before the chat test to clear accumulated history from earlier tests.
+- **Files:**
+  - `ui/tests/system-agent-navigation.spec.ts` — clear history before chat test
+
+### BUG-038: Agent cannot access Haiku — network error sending request to Anthropic API
+- **Severity:** Major
+- **Status:** fixed
+- **Found:** 2026-03-07
+- **Fixed:** 2026-03-07
+- **Page:** /tasks/:id (any task using claude-3-haiku model)
+- **Description:** Agent-runner containers could not reach the Anthropic API. Requests to `https://api.anthropic.com/v1/messages` failed with a network error.
+- **Error:** `Network error: error sending request for url (https://api.anthropic.com/v1/messages)`
+- **Root Cause:** Transient internet connectivity outage on the host machine. Containers on `mcclawd_default` Docker network have full outbound access (DNS via 127.0.0.11, HTTPS on port 443). Once internet was restored, both system agent (persistent container) and task agents (sandboxed containers) successfully reached the Anthropic API. Verified with: (1) DNS resolution test from container, (2) HTTPS curl test returning 401, (3) system-agent-navigation E2E tests 4/4 passed, (4) task-detail streaming test passed.
+- **Fix:** No code changes needed — infrastructure issue resolved by internet restoration.
+- **Files:** N/A (no code changes)
+- **Suggested test file:** docker-isolation.spec.ts
+
 ## Console Error Log
 
 | Page | Error Message | Frequency | Bug ID |
 |------|--------------|-----------|--------|
 | /tasks/00000000-... | WebSocket connection failed | Every task-detail test with fake UUID | N/A (benign — filtered) |
 | Various | ResizeObserver loop | Intermittent | N/A (benign — filtered) |
+| Any (MicButton) | WebSocket is already in CLOSING or CLOSED state | Every mic press (flood) | BUG-034 |
+
+## Feature Requests
+
+### FEAT-001: Rename "Docker" menu to "Agents"
+
+- **Reported:** 2026-03-07
+- **Page/Component:** Sidebar navigation, DockerPage
+- **Description:** The Docker management page menu item should be renamed from "Docker" to "Agents" to better reflect its purpose (managing agent containers, not generic Docker management).
+- **Scope:** Sidebar nav label, page title, breadcrumb if any
+- **Suggested files:** `App.tsx` (route/nav), `DockerPage.tsx` (page title)
+
+### FEAT-002: Move Spending/Usage to its own page
+
+- **Reported:** 2026-03-07
+- **Page/Component:** SettingsPage → new SpendingPage
+- **Description:** The SpendingDashboard (CreditsCard, UsageBarChart, per-model/per-task usage, budget controls) should be extracted from SettingsPage into a dedicated page with its own sidebar nav entry.
+- **Scope:**
+  - Extract SpendingDashboard + related components from SettingsPage
+  - Create new `/spending` route and SpendingPage
+  - Add sidebar nav entry (icon: DollarSign or CreditCard)
+  - Remove spending section from SettingsPage
+- **Suggested files:** `SettingsPage.tsx`, new `SpendingPage.tsx`, `App.tsx` (route/nav)

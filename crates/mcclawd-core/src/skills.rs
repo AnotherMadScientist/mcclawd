@@ -42,6 +42,13 @@ pub struct SandboxConfig {
     pub memory_limit: Option<i64>,
     /// CPU limit in nano-CPUs (1_000_000_000 = 1 CPU)
     pub cpu_limit: Option<i64>,
+    /// Maximum number of PIDs allowed in the container. Default: 256.
+    #[serde(default = "default_pids_limit")]
+    pub pids_limit: Option<i64>,
+}
+
+fn default_pids_limit() -> Option<i64> {
+    Some(256)
 }
 
 impl Default for SandboxConfig {
@@ -53,6 +60,7 @@ impl Default for SandboxConfig {
             agentgateway_url: "http://agentgateway:3000".to_string(),
             memory_limit: Some(512 * 1024 * 1024), // 512MB
             cpu_limit: Some(1_000_000_000),         // 1 CPU
+            pids_limit: default_pids_limit(),
         }
     }
 }

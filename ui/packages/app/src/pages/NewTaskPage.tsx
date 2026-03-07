@@ -115,8 +115,19 @@ export function NewTaskPage() {
         parsedTags.length > 0 ? parsedTags : undefined,
       );
       if (hasFiles) {
-        await api.tasks.uploadAttachments(task.id, files.map((f) => f.file));
-        await api.tasks.sendMessage(task.id, prompt);
+        // Retry upload + sendMessage up to 3 times (handles transient 503 from server restarts)
+        let lastErr: unknown;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            await api.tasks.uploadAttachments(task.id, files.map((f) => f.file));
+            await api.tasks.sendMessage(task.id, prompt);
+            return task;
+          } catch (err) {
+            lastErr = err;
+            if (attempt < 2) await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+          }
+        }
+        throw lastErr;
       }
       return task;
     },
@@ -169,6 +180,10 @@ export function NewTaskPage() {
             <MicButton
               onTranscript={handleTranscript}
               onInterim={handleInterim}
+              onError={(msg) => {
+                console.warn("[Mic]", msg);
+                handleInterim(`[Mic error: ${msg}]`);
+              }}
               disabled={createTask.isPending}
             />
             <AttachButton onFiles={addFiles} compact />

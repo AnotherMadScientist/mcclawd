@@ -8,6 +8,7 @@ import {
   Settings,
   ChevronDown,
   LogOut,
+  Container,
 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "../lib/utils";
@@ -19,6 +20,7 @@ const configItems = [
   { to: "/config/mcp", icon: Server, label: "MCP Servers" },
   { to: "/config/secrets", icon: KeyRound, label: "Secrets" },
   { to: "/config/settings", icon: Settings, label: "Settings" },
+  { to: "/config/docker", icon: Container, label: "Docker" },
 ];
 
 export function Sidebar() {

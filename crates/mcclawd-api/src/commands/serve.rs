@@ -4,8 +4,10 @@ use std::fs;
 use std::process;
 use std::sync::Arc;
 
+use crate::sandbox::container::PersistentHandle;
 use crate::sandbox::{ImageBuilder, SandboxOrchestrator};
 use crate::server::pg_store::PgTaskStore;
+use crate::server::runner_build;
 use crate::server::{routes, state::AppState};
 use crate::supervisor::AgentSupervisor;
 use mcclawd_core::secrets::{EncryptedFileBackend, SecretBackend};
@@ -143,7 +145,7 @@ fn remove_pid_file() {
 }
 
 /// Map a postgres task row (status string + error_message) to a TaskStatus enum.
-fn row_to_status(status: &str, error_message: Option<&str>) -> TaskStatus {
+pub fn row_to_status(status: &str, error_message: Option<&str>) -> TaskStatus {
     match status {
         "Pending" => TaskStatus::Pending,
         "Building" => TaskStatus::Building,
@@ -427,6 +429,70 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
 
     state.config_path = Some(config_path);
 
+    // Reconnect to persistent containers that survived a restart.
+    // Containers have restart_policy=unless-stopped, so they keep running
+    // even when the API server restarts (cargo-watch, crash, etc.).
+    match pg_store.load_persistent_containers().await {
+        Ok(rows) if !rows.is_empty() => {
+            let count = rows.len();
+            let reconnect_state = state.clone();
+            tokio::spawn(async move {
+                reconnect_persistent_containers(reconnect_state, rows).await;
+            });
+            tracing::info!(count, "Reconnecting to persistent containers in background");
+        }
+        Ok(_) => {} // no containers to reconnect
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to load persistent containers from database");
+        }
+    }
+
+    // Auto-build runner image in background if Docker is available and image doesn't exist.
+    // Once ready, pre-initialize the system agent broadcast channel so WS clients connect instantly.
+    if state.supervisor.is_some() {
+        let project_root = std::env::current_dir().unwrap_or_else(|_| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                .unwrap_or_default()
+        });
+        runner_build::spawn_runner_build(state.runner_build.clone(), project_root);
+        tracing::info!("Runner image build check started in background");
+
+        // Pre-create system agent broadcast channel so WS connections don't race.
+        let sys_state = state.clone();
+        tokio::spawn(async move {
+            use crate::server::system_agent::SYSTEM_AGENT_TASK_ID;
+            use mcclawd_core::types::TaskId;
+
+            let task_id = TaskId(SYSTEM_AGENT_TASK_ID.to_string());
+            sys_state.create_task_stream(&task_id).await;
+
+            // Wait for image (up to 10 min for first build)
+            let ready = runner_build::wait_for_image_ready(
+                &sys_state.runner_build,
+                std::time::Duration::from_secs(600),
+            ).await;
+            if ready {
+                tracing::info!("Runner image available — starting system agent container");
+                let agent_start = std::time::Instant::now();
+                match crate::server::system_agent::ensure_system_agent_container(&sys_state).await {
+                    Ok(handle) => {
+                        let startup_secs = agent_start.elapsed().as_secs_f64();
+                        tracing::info!(container_id = %handle.container_id, startup_secs, "System agent container running");
+                        sys_state.runner_build.write().await.agent_startup_secs = Some(startup_secs);
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to start system agent container on startup");
+                    }
+                }
+            } else {
+                tracing::warn!("System agent unavailable — runner image build failed or timed out");
+            }
+        });
+    }
+
+    let shutdown_state = state.clone();
     let app = routes::api_router(state.clone())
         .with_state(state)
         .layer(
@@ -444,7 +510,7 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
                 .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION]),
         )
         .layer(TraceLayer::new_for_http())
-        .layer(DefaultBodyLimit::max(1024 * 1024)); // 1MB
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024)); // 50MB (doc/image uploads)
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
 
@@ -458,8 +524,167 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal());
     let result = server.await;
 
+    // Graceful shutdown: stop persistent containers
+    {
+        // System agent
+        if let Some(handle) = shutdown_state.system_agent.write().await.take() {
+            let _ = handle.shutdown().await;
+            let store = shutdown_state.pg_store.clone();
+            let cid = handle.container_id.clone();
+            let _ = store.delete_persistent_container(&cid).await;
+            if let Ok(orch) = SandboxOrchestrator::new() {
+                let _ = orch.cleanup_container(&cid).await;
+            }
+            tracing::info!("System agent container stopped");
+        }
+        // Task containers
+        let handles: Vec<_> = shutdown_state.task_containers.write().await.drain().collect();
+        for (tid, handle) in handles {
+            let _ = handle.shutdown().await;
+            let store = shutdown_state.pg_store.clone();
+            let cid = handle.container_id.clone();
+            let _ = store.delete_persistent_container(&cid).await;
+            if let Ok(orch) = SandboxOrchestrator::new() {
+                let _ = orch.cleanup_container(&cid).await;
+            }
+            tracing::info!(task_id = %tid, "Task container stopped");
+        }
+    }
+
     remove_pid_file();
     tracing::info!("McClawd daemon shut down cleanly");
     result?;
     Ok(())
+}
+
+/// Reconnect to persistent containers that survived a server restart.
+/// For each container in the DB, check if it's still running via Docker,
+/// then attach stdin and start the output forwarder.
+async fn reconnect_persistent_containers(
+    state: AppState,
+    containers: Vec<(String, String, String, String)>,
+) {
+    let docker = match bollard::Docker::connect_with_local_defaults() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(error = %e, "Cannot reconnect containers — Docker unavailable");
+            return;
+        }
+    };
+
+    for (container_id, task_id_str, agent_type, _workspace_dir) in containers {
+        // Check if container is still running
+        let inspect = match docker.inspect_container(&container_id, None).await {
+            Ok(info) => info,
+            Err(_) => {
+                tracing::info!(container_id = %container_id, "Container gone — removing stale record");
+                let _ = state.pg_store.delete_persistent_container(&container_id).await;
+                continue;
+            }
+        };
+
+        let running = inspect
+            .state
+            .as_ref()
+            .and_then(|s| s.running)
+            .unwrap_or(false);
+
+        if !running {
+            tracing::info!(container_id = %container_id, "Container not running — cleaning up");
+            let _ = state.pg_store.delete_persistent_container(&container_id).await;
+            if let Ok(orch) = SandboxOrchestrator::new() {
+                let _ = orch.cleanup_container(&container_id).await;
+            }
+            continue;
+        }
+
+        // Container is running — reconnect stdin
+        let task_id = TaskId(task_id_str.clone());
+        let handle = match PersistentHandle::connect(&docker, container_id.clone(), task_id.clone())
+            .await
+        {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(
+                    container_id = %container_id,
+                    error = %e,
+                    "Failed to reconnect to container stdin"
+                );
+                let _ = state.pg_store.delete_persistent_container(&container_id).await;
+                continue;
+            }
+        };
+
+        // Start background output forwarder
+        let chunk_state = state.clone();
+        let fwd_task_id = task_id.clone();
+        let reader_cid = container_id.clone();
+
+        // Ensure broadcast channel exists
+        state.create_task_stream(&task_id).await;
+
+        let (chunk_tx, mut chunk_rx) =
+            tokio::sync::mpsc::channel::<mcclawd_channels::OutboundChunk>(256);
+
+        tokio::spawn(async move {
+            if let Ok(orch) = SandboxOrchestrator::new() {
+                if let Err(e) = orch.stream_agent_output(&reader_cid, chunk_tx).await {
+                    tracing::warn!(error = %e, "Reconnected output reader ended");
+                }
+            }
+        });
+
+        let fwd_state = chunk_state.clone();
+        tokio::spawn(async move {
+            use mcclawd_channels::OutboundChunk;
+            while let Some(chunk) = chunk_rx.recv().await {
+                let tx = {
+                    let streams = fwd_state.task_streams.read().await;
+                    streams.get(&fwd_task_id).cloned()
+                };
+                if let Some(tx) = tx {
+                    match &chunk {
+                        OutboundChunk::ChatHistory(json) => {
+                            if let Ok(messages) =
+                                serde_json::from_str::<Vec<rig::completion::message::Message>>(json)
+                            {
+                                fwd_state.set_chat_history(&fwd_task_id, messages).await;
+                            }
+                        }
+                        _ => {
+                            fwd_state
+                                .send_and_persist(&fwd_task_id, &tx, chunk)
+                                .await;
+                        }
+                    }
+                }
+            }
+        });
+
+        // Store handle in appropriate slot
+        if agent_type == "system" {
+            *state.system_agent.write().await = Some(handle.clone());
+            tracing::info!(
+                container_id = %container_id,
+                "Reconnected to system agent container"
+            );
+        } else {
+            state
+                .task_containers
+                .write()
+                .await
+                .insert(task_id.clone(), handle.clone());
+            tracing::info!(
+                container_id = %container_id,
+                task_id = %task_id_str,
+                "Reconnected to task container"
+            );
+        }
+
+        // Update heartbeat
+        let _ = state
+            .pg_store
+            .touch_persistent_container(&container_id)
+            .await;
+    }
 }

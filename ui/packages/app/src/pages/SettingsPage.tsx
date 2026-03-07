@@ -243,6 +243,10 @@ function ModelSelector({
 }
 
 // ---------------------------------------------------------------------------
+// Mic Provider Selector
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // Spending Dashboard
 // ---------------------------------------------------------------------------
 
@@ -294,19 +298,19 @@ function SpendingDashboard() {
   const { data: usage } = useQuery<DetailedUsageSummary>({
     queryKey: ["providers", "usage", granularity],
     queryFn: () => api.providers.usage(granularity),
-    refetchInterval: 30_000,
+    refetchInterval: 5_000,
   });
 
   const { data: budget } = useQuery<BudgetInfo>({
     queryKey: ["providers", "budget"],
     queryFn: api.providers.budgetInfo,
-    refetchInterval: 30_000,
+    refetchInterval: 5_000,
   });
 
   const { data: credits } = useQuery<CreditsResponse>({
     queryKey: ["providers", "credits"],
     queryFn: api.providers.credits,
-    refetchInterval: 60_000,
+    refetchInterval: 15_000,
     retry: 1,
   });
 

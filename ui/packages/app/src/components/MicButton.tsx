@@ -1,10 +1,8 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useCallback, useRef, useState } from "react";
 import { getToken } from "../api/client";
 
-const HOLD_THRESHOLD_MS = 300;
-
 interface MicButtonProps {
-  onTranscript: (text: string) => void;
+  onTranscript?: (text: string) => void;
   onInterim?: (text: string) => void;
   onStart?: () => void;
   onError?: (msg: string) => void;
@@ -12,8 +10,7 @@ interface MicButtonProps {
   size?: "sm" | "md";
 }
 
-/** Post recorded audio to backend for OpenAI Whisper transcription. */
-async function transcribeViaBackend(blob: Blob): Promise<string> {
+async function transcribe(blob: Blob): Promise<{ text?: string; error?: string }> {
   const form = new FormData();
   form.append("audio", blob, "recording.webm");
   const token = getToken();
@@ -22,192 +19,220 @@ async function transcribeViaBackend(blob: Blob): Promise<string> {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
     body: form,
   });
-  if (!res.ok) throw new Error(await res.text());
-  const json = await res.json();
-  return json.text ?? "";
+  return res.json();
 }
 
-/**
- * Mic button — records audio via MediaRecorder, sends to backend
- * for OpenAI Whisper transcription. Click to start/stop, or hold to record.
- */
-export function MicButton({ onTranscript, onInterim, onStart, onError, disabled, size = "sm" }: MicButtonProps) {
-  const [isListening, setIsListening] = useState(false);
-  const [micLevel, setMicLevel] = useState(0);
-  const [statusText, setStatusText] = useState<string | null>(null);
+export function MicButton({
+  onTranscript,
+  onInterim,
+  onStart,
+  onError,
+  disabled,
+  size = "sm",
+}: MicButtonProps) {
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
-  const mouseDownTimeRef = useRef<number>(0);
-  const isHoldingRef = useRef(false);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const animFrameRef = useRef<number>(0);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const interimTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const busyRef = useRef(false);
+  const wantStopRef = useRef(false);
 
-  const stopAudioMeter = useCallback(() => {
-    if (animFrameRef.current) {
-      cancelAnimationFrame(animFrameRef.current);
-      animFrameRef.current = 0;
+  const cleanup = useCallback(() => {
+    if (interimTimerRef.current) {
+      clearInterval(interimTimerRef.current);
+      interimTimerRef.current = null;
     }
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
     }
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach((t) => t.stop());
-      mediaStreamRef.current = null;
-    }
-    analyserRef.current = null;
-    setMicLevel(0);
+    recorderRef.current = null;
+    setRecording(false);
   }, []);
 
-  const startAudioMeter = useCallback((stream: MediaStream) => {
-    try {
-      const ctx = new AudioContext();
-      audioContextRef.current = ctx;
-      const source = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 256;
-      analyser.smoothingTimeConstant = 0.5;
-      source.connect(analyser);
-      analyserRef.current = analyser;
-
-      const dataArray = new Uint8Array(analyser.frequencyBinCount);
-      const tick = () => {
-        analyser.getByteFrequencyData(dataArray);
-        let sum = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-          sum += dataArray[i] ?? 0;
+  const doFinalTranscription = useCallback(
+    async (chunks: Blob[]) => {
+      const blob = new Blob(chunks, { type: "audio/webm" });
+      if (blob.size < 100) {
+        console.log("[MicButton] Audio too short, skipping transcription");
+        return;
+      }
+      setTranscribing(true);
+      try {
+        console.log("[MicButton] Sending final transcription, size:", blob.size);
+        const data = await transcribe(blob);
+        if (data.text) {
+          onTranscript?.(data.text);
+        } else if (data.error) {
+          onError?.(data.error);
         }
-        const avg = sum / dataArray.length / 255;
-        setMicLevel(Math.min(1, avg * 2.5));
-        animFrameRef.current = requestAnimationFrame(tick);
-      };
-      tick();
-    } catch {
-      // AudioContext not available
+      } catch (err) {
+        console.warn("[MicButton] Transcription failed:", err);
+        onError?.(err instanceof Error ? err.message : "Transcription failed");
+      } finally {
+        setTranscribing(false);
+      }
+    },
+    [onTranscript, onError],
+  );
+
+  const stopRecording = useCallback(() => {
+    wantStopRef.current = true;
+    // Clear interim polling
+    if (interimTimerRef.current) {
+      clearInterval(interimTimerRef.current);
+      interimTimerRef.current = null;
     }
+    // If recorder exists and is recording, stop it (triggers onstop → final transcription)
+    if (recorderRef.current?.state === "recording") {
+      console.log("[MicButton] Stopping recorder");
+      recorderRef.current.stop();
+    }
+    // If recorder hasn't been created yet (getUserMedia still pending),
+    // wantStopRef will be checked when it resolves
+    setRecording(false);
   }, []);
 
   const startRecording = useCallback(async () => {
+    wantStopRef.current = false;
+    setRecording(true);
+    onInterim?.("Requesting mic...");
+    console.log("[MicButton] Requesting mic access...");
+
+    let stream: MediaStream;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
-      mediaStreamRef.current = stream;
-
-      const recorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
-      chunksRef.current = [];
-
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data);
-      };
-
-      recorder.onstop = async () => {
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
-        if (blob.size < 1000) return;
-
-        setStatusText("Transcribing...");
-        onInterim?.("...");
-        try {
-          const text = await transcribeViaBackend(blob);
-          if (text.trim()) {
-            onTranscript(text.trim());
-          }
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : "Transcription failed";
-          console.warn("[MicButton]", msg);
-          onError?.(msg);
-        }
-        setStatusText(null);
-      };
-
-      recorderRef.current = recorder;
-      recorder.start(250);
-      setIsListening(true);
-      startAudioMeter(stream);
-      onStart?.();
-    } catch {
-      onError?.("Microphone access denied");
-    }
-  }, [onTranscript, onInterim, onStart, onError, startAudioMeter]);
-
-  const stopRecording = useCallback(() => {
-    if (recorderRef.current && recorderRef.current.state !== "inactive") {
-      recorderRef.current.stop();
-    }
-    recorderRef.current = null;
-    setIsListening(false);
-    stopAudioMeter();
-  }, [stopAudioMeter]);
-
-  const handleMouseDown = useCallback(() => {
-    if (isListening) {
-      stopRecording();
+      // Timeout prevents hanging forever on some systems
+      const gumPromise = navigator.mediaDevices.getUserMedia({ audio: true });
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("Microphone access timed out")),
+          5000,
+        ),
+      );
+      stream = await Promise.race([gumPromise, timeoutPromise]);
+    } catch (err) {
+      console.warn("[MicButton] Mic access failed:", err);
+      cleanup();
+      onInterim?.("");
+      onError?.(
+        err instanceof Error ? err.message : "Microphone access denied",
+      );
       return;
     }
-    mouseDownTimeRef.current = Date.now();
-    isHoldingRef.current = true;
-    startRecording();
-  }, [isListening, startRecording, stopRecording]);
 
-  const handleMouseUp = useCallback(() => {
-    if (!isHoldingRef.current) return;
-    const elapsed = Date.now() - mouseDownTimeRef.current;
-    if (elapsed >= HOLD_THRESHOLD_MS) {
-      stopRecording();
+    // User already released the button while we were waiting for mic access
+    if (wantStopRef.current) {
+      console.log("[MicButton] User released before mic was ready, aborting");
+      stream.getTracks().forEach((t) => t.stop());
+      cleanup();
+      onInterim?.("");
+      return;
     }
-    isHoldingRef.current = false;
-  }, [stopRecording]);
 
-  useEffect(() => {
-    return () => {
-      stopAudioMeter();
-      if (recorderRef.current && recorderRef.current.state !== "inactive") {
-        recorderRef.current.stop();
-      }
+    streamRef.current = stream;
+    busyRef.current = false;
+    console.log("[MicButton] Mic acquired, starting MediaRecorder");
+
+    const recorder = new MediaRecorder(stream, {
+      mimeType: MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm",
+    });
+    recorderRef.current = recorder;
+    chunksRef.current = [];
+
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunksRef.current.push(e.data);
     };
-  }, [stopAudioMeter]);
 
-  const fillHeight = Math.round(micLevel * 100);
+    recorder.onstop = () => {
+      console.log(
+        "[MicButton] Recorder stopped, chunks:",
+        chunksRef.current.length,
+      );
+      const chunks = [...chunksRef.current];
+      chunksRef.current = [];
+      cleanup();
+      doFinalTranscription(chunks);
+    };
+
+    recorder.start(250);
+    onStart?.();
+    onInterim?.("Listening...");
+    console.log("[MicButton] Recording started");
+
+    // Periodic interim transcription every 2s
+    interimTimerRef.current = setInterval(async () => {
+      if (
+        busyRef.current ||
+        wantStopRef.current ||
+        chunksRef.current.length === 0
+      )
+        return;
+      const blob = new Blob([...chunksRef.current], { type: "audio/webm" });
+      if (blob.size < 200) return;
+      busyRef.current = true;
+      try {
+        const data = await transcribe(blob);
+        if (!wantStopRef.current && data.text) {
+          onInterim?.(data.text);
+        }
+      } catch {
+        // Ignore interim failures
+      } finally {
+        busyRef.current = false;
+      }
+    }, 2000);
+  }, [onStart, onError, onTranscript, onInterim, cleanup, doFinalTranscription]);
+
+  const isActive = recording || transcribing;
   const btnSize = size === "md" ? "h-10 w-10" : "h-9 w-9";
   const iconSize = size === "md" ? "h-5 w-5" : "h-4 w-4";
 
   return (
     <button
       type="button"
-      onMouseDown={(e) => {
-        e.preventDefault();
-        handleMouseDown();
-      }}
-      onMouseUp={handleMouseUp}
-      onMouseLeave={() => {
-        if (isHoldingRef.current && isListening) {
-          stopRecording();
-        }
-      }}
-      disabled={disabled}
+      onMouseDown={startRecording}
+      onMouseUp={stopRecording}
+      onMouseLeave={recording ? stopRecording : undefined}
+      onTouchStart={startRecording}
+      onTouchEnd={stopRecording}
+      disabled={disabled || transcribing}
       className={`relative flex ${btnSize} items-center justify-center rounded-md border transition-colors ${
-        isListening
+        isActive
           ? "border-destructive bg-destructive/10 text-destructive"
           : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
       } disabled:opacity-50`}
       aria-label="Mic"
-      title={statusText ?? (isListening ? "Click to stop / Release to stop" : "Click or hold to record")}
+      title={
+        transcribing
+          ? "Transcribing..."
+          : recording
+            ? "Release to stop"
+            : "Hold to record"
+      }
     >
       <div className={`relative ${iconSize}`}>
-        {isListening && fillHeight > 0 && (
+        {isActive && (
           <svg
             xmlns="http://www.w3.org/2000/svg"
             viewBox="0 0 24 24"
             fill="currentColor"
             stroke="none"
-            className={`absolute inset-0 ${iconSize} text-destructive transition-[clip-path] duration-75`}
-            style={{ clipPath: `inset(${100 - fillHeight}% 0 0 0)` }}
+            className={`absolute inset-0 ${iconSize} text-destructive`}
           >
             <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
             <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-            <line x1="12" x2="12" y1="19" y2="22" strokeWidth="2" stroke="currentColor" />
+            <line
+              x1="12"
+              x2="12"
+              y1="19"
+              y2="22"
+              strokeWidth="2"
+              stroke="currentColor"
+            />
           </svg>
         )}
         <svg
@@ -225,8 +250,17 @@ export function MicButton({ onTranscript, onInterim, onStart, onError, disabled,
           <line x1="12" x2="12" y1="19" y2="22" />
         </svg>
       </div>
-      {isListening && (
+      {!isActive && (
+        <span
+          className="absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full border border-background bg-violet-500"
+          title="ElevenLabs STT"
+        />
+      )}
+      {recording && (
         <span className="absolute inset-0 animate-ping rounded-md border border-destructive/30" />
+      )}
+      {transcribing && (
+        <span className="absolute inset-0 animate-pulse rounded-md border border-amber-400/50" />
       )}
     </button>
   );

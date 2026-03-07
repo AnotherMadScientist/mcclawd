@@ -4,7 +4,7 @@ import type {
   RegistrationResponseJSON,
   AuthenticationResponseJSON,
 } from "@simplewebauthn/browser";
-import type { AttachmentMeta, McclawdConfig, McpServer, Task, WorkspaceFile, InstalledSkill, CachedSearchResult, ClawHubSkillMeta, ScanResult, Provider, DetailedUsageSummary, BudgetInfo, BudgetUpdate, AnthropicModel, ModelPricing, CreditsResponse } from "./types";
+import type { AttachmentMeta, McclawdConfig, McpServer, Task, WorkspaceFile, InstalledSkill, CachedSearchResult, ClawHubSkillMeta, ScanResult, Provider, DetailedUsageSummary, BudgetInfo, BudgetUpdate, AnthropicModel, ModelPricing, CreditsResponse, DockerBuildStatus, ContainerInfo, ContainerDetail } from "./types";
 
 const TOKEN_KEY = "mcclawd_token";
 
@@ -116,6 +116,10 @@ export const api = {
     },
     listAttachments: (taskId: string) =>
       apiFetch<AttachmentMeta[]>(`/api/tasks/${taskId}/attachments`),
+    listFiles: (taskId: string) =>
+      apiFetch<AttachmentMeta[]>(`/api/tasks/${taskId}/files`),
+    downloadFileUrl: (taskId: string, filename: string) =>
+      `/api/tasks/${taskId}/files/${encodeURIComponent(filename)}`,
   },
   workspace: {
     list: () => apiFetch<WorkspaceFile[]>("/api/workspace"),
@@ -224,5 +228,21 @@ export const api = {
     history: () => apiFetch<unknown[]>("/api/system-agent/history"),
     clearHistory: () =>
       apiFetch<void>("/api/system-agent/history", { method: "DELETE" }),
+  },
+  elevenlabs: {
+    signedUrl: () =>
+      apiFetch<{ ok: boolean; signed_url?: string; error?: string }>("/api/elevenlabs/signed-url"),
+  },
+  docker: {
+    buildStatus: () => apiFetch<DockerBuildStatus>("/api/docker/build-status"),
+    triggerBuild: () => apiFetch<{ status: string }>("/api/docker/build", { method: "POST" }),
+    containers: () => apiFetch<ContainerInfo[]>("/api/docker/containers"),
+    container: (id: string) =>
+      apiFetch<ContainerDetail>(`/api/docker/containers/${encodeURIComponent(id)}`),
+    deleteContainer: (id: string) =>
+      apiFetch<{ deleted: boolean; container_id: string; task_id?: string }>(
+        `/api/docker/containers/${encodeURIComponent(id)}`,
+        { method: "DELETE" },
+      ),
   },
 };

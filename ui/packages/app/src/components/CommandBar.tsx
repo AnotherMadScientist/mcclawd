@@ -42,10 +42,13 @@ export function CommandBar() {
         e.preventDefault();
         inputRef.current?.focus();
       }
-      if (e.key === "Escape" && responseVisible) {
-        setResponseVisible(false);
-        setResponse("");
-        setError(null);
+      if (e.key === "Escape") {
+        if (responseVisible) {
+          setResponseVisible(false);
+          setResponse("");
+          setError(null);
+        }
+        inputRef.current?.blur();
       }
     };
     window.addEventListener("keydown", handler);

@@ -57,9 +57,7 @@ export function TaskCard({ task }: { task: Task }) {
       <button
         onClick={(e) => {
           e.stopPropagation();
-          if (window.confirm("Delete this task?")) {
-            remove.mutate();
-          }
+          remove.mutate();
         }}
         aria-label="Delete task"
         className="p-2 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import type { StreamChunk } from "../api/types";
 
 export interface StreamEvent {
-  type: "text" | "error" | "user" | "attachments";
+  type: "text" | "error" | "user" | "attachments" | "generated_files";
   content: string;
   timestamp: Date;
   attachments?: Array<{
@@ -103,6 +103,16 @@ export function useTaskStream(taskId: string | undefined) {
               content: "",
               timestamp,
               attachments: chunk.Attachments,
+            },
+          ]);
+        } else if ("GeneratedFiles" in chunk) {
+          setEvents((prev) => [
+            ...prev,
+            {
+              type: "generated_files" as const,
+              content: "",
+              timestamp,
+              attachments: chunk.GeneratedFiles as StreamEvent["attachments"],
             },
           ]);
         } else if ("TextDelta" in chunk) {

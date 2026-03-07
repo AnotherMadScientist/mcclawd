@@ -117,7 +117,11 @@ test.describe("Command Bar", () => {
   });
 
   test("escape blurs command bar input", async ({ page }) => {
-    test.skip(true, "Escape key does not blur command bar in current implementation");
+    const input = page.getByPlaceholder("Ask the system agent... (Cmd+K)");
+    await input.focus();
+    await expect(input).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(input).not.toBeFocused();
   });
 
   test("command bar visible on workspace page", async ({ page }) => {

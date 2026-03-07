@@ -247,7 +247,7 @@ pub fn format_outbound(
                 None
             }
         }
-        OutboundChunk::UserMessage(_) | OutboundChunk::Done | OutboundChunk::Attachments(_) => None,
+        OutboundChunk::UserMessage(_) | OutboundChunk::Done | OutboundChunk::Attachments(_) | OutboundChunk::Usage { .. } | OutboundChunk::ChatHistory(_) | OutboundChunk::GeneratedFiles(_) => None,
     }
 }
 

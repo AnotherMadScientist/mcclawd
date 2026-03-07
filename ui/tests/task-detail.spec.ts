@@ -155,8 +155,10 @@ test.describe("Task Detail Page", () => {
       .fill(prompt);
     await page.getByRole("button", { name: "Run Task" }).click();
     await page.waitForURL(/\/tasks\/[a-f0-9-]+/, { timeout: 10000 });
-    // The prompt text should appear somewhere on the detail page
-    await expect(page.getByText(prompt)).toBeVisible({ timeout: 10000 });
+    // The prompt text should appear in the heading or user message bubble
+    await expect(
+      page.getByRole("heading", { name: prompt }),
+    ).toBeVisible({ timeout: 10000 });
   });
 
   // --- New tests ---

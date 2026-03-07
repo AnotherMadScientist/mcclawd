@@ -31,3 +31,10 @@ test-e2e:
 # Release build
 build:
 	cargo build --release -p mcclawd-api
+
+# Build runner Docker image (BuildKit cached — fast after first build)
+docker-runner:
+	DOCKER_BUILDKIT=1 docker build -t mcclawd-runner:latest -f docker/agent-runner/Dockerfile .
+
+# Full build: binary + runner image
+build-all: build docker-runner
