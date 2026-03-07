@@ -342,7 +342,7 @@ export function CommandBar() {
 
         {/* Mic button — uses shared MicButton with Whisper fallback */}
         <MicButton
-          onTranscript={(text) => sendMessage(text)}
+          onTranscript={(text) => setInput(text)}
           onInterim={(text) => setInput(text)}
           onError={(msg) => setError(msg)}
           disabled={state === "processing" || state === "responding"}
