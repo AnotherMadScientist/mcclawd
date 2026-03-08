@@ -3,6 +3,7 @@
 //! Phase 0: AuditHook (tracing-based logging).
 //! Phase 3+: DLP scanning, entropy-based secret detection, structured audit events.
 
+pub mod agent_guard;
 pub mod audit;
 pub mod dlp;
 pub mod pipeline;
@@ -15,8 +16,9 @@ pub mod user_hook;
 use async_trait::async_trait;
 
 // Re-export everything for backward compatibility
+pub use agent_guard::AgentGuardHook;
 pub use audit::{AuditAction, AuditEvent, AuditHook, AuditSink, FileAuditSink, PgAuditSink, TracingAuditSink};
-pub use dlp::{DlpAction, DlpConfig, DlpHook, DlpPattern};
+pub use dlp::{DlpAction, DlpConfig, DlpHook, DlpPattern, DlpPatternInfo};
 pub use pipeline::{HookPipeline, PendingFinding, SecurityContext};
 pub use secret_scanner::{SecretScannerConfig, SecretScannerHook};
 pub use security_event::{DlpFinding, ScanDirection, SecurityAction, SecurityEvent, SecurityEventType, ThreatLevel};

@@ -33,7 +33,7 @@ pub type MemoryBackend = Arc<DashMap<String, String>>;
 // memory_store
 // ----------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct StoreArgs {
     pub key: String,
     pub value: String,
@@ -92,7 +92,7 @@ impl Tool for MemoryStore {
 // memory_recall
 // ----------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct RecallArgs {
     pub key: String,
 }

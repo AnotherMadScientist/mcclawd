@@ -10,11 +10,14 @@ import {
   LogOut,
   Container,
   DollarSign,
-  Shield,
+  Activity,
+  BookOpen,
 } from "lucide-react";
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { cn } from "../lib/utils";
 import { useAuth } from "../hooks/useAuth";
+import { api } from "../api/client";
 
 const configItems = [
   { to: "/config/workspace", icon: FileText, label: "Workspace" },
@@ -23,7 +26,8 @@ const configItems = [
   { to: "/config/secrets", icon: KeyRound, label: "Secrets" },
   { to: "/config/docker", icon: Container, label: "Agents" },
   { to: "/config/usage", icon: DollarSign, label: "Usage" },
-  { to: "/config/security", icon: Shield, label: "Security" },
+  { to: "/config/security/events", icon: Activity, label: "Audit Log" },
+  { to: "/config/security/rules", icon: BookOpen, label: "Detection Rules" },
   { to: "/config/settings", icon: Settings, label: "Settings" },
 ];
 
@@ -31,12 +35,33 @@ export function Sidebar() {
   const [configOpen, setConfigOpen] = useState(true);
   const { logout } = useAuth();
 
+  const { data: health, status: healthStatus } = useQuery({
+    queryKey: ["api-health"],
+    queryFn: () => api.health.check(),
+    refetchInterval: 15_000,
+    retry: false,
+  });
+
+  const healthColor =
+    healthStatus === "pending"
+      ? "bg-yellow-500"
+      : health?.ok
+        ? "bg-green-500"
+        : "bg-red-500";
+  const healthTitle =
+    healthStatus === "pending"
+      ? "Checking API..."
+      : health?.ok
+        ? "API Connected"
+        : "API Disconnected";
+
   return (
     <aside className="flex flex-col w-64 border-r border-border bg-zinc-950 h-screen">
       {/* Logo */}
       <div className="flex items-center gap-3 px-6 py-5 border-b border-border">
         <img src="/macleod.jpg" alt="McClawd" className="w-8 h-8 rounded-full object-cover" />
         <span className="text-lg font-semibold tracking-tight">McClawd</span>
+        <span className={`w-2 h-2 rounded-full ${healthColor}`} title={healthTitle} />
       </div>
 
       {/* Nav */}

@@ -122,15 +122,22 @@ impl SecurityHook for HookPipeline {
         tool_name: &str,
         args: &serde_json::Value,
     ) -> crate::Result<()> {
-        // First error stops the chain
+        // Run ALL hooks (so AuditHook always persists findings), return first error.
+        // Previous fail-fast behavior skipped AuditHook when DlpHook blocked,
+        // causing detected findings to never reach the database.
+        let mut first_error = None;
         for hook in &self.hooks {
             if let Err(e) = hook.before_tool_call(tool_name, args).await {
-                // Mark blocked in context before propagating
-                self.context.write().await.was_blocked = true;
-                return Err(e);
+                if first_error.is_none() {
+                    self.context.write().await.was_blocked = true;
+                    first_error = Some(e);
+                }
             }
         }
-        Ok(())
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     async fn after_tool_call(
@@ -254,7 +261,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_hook_error_stops_before_chain() {
+    async fn before_runs_all_hooks_even_after_error() {
         let counter = Arc::new(CountingHook::new());
         let pipeline = HookPipeline::new()
             .add(Arc::new(FailingHook))
@@ -263,8 +270,8 @@ mod tests {
         let args = serde_json::json!({});
         let res = pipeline.before_tool_call("t", &args).await;
         assert!(res.is_err());
-        // Second hook should not have been called
-        assert_eq!(counter.before_count.load(Ordering::SeqCst), 0);
+        // All hooks run (run-all semantics) so AuditHook always persists findings
+        assert_eq!(counter.before_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

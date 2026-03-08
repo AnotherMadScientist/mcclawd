@@ -67,11 +67,24 @@ impl SkillInstaller {
         let meta = self.client.get_skill(name, version).await?;
         let dest = self.skills_dir.join(&meta.name);
 
-        // Idempotent: return existing install info if already present
+        // Check if already installed WITH a full SKILL.md (not a stub).
+        // If the existing SKILL.md is a stub (< 500 bytes or no `## ` sections),
+        // re-download to get the full content.
         if dest.exists() {
-            if let Ok(Some(existing)) = self.read_installed_info(&meta.name) {
-                return Ok(existing);
+            let skill_md_path = dest.join("SKILL.md");
+            let is_stub = if skill_md_path.exists() {
+                let content = std::fs::read_to_string(&skill_md_path).unwrap_or_default();
+                content.len() < 500 || !content.contains("## ")
+            } else {
+                true // missing SKILL.md = treat as stub
+            };
+            if !is_stub {
+                if let Ok(Some(existing)) = self.read_installed_info(&meta.name) {
+                    return Ok(existing);
+                }
             }
+            // Stub or missing — remove and re-download
+            let _ = std::fs::remove_dir_all(&dest);
         }
 
         // Download and extract

@@ -106,7 +106,7 @@ pub async fn get_summary(
     let since = params.since.as_deref().and_then(parse_since);
 
     // Use a fixed user_id for now (single-tenant Phase 0/1).
-    let user_id = "default";
+    let user_id = "admin";
 
     match state.pg_store.security_summary(user_id, since).await {
         Ok(summary) => (StatusCode::OK, Json(serde_json::json!(summary))),
@@ -127,12 +127,16 @@ pub async fn get_status(
     // Check sidecar health (2s timeout, fail gracefully).
     let sidecar_healthy = check_sidecar_health().await;
 
+    let dlp_pattern_count = mcclawd_core::hooks::DlpHook::with_defaults().pattern_count();
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "pipeline_hooks": pipeline_hooks,
+            "pipeline_active": pipeline_active,
             "sidecar_healthy": sidecar_healthy,
             "sidecar_url": "http://localhost:8082",
+            "dlp_pattern_count": dlp_pattern_count,
         })),
     )
 }
@@ -211,6 +215,22 @@ pub async fn delete_policy(
     }
 }
 
+/// GET /api/security/events/grouped?since=24h — events grouped by task with task prompt.
+pub async fn list_events_grouped(
+    State(state): State<AppState>,
+    Query(params): Query<SummaryQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let since = params.since.as_deref().and_then(parse_since);
+
+    match state.pg_store.list_events_grouped_by_task(since, 500).await {
+        Ok(groups) => (StatusCode::OK, Json(serde_json::json!(groups))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
 /// GET /api/security/trace/{task_id} — taint trace for a task.
 ///
 /// Placeholder: returns the security events for the task, grouped as a trace.
@@ -231,6 +251,13 @@ pub async fn get_trace(
             Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
+}
+
+/// GET /api/security/patterns — list all built-in DLP detection patterns.
+pub async fn list_patterns(
+    State(state): State<AppState>,
+) -> Json<Vec<mcclawd_core::hooks::dlp::DlpPatternInfo>> {
+    Json(state.dlp_patterns.clone())
 }
 
 // ---------------------------------------------------------------------------

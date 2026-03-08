@@ -4,7 +4,7 @@ import type {
   RegistrationResponseJSON,
   AuthenticationResponseJSON,
 } from "@simplewebauthn/browser";
-import type { AttachmentMeta, McclawdConfig, McpServer, Task, WorkspaceFile, InstalledSkill, CachedSearchResult, ClawHubSkillMeta, ScanResult, Provider, DetailedUsageSummary, BudgetInfo, BudgetUpdate, AnthropicModel, ModelPricing, CreditsResponse, DockerBuildStatus, ContainerInfo, ContainerDetail, SecurityEvent, SecuritySummary, SecurityStatus, DlpPolicy } from "./types";
+import type { AttachmentMeta, McclawdConfig, McpServer, Task, WorkspaceFile, InstalledSkill, CachedSearchResult, ClawHubSkillMeta, ScanResult, Provider, DetailedUsageSummary, BudgetInfo, BudgetUpdate, AnthropicModel, ModelPricing, CreditsResponse, DockerBuildStatus, ContainerInfo, ContainerDetail, SecurityEvent, SecuritySummary, SecurityStatus, DlpPolicy, DlpPatternInfo, TaskSecurityGroup } from "./types";
 
 const TOKEN_KEY = "mcclawd_token";
 
@@ -51,6 +51,13 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
 
 export const api = {
   health: {
+    check: async () => {
+      const token = getToken();
+      const headers: Record<string, string> = {};
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const res = await fetch("/api/health", { headers });
+      return { ok: res.ok };
+    },
     llm: () => apiFetch<{ ok: boolean; error?: string }>("/api/health/llm"),
   },
   auth: {
@@ -223,6 +230,10 @@ export const api = {
       apiFetch<ScanResult>(`/api/skills/${encodeURIComponent(name)}/preview-scan`, {
         method: "POST",
       }),
+    upgradeStubs: () =>
+      apiFetch<{ upgraded: number; failed: number }>("/api/skills/upgrade-stubs", {
+        method: "POST",
+      }),
   },
   providers: {
     list: () => apiFetch<Provider[]>("/api/providers"),
@@ -273,9 +284,15 @@ export const api = {
       if (since) params.set("since", since);
       return apiFetch<SecurityEvent[]>(`/api/security/events?${params}`);
     },
+    eventsGrouped: (since?: string) => {
+      const params = new URLSearchParams();
+      if (since) params.set("since", since);
+      return apiFetch<TaskSecurityGroup[]>(`/api/security/events/grouped?${params}`);
+    },
     summary: (since = "24h") =>
       apiFetch<SecuritySummary>(`/api/security/summary?since=${encodeURIComponent(since)}`),
     status: () => apiFetch<SecurityStatus>("/api/security/status"),
+    patterns: () => apiFetch<DlpPatternInfo[]>("/api/security/patterns"),
     policies: () => apiFetch<DlpPolicy[]>("/api/security/policies"),
     createPolicy: (policy: Omit<DlpPolicy, "id" | "updated_at">) =>
       apiFetch<DlpPolicy>("/api/security/policies", {

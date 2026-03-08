@@ -281,6 +281,25 @@ test.describe("McpPorter: MCP Tools Live Updates @mcpporter", () => {
   test("MCP tools overview updates live when task container appears and disappears @mcpporter", async ({
     page,
   }) => {
+    // Pre-flight: this test needs a running agent (Docker + LLM) to create a container
+    try {
+      const health = await page.request.get("http://localhost:9090/api/health/llm");
+      if (!health.ok()) {
+        test.skip(true, "Backend /api/health/llm returned non-OK — skipping container lifecycle test");
+        return;
+      }
+      const body = await health.json();
+      if (!body.ok) {
+        test.skip(true, `LLM not available: ${body.error ?? "unknown"} — skipping container lifecycle test`);
+        return;
+      }
+    } catch {
+      test.skip(true, "Backend not reachable — skipping container lifecycle test");
+      return;
+    }
+
+    test.setTimeout(60_000);
+
     // Navigate to MCP page and verify tools section loads
     await page.goto("/config/mcp");
     await expect(
@@ -334,14 +353,9 @@ test.describe("McpPorter: MCP Tools Live Updates @mcpporter", () => {
     const delResp = await deleteContainer(page, taskContainerId!);
     expect(delResp.ok()).toBeTruthy();
 
-    // Wait for the pill to disappear from the MCP tools overview (5s polling)
-    await expect(async () => {
-      const pillsAfterDelete = await initialPills();
-      expect(pillsAfterDelete).toBeLessThanOrEqual(pillsBefore);
-    }).toPass({ timeout: 20000, intervals: [2000] });
-
-    // The task ID pill should no longer be visible
-    await expect(page.locator(`text=${shortId}`)).toHaveCount(0, { timeout: 5000 });
+    // Wait for the specific task's pill to disappear from the MCP tools overview.
+    // Don't compare total pill count — other tests may have spawned containers concurrently.
+    await expect(page.locator(`text=${shortId}`)).toHaveCount(0, { timeout: 25000 });
   });
 });
 
@@ -422,6 +436,18 @@ test.describe("McpPorter: Task Execution Security @mcpporter @security", () => {
   test("task creation includes tags @mcpporter @security", async ({
     page,
   }) => {
+    // Pre-flight: this test needs a backend that can create tasks
+    try {
+      const health = await page.request.get("http://localhost:9090/api/health");
+      if (!health.ok()) {
+        test.skip(true, "Backend not reachable — skipping tag test");
+        return;
+      }
+    } catch {
+      test.skip(true, "Backend not reachable — skipping tag test");
+      return;
+    }
+
     // The login helper auto-tags tasks with "e2e-test"
     // Verify by creating a task and checking the response
     await page.goto("/tasks/new");
@@ -429,9 +455,11 @@ test.describe("McpPorter: Task Execution Security @mcpporter @security", () => {
       .getByPlaceholder("What would you like me to do?")
       .fill("E2E McpPorter test task");
 
-    // Intercept the task creation response
+    // Intercept the task creation response — filter to POST only
     const [response] = await Promise.all([
-      page.waitForResponse("**/api/tasks"),
+      page.waitForResponse(
+        (resp) => resp.url().includes("/api/tasks") && resp.request().method() === "POST"
+      ),
       page.getByRole("button", { name: "Run Task" }).click(),
     ]);
 

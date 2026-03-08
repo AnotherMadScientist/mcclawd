@@ -9,6 +9,7 @@ use crate::workspace::Workspace;
 use mcclawd_core::config::McclawdConfig;
 use mcclawd_core::hooks::HookPipeline;
 use mcclawd_tools::builtin::memory::{MemoryRecall, MemoryStore};
+use mcclawd_tools::guarded_tool::GuardedTool;
 use mcclawd_tools::system_tools::{CreateTask, NavigateTo};
 use rig::agent::Agent;
 use rig::client::CompletionClient;
@@ -46,21 +47,42 @@ impl AgentEngine {
         config: &McclawdConfig,
         security_pipeline: Option<Arc<HookPipeline>>,
     ) -> anyhow::Result<(McclawdAgent, MemoryStore, Vec<McpBundle>)> {
-        let context = ContextBuilder::new(workspace)
+        Self::build_with_skill_filter(workspace, api_key, max_turns, config, security_pipeline, None).await
+    }
+
+    /// Build a task agent with an optional skill filter.
+    /// When `skill_filter` is Some, only the named skills are loaded from disk.
+    /// Some(empty vec) = no skills. None = all skills (legacy).
+    pub async fn build_with_skill_filter(
+        workspace: Workspace,
+        api_key: &str,
+        max_turns: usize,
+        config: &McclawdConfig,
+        security_pipeline: Option<Arc<HookPipeline>>,
+        skill_filter: Option<Vec<String>>,
+    ) -> anyhow::Result<(McclawdAgent, MemoryStore, Vec<McpBundle>)> {
+        let mut context = ContextBuilder::new(workspace)
             .with_skills_dir(config.skills.managed_dir.clone());
+        if let Some(filter) = skill_filter {
+            context = context.with_skill_filter(filter);
+        }
         let system_prompt = context.build_system_prompt();
 
         let client = anthropic::Client::new(api_key)?;
         let memory_store = MemoryStore::new_shared();
         let memory_recall = MemoryRecall::from_shared(&memory_store);
 
+        // Always wrap tools with GuardedTool — empty pipeline has zero overhead
+        let pipeline =
+            security_pipeline.unwrap_or_else(|| Arc::new(HookPipeline::new()));
+
         let mut builder = client
             .agent(CLAUDE_4_SONNET)
             .preamble(&system_prompt)
             .max_tokens(8192)
             .default_max_turns(max_turns)
-            .tool(memory_store.clone())
-            .tool(memory_recall);
+            .tool(GuardedTool::new(memory_store.clone(), pipeline.clone()))
+            .tool(GuardedTool::new(memory_recall, pipeline.clone()));
 
         // Wire in MCP tools: try env-var path first (inside container),
         // fall back to config-based connection (host/dev mode)
@@ -73,7 +95,7 @@ impl AgentEngine {
         }
 
         let agent = builder.build();
-        if let Some(ref pipeline) = security_pipeline {
+        if !pipeline.is_empty() {
             tracing::info!(hooks = pipeline.len(), "Agent built with security pipeline");
         }
         Ok((agent, memory_store, bundles))

@@ -3,7 +3,7 @@
  * Test secrets follow naming patterns: TEST_*, MULTI_*, DELETE_ME_*
  */
 export default async function globalTeardown() {
-  const baseURL = "http://localhost:8081";
+  const baseURL = "http://localhost:9090";
 
   try {
     // Read the saved auth token from global-setup (avoids needing vault key)

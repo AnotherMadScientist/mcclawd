@@ -178,6 +178,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         )
         // Security
         .route("/api/security/events", get(security::list_events))
+        .route("/api/security/events/grouped", get(security::list_events_grouped))
         .route("/api/security/summary", get(security::get_summary))
         .route("/api/security/status", get(security::get_status))
         .route(
@@ -188,6 +189,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             "/api/security/policies/{id}",
             delete(security::delete_policy),
         )
+        .route("/api/security/patterns", get(security::list_patterns))
         .route("/api/security/trace/{task_id}", get(security::get_trace))
         // Channel state persistence
         .route(
@@ -218,6 +220,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route("/api/skills/{name}/scan", get(skills_routes::scan_skill))
         .route("/api/skills/{name}/preview-scan", post(skills_routes::preview_scan_skill))
         .route("/api/skills/updates", get(skills_routes::get_skill_updates))
+        .route("/api/skills/upgrade-stubs", post(skills_routes::upgrade_stubs))
         .route("/api/skills/{name}", delete(skills_routes::uninstall_skill))
         // Providers
         .route("/api/providers", get(providers::list_providers))

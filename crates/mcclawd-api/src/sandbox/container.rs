@@ -611,6 +611,11 @@ impl SandboxOrchestrator {
             env.push(format!("MCCLAWD_AGENT_TYPE={at}"));
         }
 
+        // Pass skill context so the runner knows which skills to load
+        if !agent_env.skill_context.is_empty() {
+            env.push(format!("MCCLAWD_SKILL_CONTEXT={}", agent_env.skill_context));
+        }
+
         // For short prompts, pass as env var; for large prompts, mount as file
         let prompt_as_file = prompt.len() > 32_768;
         if !prompt_as_file {
@@ -831,6 +836,11 @@ impl SandboxOrchestrator {
 
         if let Some(at) = agent_type {
             env.push(format!("MCCLAWD_AGENT_TYPE={at}"));
+        }
+
+        // Pass skill context so the runner knows which skills to load
+        if !agent_env.skill_context.is_empty() {
+            env.push(format!("MCCLAWD_SKILL_CONTEXT={}", agent_env.skill_context));
         }
 
         let mut mounts = vec![Mount {

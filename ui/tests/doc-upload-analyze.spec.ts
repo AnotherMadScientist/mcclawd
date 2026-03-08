@@ -95,7 +95,7 @@ test.describe("Document Upload & Analyze (Critical Workflow)", () => {
     // --- Pre-flight: check backend + LLM health ---
     try {
       const health = await page.request.get(
-        "http://localhost:8081/api/health/llm",
+        "http://localhost:9090/api/health/llm",
       );
       if (!health.ok()) {
         test.skip(
@@ -115,7 +115,7 @@ test.describe("Document Upload & Analyze (Critical Workflow)", () => {
     } catch {
       test.skip(
         true,
-        "Backend not reachable at localhost:8081 — skipping live agent test",
+        "Backend not reachable at localhost:9090 — skipping live agent test",
       );
       return;
     }
@@ -212,7 +212,7 @@ test.describe("Document Upload & Analyze (Critical Workflow)", () => {
     // Pre-flight
     try {
       const health = await page.request.get(
-        "http://localhost:8081/api/health/llm",
+        "http://localhost:9090/api/health/llm",
       );
       if (!health.ok()) {
         test.skip(true, "Backend not OK");

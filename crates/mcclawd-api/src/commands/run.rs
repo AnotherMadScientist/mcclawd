@@ -14,7 +14,7 @@ pub async fn execute(prompt: &str, workspace_name: &str, swarm: bool) -> anyhow:
     }
 
     // Try daemon mode first
-    let daemon_port = 8081;
+    let daemon_port = 9090;
     if let Ok(true) = try_daemon(prompt, workspace_name, daemon_port).await {
         return Ok(());
     }

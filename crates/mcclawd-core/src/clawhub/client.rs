@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Duration;
 
 /// ClawHub API client for searching and downloading skills.
 #[derive(Debug, Clone)]
@@ -50,6 +51,8 @@ struct RawListResponse {
 #[derive(Debug, Deserialize)]
 struct RawListItem {
     slug: String,
+    /// Part of the ClawHub API contract — deserialized but not directly read.
+    #[allow(dead_code)]
     #[serde(rename = "displayName")]
     display_name: Option<String>,
     summary: Option<String>,
@@ -77,6 +80,8 @@ struct RawSearchResult {
     #[allow(dead_code)]
     score: Option<f64>,
     slug: String,
+    /// Part of the ClawHub API contract — deserialized but not directly read.
+    #[allow(dead_code)]
     #[serde(rename = "displayName")]
     display_name: Option<String>,
     summary: Option<String>,
@@ -99,6 +104,8 @@ struct RawDetailResponse {
 #[derive(Debug, Deserialize)]
 struct RawDetailSkill {
     slug: String,
+    /// Part of the ClawHub API contract — deserialized but not directly read.
+    #[allow(dead_code)]
     #[serde(rename = "displayName")]
     display_name: Option<String>,
     summary: Option<String>,
@@ -116,8 +123,12 @@ struct RawStats {
     downloads: u64,
     #[serde(default, rename = "installsAllTime")]
     installs_all_time: u64,
+    /// Part of the ClawHub API contract — deserialized but not directly read.
+    #[allow(dead_code)]
     #[serde(default)]
     stars: u64,
+    /// Part of the ClawHub API contract — deserialized but not directly read.
+    #[allow(dead_code)]
     #[serde(default)]
     versions: u64,
 }
@@ -227,6 +238,60 @@ impl ClawHubClient {
         }
     }
 
+    /// Execute an HTTP request with retry and exponential backoff.
+    /// Retries on 429 (rate limit) and 5xx (server error) responses.
+    /// Backoff: 1s, 2s, 4s (exponential).
+    async fn request_with_retry(
+        &self,
+        url: &str,
+        max_retries: u32,
+    ) -> anyhow::Result<reqwest::Response> {
+        let mut last_err = None;
+        for attempt in 0..=max_retries {
+            if attempt > 0 {
+                let delay = Duration::from_secs(1 << (attempt - 1)); // 1s, 2s, 4s
+                tracing::debug!(
+                    attempt = attempt,
+                    delay_secs = delay.as_secs(),
+                    url = url,
+                    "Retrying ClawHub request after backoff"
+                );
+                tokio::time::sleep(delay).await;
+            }
+
+            let resp = match self.http.get(url).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = Some(anyhow::anyhow!("Request failed: {e}"));
+                    continue;
+                }
+            };
+
+            let status = resp.status();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                tracing::debug!(
+                    attempt = attempt,
+                    "ClawHub returned 429 Too Many Requests"
+                );
+                last_err = Some(anyhow::anyhow!("ClawHub rate limited (429)"));
+                continue;
+            }
+            if status.is_server_error() {
+                tracing::debug!(
+                    attempt = attempt,
+                    status = status.as_u16(),
+                    "ClawHub returned server error"
+                );
+                last_err = Some(anyhow::anyhow!("ClawHub server error ({})", status));
+                continue;
+            }
+
+            return Ok(resp);
+        }
+
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Request failed after {max_retries} retries")))
+    }
+
     /// List skills from the registry with cursor-based pagination.
     /// GET /api/v1/skills?limit={limit}&sort=updated&cursor={cursor}
     pub async fn list_skills(
@@ -318,12 +383,7 @@ impl ClawHubClient {
         _version: Option<&str>,
     ) -> anyhow::Result<ClawHubSkillMeta> {
         let url = format!("{}/api/v1/skills/{}", self.base_url, name);
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("ClawHub get_skill request failed: {e}"))?;
+        let resp = self.request_with_retry(&url, 3).await?;
 
         if !resp.status().is_success() {
             anyhow::bail!(
@@ -370,12 +430,7 @@ impl ClawHubClient {
             "{}/api/v1/download?slug={}&version={}",
             self.base_url, name, version
         );
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("ClawHub download request failed: {e}"))?;
+        let resp = self.request_with_retry(&url, 3).await?;
 
         if !resp.status().is_success() {
             anyhow::bail!(

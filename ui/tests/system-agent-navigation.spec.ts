@@ -53,7 +53,7 @@ test.describe("System Agent Navigation (Critical Workflow)", () => {
     // --- Pre-flight ---
     try {
       const health = await page.request.get(
-        "http://localhost:8081/api/health/llm",
+        "http://localhost:9090/api/health/llm",
       );
       if (!health.ok()) {
         test.skip(true, "Backend not OK");
@@ -72,6 +72,8 @@ test.describe("System Agent Navigation (Critical Workflow)", () => {
     await login(page);
 
     // --- Step 1: Send system agent chat via API ---
+    // The system agent is a tool-calling agent with only navigate_to and create_task.
+    // Ask it to navigate — this matches its actual capabilities.
     const token = await page.evaluate(() =>
       localStorage.getItem("mcclawd_token"),
     );
@@ -89,8 +91,7 @@ test.describe("System Agent Navigation (Critical Workflow)", () => {
         "Content-Type": "application/json",
       },
       data: {
-        message:
-          "What is the capital of France? Reply with just the city name.",
+        message: "Navigate to the skills page.",
       },
     });
     expect(chatRes.ok()).toBeTruthy();
@@ -102,10 +103,15 @@ test.describe("System Agent Navigation (Critical Workflow)", () => {
     await page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
 
     const responseArea = page.locator("main");
-    // Poll until "paris" appears — LLM response can take up to 60s
+    // Poll until the agent responds with something about navigation/skills
+    // The system agent calls navigate_to("/config/skills") and confirms
     await expect(async () => {
       const text = await responseArea.textContent();
-      expect(text?.toLowerCase()).toContain("paris");
+      const lower = text?.toLowerCase() ?? "";
+      // Agent should mention navigating or skills in its response
+      expect(
+        lower.includes("navigat") || lower.includes("skill") || lower.includes("navigate_to"),
+      ).toBeTruthy();
     }).toPass({ timeout: 75_000, intervals: [2000, 3000, 5000] });
 
     // Wait for completion indicator
@@ -122,7 +128,7 @@ test.describe("System Agent Navigation (Critical Workflow)", () => {
     // Pre-flight
     try {
       const health = await page.request.get(
-        "http://localhost:8081/api/health/llm",
+        "http://localhost:9090/api/health/llm",
       );
       if (!health.ok()) {
         test.skip(true, "Backend not OK");
@@ -156,7 +162,7 @@ test.describe("System Agent Navigation (Critical Workflow)", () => {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      data: { message: "Say hello." },
+      data: { message: "Navigate to the settings page." },
     });
     expect(chatRes.ok()).toBeTruthy();
     const chatData = await chatRes.json();
@@ -198,7 +204,7 @@ test.describe("System Agent Navigation (Critical Workflow)", () => {
 
     // This test doesn't need LLM — just checks navigation works
     try {
-      const health = await page.request.get("http://localhost:8081/api/health");
+      const health = await page.request.get("http://localhost:9090/api/health");
       if (!health.ok()) {
         test.skip(true, "Backend not reachable");
         return;
@@ -243,7 +249,7 @@ test.describe("System Agent Navigation (Critical Workflow)", () => {
     test.setTimeout(30_000);
 
     try {
-      const health = await page.request.get("http://localhost:8081/api/health");
+      const health = await page.request.get("http://localhost:9090/api/health");
       if (!health.ok()) {
         test.skip(true, "Backend not reachable");
         return;

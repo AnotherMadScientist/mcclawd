@@ -1,14 +1,14 @@
 # McClawd Bug Tracker
 
-> Bugs discovered during E2E testing. Last updated: 2026-03-07.
+> Bugs discovered during E2E testing. Last updated: 2026-03-08.
 
 ## Summary
 
 | Severity | Open | Fixed | Won't Fix |
 |----------|------|-------|-----------|
-| Critical | 1 | 3 | 0 |
-| Major | 9 | 17 | 0 |
-| Minor | 1 | 7 | 0 |
+| Critical | 1 | 4 | 0 |
+| Major | 3 | 29 | 0 |
+| Minor | 0 | 8 | 0 |
 
 ## Bugs
 
@@ -785,3 +785,182 @@
   - Add sidebar nav entry (icon: DollarSign or CreditCard)
   - Remove spending section from SettingsPage
 - **Suggested files:** `SettingsPage.tsx`, new `SpendingPage.tsx`, `App.tsx` (route/nav)
+
+### BUG-039: E2E test undefined variable `previewScanRequests`
+- **Severity:** critical
+- **Status:** fixed
+- **Page:** N/A (test file)
+- **Discovered:** 2026-03-08
+- **Test:** skill-scan-verify.spec.ts > "browse cards trigger preview scan requests on load"
+- **Error:** `previewScanRequests` referenced at line 271 but variable is named `scanRequests` (line 251). Causes ReferenceError and test always fails.
+- **Fix:** Changed `previewScanRequests.length` to `scanRequests.length`. Also rewrote test to handle cached scan results.
+
+### BUG-040: Security page uses tabs instead of separate sidebar pages
+- **Severity:** Major
+- **Status:** fixed
+- **Fixed:** 2026-03-08
+- **Found:** 2026-03-08
+- **Page:** /config/security
+- **Description:** SecurityPage.tsx renders a tab hub with "Audit Log" and "Detection & Rules" tabs on a single page. User wants 2 separate pages under Security in the sidebar: "Audit Log" at `/config/security/events` and "Detection & Rules" at `/config/security/rules`. The sidebar should show "Security" as a collapsible group with both sub-pages, similar to how Configuration works.
+- **Files:**
+  - `ui/packages/app/src/pages/SecurityPage.tsx` — remove tab hub
+  - `ui/packages/app/src/pages/SecurityEventsPage.tsx` — make standalone page with own header
+  - `ui/packages/app/src/pages/SecurityRulesPage.tsx` — make standalone page with own header
+  - `ui/packages/app/src/components/Sidebar.tsx` — add Security sub-nav with 2 entries
+  - `ui/packages/app/src/App.tsx` — add routes for `/config/security/events` and `/config/security/rules`
+
+### BUG-041: Audit log full of "No prompt" entries — events not tied to tasks
+- **Severity:** Major
+- **Status:** fixed
+- **Fixed:** 2026-03-08
+- **Found:** 2026-03-08
+- **Page:** /config/security (Audit Log)
+- **Description:** Security events page shows many task groups with "No prompt" text. These are events from deleted tasks or tasks that were never properly created. All security events MUST tie back to either a task agent (with a real prompt) or the system agent. Events with no matching task should be filtered out in the SQL query.
+- **Fix:** In `pg_store.rs` `list_events_grouped_by_task()`, add `WHERE t.id IS NOT NULL` or `HAVING COALESCE(t.prompt, '') != ''` to filter out orphaned events. Also consider adding `ON DELETE CASCADE` on `security_events.task_id` FK so deleting a task auto-deletes its events.
+- **Files:**
+  - `crates/mcclawd-api/src/server/pg_store.rs` — `list_events_grouped_by_task()` SQL filter
+  - `crates/mcclawd-api/src/server/security.rs` — `list_events_grouped` handler
+
+### BUG-042: Policy page action badges don't align properly
+- **Severity:** Major
+- **Status:** fixed
+- **Fixed:** 2026-03-08
+- **Found:** 2026-03-08
+- **Page:** /config/security (Detection & Rules)
+- **Description:** In the Detection Patterns table within SecurityRulesPage, the "block"/"warn"/"allow" action badges don't align horizontally across rows. The table layout is inconsistent — pattern names vary in width causing the action column to shift.
+- **Fix:** Add fixed column widths to the patterns table. Pattern name column should use `w-[70%]` and action column should use `w-[30%]` or similar fixed layout. Alternatively, use `table-fixed` class with explicit `<colgroup>`.
+- **Files:**
+  - `ui/packages/app/src/pages/SecurityRulesPage.tsx` — PatternCategoryGroup table layout
+
+### BUG-043: Cascade delete missing — deleting task doesn't delete DLP findings
+- **Severity:** Major
+- **Status:** fixed
+- **Fixed:** 2026-03-08
+- **Found:** 2026-03-08
+- **Page:** /tasks (task deletion)
+- **Description:** When a task is deleted via `DELETE /api/tasks/{id}`, the associated security_events and dlp_findings remain in the database as orphans. These orphaned events then appear as "No prompt" entries in the Security audit log.
+- **Fix:** In `pg_delete_task_sync()`, add explicit deletes: `DELETE FROM dlp_findings WHERE security_event_id IN (SELECT id FROM security_events WHERE task_id = $1)` then `DELETE FROM security_events WHERE task_id = $1` before deleting the task. Alternatively, add `ON DELETE CASCADE` FK constraint via migration.
+- **Files:**
+  - `crates/mcclawd-api/src/server/pg_store.rs` — `pg_delete_task_sync()` or new migration
+  - Possibly: `crates/mcclawd-core/migrations/` — new cascade migration
+
+### BUG-044: Finding context missing — can't click finding to see source with highlight
+- **Severity:** Major
+- **Status:** Open
+- **Found:** 2026-03-08
+- **Page:** /config/security (Audit Log findings)
+- **Description:** User wants to click on a DLP finding to see the source document/prompt/JSON with the match highlighted so they can see the context. Currently findings show only tag, pattern name, confidence, and redacted preview — no source context. Requires: (1) DB columns for source_text, match_offset, match_length on dlp_findings, (2) DlpHook captures source excerpt around match, (3) Frontend modal showing source with highlighted match.
+- **Files:**
+  - `crates/mcclawd-core/migrations/` — new migration adding source_text, match_offset, match_length
+  - `crates/mcclawd-core/src/hooks/dlp.rs` — capture source excerpt in process_matches()
+  - `crates/mcclawd-core/src/hooks/pipeline.rs` — PendingFinding fields
+  - `crates/mcclawd-core/src/hooks/audit.rs` — PgAuditSink persists new fields
+  - `ui/packages/app/src/pages/SecurityEventsPage.tsx` — finding click → modal with highlight
+
+### BUG-045: Security sidecar shows unhealthy on :8082
+- **Severity:** Major
+- **Status:** Open
+- **Found:** 2026-03-08
+- **Page:** /config/security (status bar)
+- **Description:** The security sidecar health check (`GET http://localhost:8082/health`) always fails. The sidecar container restarts but health check never passes. Need to investigate docker logs and entrypoint.py. The sidecar may not be running or its health endpoint may be misconfigured.
+- **Files:**
+  - `docker/agentguard/entrypoint.py` — health endpoint
+  - `docker-compose.yml` — sidecar service config
+  - `crates/mcclawd-api/src/server/security.rs` — `check_sidecar_health()`
+
+### BUG-046: Findings layout cramped — should use full width with data type and location
+- **Severity:** Major
+- **Status:** fixed
+- **Fixed:** 2026-03-08
+- **Found:** 2026-03-08
+- **Page:** /config/security (Audit Log — expanded task findings)
+- **Description:** DLP findings are displayed as small inline badges under each event. They should be wider cards that use the full available width, showing: data type (SSN, CC, API key), where found (prompt/tool_result/llm_response), confidence level, and redacted preview. Layout should match the security audit cards shown under individual tasks.
+- **Files:**
+  - `ui/packages/app/src/pages/SecurityEventsPage.tsx` — FindingsList component layout
+
+### BUG-050: skill_parser requires `# Skill: <name>` — fails on YAML frontmatter
+- **Severity:** major
+- **Status:** fixed
+- **Page:** N/A (backend)
+- **Discovered:** 2026-03-08
+- **File:** `crates/mcclawd-core/src/skill_parser.rs`
+- **Error:** Parser only accepted `# Skill: <name>` first line. Real ClawHub SKILL.md files use YAML frontmatter (`---\nname: x\n---`). All downloaded skills failed to parse, so no context was injected into agent containers.
+- **Fix:** Rewrote `parse_skill_md()` to detect and handle both formats. 14 new tests added.
+
+### BUG-051: 10 installed skill dirs completely empty (no SKILL.md)
+- **Severity:** major
+- **Status:** fixed
+- **Page:** /config/skills
+- **Discovered:** 2026-03-08
+- **Error:** `list_installed()` returned broken entries for dirs with no SKILL.md (alipay, drip-openclaw-billing, google-trends-rss, gws-calendar, meeting-summary-generator, memic, nmap-mcp, rwagenthub, web-recon). Frontend showed skills with no content or scan data.
+- **Fix:** `list_installed()` now skips dirs without SKILL.md. Added `is_stub: bool` field to response. Frontend shows yellow "Stub" pill.
+
+### BUG-052: 10+ installed skills have stub SKILL.md (< 500 bytes)
+- **Severity:** major
+- **Status:** fixed
+- **Page:** /config/skills
+- **Discovered:** 2026-03-08
+- **Error:** `install_from_meta()` generates tiny stub SKILL.md (173-654 bytes). Background upgrade task often fails due to ClawHub 429 rate limits. No retry logic existed.
+- **Fix:** Added exponential backoff retry (1s/2s/4s) to ClawHub client. Added `POST /api/skills/upgrade-stubs` endpoint. Frontend shows "Upgrade Stubs" button.
+
+### BUG-053: No retry/backoff on ClawHub API calls
+- **Severity:** major
+- **Status:** fixed
+- **Page:** N/A (backend)
+- **Discovered:** 2026-03-08
+- **File:** `crates/mcclawd-core/src/clawhub/client.rs`
+- **Error:** All ClawHub API methods made single HTTP calls. ClawHub aggressively rate-limits with 429. A single 429 killed all download/install/scan paths.
+- **Fix:** Added `request_with_retry()` with exponential backoff (3 retries, 1s/2s/4s delays). Used in `get_skill()`, `download_skill()`, `download_skill_md()`.
+
+### BUG-054: basic_scan only has 11 security patterns
+- **Severity:** minor
+- **Status:** fixed
+- **Page:** N/A (backend)
+- **Discovered:** 2026-03-08
+- **File:** `crates/mcclawd-core/src/scanner.rs`
+- **Error:** Scanner only checked 11 patterns. Missing: base64 obfuscation, reverse shells, /etc/passwd access, SSH keys, cryptocurrency, keylogger, os.system/subprocess.
+- **Fix:** Expanded from 11 to 29 patterns covering all major threat categories.
+
+### BUG-055: SecurityBadge returns null for NotScanned skills
+- **Severity:** major
+- **Status:** fixed
+- **Page:** /config/skills
+- **Discovered:** 2026-03-08
+- **File:** `ui/packages/app/src/pages/SkillsPage.tsx`
+- **Error:** `SecurityBadge` component returned `null` for `NotScanned` status, making it look like scanning didn't exist. No visual indication that a skill hasn't been scanned.
+- **Fix:** Now shows a subtle gray shield icon with "Not yet scanned" tooltip.
+
+### BUG-056: 21 cargo warnings — dead code and unused imports
+- **Severity:** major
+- **Status:** fixed
+- **Page:** N/A (backend)
+- **Discovered:** 2026-03-08
+- **Error:** `display_name` fields never read (3x), `stars`/`versions` fields never read, unused imports (std::io::Write, ProviderPoolConfig, SandboxHandle, SecretBackend), unused variables, dead functions.
+- **Fix:** Added `#[allow(dead_code)]` with doc comments on API contract fields. Remaining warnings are in unrelated code (sandbox orchestrator, system agent).
+
+### BUG-047: Skill detail dialog shows no warning for stub content
+- **Severity:** major
+- **Status:** fixed
+- **Page:** /config/skills
+- **Discovered:** 2026-03-08
+- **File:** `ui/packages/app/src/pages/SkillsPage.tsx`
+- **Error:** When skill content was loaded but very short (stub), the detail dialog showed it without any indication that the content was incomplete.
+- **Fix:** Added amber warning banner when content < 500 chars, advising user to click "Scan" to trigger content upgrade.
+
+### BUG-048: GC never cleans Completed tasks without containers
+- **Severity:** major
+- **Status:** fixed
+- **Page:** N/A (backend)
+- **Discovered:** 2026-03-08
+- **File:** `crates/mcclawd-api/src/commands/serve.rs` (GC Phase B ~line 1009)
+- **Error:** GC Phase B only handled Running/Building (delete if no live container) and Failed (delete if no container record). Completed tasks with no container record were never cleaned, accumulating orphan rows in the DB indefinitely.
+- **Fix:** Added `|| status == "Completed"` to the Failed orphan check. Completed tasks with no container record are now deleted by GC, including their persistent_containers rows.
+
+### BUG-049: delete_task doesn't cascade to security_events/dlp_findings
+- **Severity:** critical
+- **Status:** fixed
+- **Page:** N/A (backend)
+- **Discovered:** 2026-03-08
+- **Files:** `pg_store.rs`, `state.rs`, `tasks.rs`
+- **Error:** Deleting a task (via API, GC, or bulk-by-tag) removed the task row, containers, events, and chat history — but left orphan security_events and dlp_findings rows in the DB. Over time this would accumulate stale security data with no parent task.
+- **Fix:** Added `delete_security_events_by_task()` to pg_store.rs (DELETE FROM security_events WHERE task_id = $1; dlp_findings auto-cascades via FK ON DELETE CASCADE). Called from `pg_delete_task_sync()` in state.rs (covers all single-delete paths) and from bulk `delete_tasks_by_tag` in tasks.rs.

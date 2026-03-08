@@ -270,16 +270,29 @@ async fn run_server() -> Result<()> {
     let workspace = load_workspace();
     let config = McclawdConfig::default();
 
-    // Build agent once — reused across all messages
+    // Build agent once — reused across all messages.
+    // Use MCCLAWD_SKILL_CONTEXT env var if set (selective skill mounting from host),
+    // otherwise fall back to loading skills from disk (which loads ALL skills).
+    let skill_context_override = std::env::var("MCCLAWD_SKILL_CONTEXT").ok().filter(|s| !s.is_empty());
     let (agent, _memory_store, _mcp_bundles) = if agent_type == "system" {
-        let context =
+        let mut context =
             ContextBuilder::new(workspace).with_skills_dir(config.skills.managed_dir.clone());
+        if let Some(ref ctx) = skill_context_override {
+            context = context.with_skill_context_override(ctx.clone());
+        }
         let system_prompt = context.build_system_prompt();
         let agent = AgentEngine::build_system_agent(&api_key, &system_prompt).await?;
         (agent, None, vec![])
     } else {
+        // For task agents: if MCCLAWD_SKILL_CONTEXT is set, use it as override;
+        // if not set, load no skills (empty filter) to avoid injecting all skills.
+        let skill_filter: Option<Vec<String>> = if skill_context_override.is_none() {
+            Some(vec![]) // No env var = no skills (safe default for containers)
+        } else {
+            None // Will use skill_context_override instead
+        };
         let (agent, mem, bundles) =
-            AgentEngine::build(workspace, &api_key, max_turns, &config, None).await?;
+            AgentEngine::build_with_skill_filter(workspace, &api_key, max_turns, &config, None, skill_filter).await?;
         (agent, Some(mem), bundles)
     };
 
@@ -434,16 +447,26 @@ async fn run() -> Result<()> {
     let workspace = load_workspace();
     let config = McclawdConfig::default();
 
-    // Build the agent based on type
+    // Build the agent based on type.
+    // Use MCCLAWD_SKILL_CONTEXT env var if set (selective skill mounting from host).
+    let skill_context_override = std::env::var("MCCLAWD_SKILL_CONTEXT").ok().filter(|s| !s.is_empty());
     let (agent, _memory_store, _mcp_bundles) = if cfg.agent_type == "system" {
-        let context = ContextBuilder::new(workspace)
+        let mut context = ContextBuilder::new(workspace)
             .with_skills_dir(config.skills.managed_dir.clone());
+        if let Some(ref ctx) = skill_context_override {
+            context = context.with_skill_context_override(ctx.clone());
+        }
         let system_prompt = context.build_system_prompt();
         let agent = AgentEngine::build_system_agent(&cfg.api_key, &system_prompt).await?;
         (agent, None, vec![])
     } else {
+        let skill_filter: Option<Vec<String>> = if skill_context_override.is_none() {
+            Some(vec![]) // No env var = no skills (safe default for containers)
+        } else {
+            None
+        };
         let (agent, mem, bundles) =
-            AgentEngine::build(workspace, &cfg.api_key, cfg.max_turns, &config, None).await?;
+            AgentEngine::build_with_skill_filter(workspace, &cfg.api_key, cfg.max_turns, &config, None, skill_filter).await?;
         (agent, Some(mem), bundles)
     };
 

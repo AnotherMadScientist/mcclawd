@@ -47,7 +47,7 @@ test.describe("Security Audit Trail & Dashboard", () => {
     test.setTimeout(30_000);
 
     try {
-      const health = await page.request.get("http://localhost:8081/api/health");
+      const health = await page.request.get("http://localhost:9090/api/health");
       if (!health.ok()) {
         test.skip(true, "Backend not reachable");
         return;
@@ -58,11 +58,11 @@ test.describe("Security Audit Trail & Dashboard", () => {
     }
 
     await login(page);
-    await page.goto("/config/security");
+    await page.goto("/config/security/events");
     await page.waitForLoadState("domcontentloaded");
 
     // Page title — wait for React to render
-    await expect(page.getByText("Security").first()).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText("Audit Log").first()).toBeVisible({ timeout: 10_000 });
 
     // Status bar with pipeline hooks count
     await expect(page.getByText(/Pipeline hooks/i)).toBeVisible({ timeout: 10_000 });
@@ -71,25 +71,22 @@ test.describe("Security Audit Trail & Dashboard", () => {
     await expect(page.getByText("Total Events")).toBeVisible();
     await expect(page.getByText("Blocked")).toBeVisible();
     await expect(page.getByText("Warnings")).toBeVisible();
-    await expect(page.getByText("Clean Scans")).toBeVisible();
+    await expect(page.getByText("DLP Findings", { exact: true })).toBeVisible();
 
     // Period selector
-    await expect(page.getByText("1h")).toBeVisible();
-    await expect(page.getByText("24h")).toBeVisible();
-    await expect(page.getByText("7d")).toBeVisible();
+    await expect(page.getByRole("button", { name: "1h", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "24h", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "7d", exact: true })).toBeVisible();
 
-    // Recent Events section
-    await expect(page.getByText("Recent Events")).toBeVisible();
-
-    // DLP Policies section
-    await expect(page.getByRole("heading", { name: "DLP Policies" })).toBeVisible();
+    // Events section
+    await expect(page.getByText("Security Events by Task")).toBeVisible();
   });
 
   test("security page shows DLP policies from database", async ({ page }) => {
     test.setTimeout(30_000);
 
     try {
-      const health = await page.request.get("http://localhost:8081/api/health");
+      const health = await page.request.get("http://localhost:9090/api/health");
       if (!health.ok()) {
         test.skip(true, "Backend not reachable");
         return;
@@ -100,11 +97,11 @@ test.describe("Security Audit Trail & Dashboard", () => {
     }
 
     await login(page);
-    await page.goto("/config/security");
+    await page.goto("/config/security/rules");
     await page.waitForLoadState("domcontentloaded");
 
-    // Verify DLP policies table has data
-    await expect(page.getByRole("heading", { name: "DLP Policies" })).toBeVisible({
+    // Verify Response Rules section has data
+    await expect(page.getByRole("heading", { name: "Response Rules" })).toBeVisible({
       timeout: 10_000,
     });
 
@@ -126,7 +123,7 @@ test.describe("Security Audit Trail & Dashboard", () => {
     test.setTimeout(30_000);
 
     try {
-      const health = await page.request.get("http://localhost:8081/api/health");
+      const health = await page.request.get("http://localhost:9090/api/health");
       if (!health.ok()) {
         test.skip(true, "Backend not reachable");
         return;
@@ -157,7 +154,7 @@ test.describe("Security Audit Trail & Dashboard", () => {
     test.setTimeout(30_000);
 
     try {
-      const health = await page.request.get("http://localhost:8081/api/health");
+      const health = await page.request.get("http://localhost:9090/api/health");
       if (!health.ok()) {
         test.skip(true, "Backend not reachable");
         return;
@@ -188,7 +185,7 @@ test.describe("Security Audit Trail & Dashboard", () => {
     test.setTimeout(30_000);
 
     try {
-      const health = await page.request.get("http://localhost:8081/api/health");
+      const health = await page.request.get("http://localhost:9090/api/health");
       if (!health.ok()) {
         test.skip(true, "Backend not reachable");
         return;
@@ -220,7 +217,7 @@ test.describe("Security Audit Trail & Dashboard", () => {
     test.setTimeout(30_000);
 
     try {
-      const health = await page.request.get("http://localhost:8081/api/health");
+      const health = await page.request.get("http://localhost:9090/api/health");
       if (!health.ok()) {
         test.skip(true, "Backend not reachable");
         return;
@@ -290,7 +287,7 @@ test.describe("Security Audit Trail & Dashboard", () => {
     test.setTimeout(30_000);
 
     try {
-      const health = await page.request.get("http://localhost:8081/api/health");
+      const health = await page.request.get("http://localhost:9090/api/health");
       if (!health.ok()) {
         test.skip(true, "Backend not reachable");
         return;
@@ -304,15 +301,15 @@ test.describe("Security Audit Trail & Dashboard", () => {
     await page.goto("/");
     await page.waitForLoadState("networkidle");
 
-    // Click Security link in sidebar
-    const securityLink = page
+    // Click Audit Log link in sidebar (formerly "Security")
+    const auditLogLink = page
       .locator("nav, aside, [role='navigation']")
-      .getByText("Security");
-    await expect(securityLink).toBeVisible({ timeout: 5000 });
-    await securityLink.click();
+      .getByText("Audit Log");
+    await expect(auditLogLink).toBeVisible({ timeout: 5000 });
+    await auditLogLink.click();
 
-    await page.waitForURL("**/config/security");
-    await expect(page.locator("h1").filter({ hasText: "Security" })).toBeVisible({
+    await page.waitForURL("**/config/security/events");
+    await expect(page.locator("h1").filter({ hasText: "Audit Log" })).toBeVisible({
       timeout: 5000,
     });
   });
@@ -321,7 +318,7 @@ test.describe("Security Audit Trail & Dashboard", () => {
     test.setTimeout(30_000);
 
     try {
-      const health = await page.request.get("http://localhost:8081/api/health");
+      const health = await page.request.get("http://localhost:9090/api/health");
       if (!health.ok()) {
         test.skip(true, "Backend not reachable");
         return;
@@ -332,16 +329,16 @@ test.describe("Security Audit Trail & Dashboard", () => {
     }
 
     await login(page);
-    await page.goto("/config/security");
+    await page.goto("/config/security/events");
     await page.waitForLoadState("networkidle");
 
     // Click different period options
-    await page.getByText("7d").click();
+    await page.getByRole("button", { name: "7d", exact: true }).click();
     await page.waitForTimeout(500);
     // Summary cards should still be visible
     await expect(page.getByText("Total Events")).toBeVisible();
 
-    await page.getByText("1h").click();
+    await page.getByRole("button", { name: "1h", exact: true }).click();
     await page.waitForTimeout(500);
     await expect(page.getByText("Total Events")).toBeVisible();
   });
@@ -354,7 +351,7 @@ test.describe("Security Audit Trail & Dashboard", () => {
     // Pre-flight: need LLM for this test
     try {
       const health = await page.request.get(
-        "http://localhost:8081/api/health/llm",
+        "http://localhost:9090/api/health/llm",
       );
       if (!health.ok()) {
         test.skip(true, "Backend not OK");

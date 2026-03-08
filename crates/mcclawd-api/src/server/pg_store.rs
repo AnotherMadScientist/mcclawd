@@ -127,13 +127,43 @@ impl PgTaskStore {
     }
 
     /// Delete a task (cascades to events + chat history via FK).
+    /// Also cleans up security data (dlp_findings → security_events) before deleting the task row.
     pub async fn delete_task(&self, id: &str) -> Result<(), McclawdError> {
+        // Delete DLP findings for this task's security events
+        sqlx::query("DELETE FROM dlp_findings WHERE security_event_id IN (SELECT id FROM security_events WHERE task_id = $1)")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(pg_err)?;
+
+        // Delete security events for this task
+        sqlx::query("DELETE FROM security_events WHERE task_id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(pg_err)?;
+
+        // Delete the task row itself
         sqlx::query("DELETE FROM tasks WHERE id = $1")
             .bind(id)
             .execute(&self.pool)
             .await
             .map_err(pg_err)?;
         Ok(())
+    }
+
+    /// Check if a task was last updated more than `hours` ago.
+    /// Used by GC to apply retention period before deleting completed tasks.
+    pub async fn is_task_older_than(&self, id: &str, hours: i64) -> Result<bool, McclawdError> {
+        let row: Option<(bool,)> = sqlx::query_as(
+            "SELECT updated_at < NOW() - make_interval(hours => $2) FROM tasks WHERE id = $1",
+        )
+        .bind(id)
+        .bind(hours as i32)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(pg_err)?;
+        Ok(row.map(|(old,)| old).unwrap_or(true))
     }
 
     /// Delete all tasks for a user, optionally filtered by tag.
@@ -1036,6 +1066,20 @@ impl PgTaskStore {
         Ok(())
     }
 
+    /// Remove all security events (and cascaded dlp_findings) for a task.
+    /// dlp_findings rows are auto-deleted via ON DELETE CASCADE on security_event_id FK.
+    pub async fn delete_security_events_by_task(
+        &self,
+        task_id: &str,
+    ) -> Result<(), McclawdError> {
+        sqlx::query("DELETE FROM security_events WHERE task_id = $1")
+            .bind(task_id)
+            .execute(&self.pool)
+            .await
+            .map_err(pg_err)?;
+        Ok(())
+    }
+
     /// Load all persistent container records (for startup reconnection).
     /// Returns (container_id, task_id, agent_type, workspace_dir).
     pub async fn load_persistent_containers(
@@ -1166,6 +1210,64 @@ impl PgTaskStore {
         Ok(rows)
     }
 
+    /// Events grouped by task, with task prompt and per-event findings.
+    pub async fn list_events_grouped_by_task(
+        &self,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let rows = sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT json_build_object(
+                'task_id', e.task_id,
+                'task_prompt', COALESCE(t.prompt, ''),
+                'task_status', COALESCE(t.status, ''),
+                'event_count', COUNT(*),
+                'finding_count', COALESCE(SUM((SELECT COUNT(*) FROM dlp_findings f WHERE f.security_event_id = e.id)), 0),
+                'threat_levels', COALESCE((
+                    SELECT json_object_agg(tl, cnt) FROM (
+                        SELECT COALESCE(e2.threat_level, 'none') as tl, COUNT(*) as cnt
+                        FROM security_events e2 WHERE e2.task_id = e.task_id
+                          AND ($1::timestamptz IS NULL OR e2.created_at >= $1)
+                        GROUP BY e2.threat_level
+                    ) sub
+                ), '{}'::json),
+                'events', COALESCE((
+                    SELECT json_agg(ev ORDER BY ev->>'created_at' DESC) FROM (
+                        SELECT json_build_object(
+                            'id', e3.id, 'event_type', e3.event_type,
+                            'tool_name', e3.tool_name, 'direction', e3.direction,
+                            'threat_level', e3.threat_level, 'action_taken', e3.action_taken,
+                            'details', e3.details, 'created_at', e3.created_at,
+                            'findings', COALESCE((
+                                SELECT json_agg(json_build_object(
+                                    'id', f.id, 'finding_type', f.finding_type,
+                                    'tag', f.tag, 'pattern_name', f.pattern_name,
+                                    'confidence', f.confidence, 'redacted_preview', f.redacted_preview
+                                )) FROM dlp_findings f WHERE f.security_event_id = e3.id
+                            ), '[]'::json)
+                        ) as ev
+                        FROM security_events e3 WHERE e3.task_id = e.task_id
+                          AND ($1::timestamptz IS NULL OR e3.created_at >= $1)
+                        ORDER BY e3.created_at DESC
+                        LIMIT 50
+                    ) sub
+                ), '[]'::json)
+            )
+            FROM security_events e
+            LEFT JOIN tasks t ON t.id = e.task_id
+            WHERE ($1::timestamptz IS NULL OR e.created_at >= $1)
+              AND (t.id IS NOT NULL OR e.task_id = '__system__')
+            GROUP BY e.task_id, t.prompt, t.status
+            ORDER BY MAX(e.created_at) DESC
+            LIMIT $2"
+        )
+        .bind(since)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     pub async fn security_summary(
         &self,
         user_id: &str,
@@ -1179,26 +1281,47 @@ impl PgTaskStore {
                 'allowed', COUNT(*) FILTER (WHERE action_taken = 'allowed'),
                 'by_type', COALESCE((
                     SELECT json_object_agg(event_type, cnt)
-                    FROM (SELECT event_type, COUNT(*) as cnt FROM security_events
-                          WHERE user_id = $1 AND ($2::timestamptz IS NULL OR created_at >= $2)
-                          GROUP BY event_type) sub
+                    FROM (SELECT se.event_type, COUNT(*) as cnt FROM security_events se
+                          LEFT JOIN tasks tt ON tt.id = se.task_id
+                          WHERE se.user_id = $1 AND ($2::timestamptz IS NULL OR se.created_at >= $2)
+                            AND (tt.id IS NOT NULL OR se.task_id = '__system__')
+                          GROUP BY se.event_type) sub
                 ), '{}'::json),
                 'by_threat', COALESCE((
                     SELECT json_object_agg(threat_level, cnt)
-                    FROM (SELECT COALESCE(threat_level, 'unknown') as threat_level, COUNT(*) as cnt
-                          FROM security_events
-                          WHERE user_id = $1 AND ($2::timestamptz IS NULL OR created_at >= $2)
-                          GROUP BY threat_level) sub
+                    FROM (SELECT COALESCE(se.threat_level, 'unknown') as threat_level, COUNT(*) as cnt
+                          FROM security_events se
+                          LEFT JOIN tasks tt ON tt.id = se.task_id
+                          WHERE se.user_id = $1 AND ($2::timestamptz IS NULL OR se.created_at >= $2)
+                            AND (tt.id IS NOT NULL OR se.task_id = '__system__')
+                          GROUP BY se.threat_level) sub
                 ), '{}'::json)
             )
-            FROM security_events
-            WHERE user_id = $1 AND ($2::timestamptz IS NULL OR created_at >= $2)"
+            FROM security_events e
+            LEFT JOIN tasks t ON t.id = e.task_id
+            WHERE e.user_id = $1 AND ($2::timestamptz IS NULL OR e.created_at >= $2)
+              AND (t.id IS NOT NULL OR e.task_id = '__system__')"
         )
         .bind(user_id)
         .bind(since)
         .fetch_one(&self.pool)
         .await?;
         Ok(row)
+    }
+
+    /// Remove orphaned security data: events and findings for tasks that no longer exist.
+    /// Safe to call at startup to clean up stale data from previously deleted tasks.
+    pub async fn cleanup_orphaned_security_events(&self) -> anyhow::Result<u64> {
+        // Delete findings for events whose tasks no longer exist
+        sqlx::query("DELETE FROM dlp_findings WHERE security_event_id IN (SELECT se.id FROM security_events se LEFT JOIN tasks t ON t.id = se.task_id WHERE t.id IS NULL AND se.task_id != '__system__')")
+            .execute(&self.pool)
+            .await?;
+
+        let result = sqlx::query("DELETE FROM security_events WHERE task_id NOT IN (SELECT id FROM tasks) AND task_id != '__system__'")
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected())
     }
 
     pub async fn list_dlp_policies(&self) -> anyhow::Result<Vec<serde_json::Value>> {

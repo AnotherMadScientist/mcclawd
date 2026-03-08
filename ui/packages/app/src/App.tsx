@@ -14,7 +14,8 @@ import { SecretsPage } from "./pages/SecretsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { DockerPage } from "./pages/DockerPage";
 import { UsagePage } from "./pages/UsagePage";
-import { SecurityPage } from "./pages/SecurityPage";
+import { SecurityEventsPage } from "./pages/SecurityEventsPage";
+import { SecurityRulesPage } from "./pages/SecurityRulesPage";
 
 const queryClient = new QueryClient();
 
@@ -37,7 +38,8 @@ export default function App() {
               <Route path="config/settings" element={<SettingsPage />} />
               <Route path="config/docker" element={<DockerPage />} />
               <Route path="config/usage" element={<UsagePage />} />
-              <Route path="config/security" element={<SecurityPage />} />
+              <Route path="config/security/events" element={<SecurityEventsPage />} />
+              <Route path="config/security/rules" element={<SecurityRulesPage />} />
             </Route>
           </Routes>
         </BrowserRouter>

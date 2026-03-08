@@ -12,6 +12,14 @@ pub struct ContextBuilder {
     skills_dir: Option<PathBuf>,
     /// Max chars of skill content injected into the prompt (Gap 6 token budget).
     max_skill_chars: usize,
+    /// Optional filter: only load these skill names from disk.
+    /// None = load all skills (legacy behavior for system agent).
+    /// Some(empty vec) = load NO skills.
+    /// Some(vec!["a", "b"]) = load only those named skills.
+    skill_filter: Option<Vec<String>>,
+    /// Pre-built skill context string (from MCCLAWD_SKILL_CONTEXT env var in containers).
+    /// When set, this overrides disk-based skill loading entirely.
+    skill_context_override: Option<String>,
 }
 
 impl ContextBuilder {
@@ -20,6 +28,8 @@ impl ContextBuilder {
             workspace,
             skills_dir: None,
             max_skill_chars: 50_000,
+            skill_filter: None,
+            skill_context_override: None,
         }
     }
 
@@ -32,6 +42,20 @@ impl ContextBuilder {
     /// Override the 50_000-char skill context budget (Gap 6).
     pub fn with_max_skill_chars(mut self, limit: usize) -> Self {
         self.max_skill_chars = limit;
+        self
+    }
+
+    /// Filter which skills are loaded from disk.
+    /// Empty slice = no skills loaded. Only matching skill names are included.
+    pub fn with_skill_filter(mut self, filter: Vec<String>) -> Self {
+        self.skill_filter = Some(filter);
+        self
+    }
+
+    /// Override disk-based skill loading with a pre-built skill context string.
+    /// Used by the runner binary when MCCLAWD_SKILL_CONTEXT env var is set.
+    pub fn with_skill_context_override(mut self, context: String) -> Self {
+        self.skill_context_override = Some(context);
         self
     }
 
@@ -71,14 +95,29 @@ impl ContextBuilder {
         }
 
         // 7. Installed skills — with relevance filter + char budget (Gap 6)
-        if let Some(skills_dir) = &self.skills_dir {
-            let assigned = extract_assigned_skills(self.workspace.agents.as_deref());
-            let skills_content = load_installed_skills(skills_dir, &assigned, self.max_skill_chars);
-            if !skills_content.is_empty() {
+        // Priority: skill_context_override > skill_filter + disk loading
+        if let Some(ref override_ctx) = self.skill_context_override {
+            if !override_ctx.is_empty() {
                 sections.push(format!(
                     "\n---\n\n## Installed Skills\n\nYou have the following skills available. Follow the instructions in each skill when relevant to the user's request.\n\n{}",
-                    skills_content
+                    override_ctx
                 ));
+            }
+        } else if let Some(skills_dir) = &self.skills_dir {
+            // Check skill_filter: Some(empty) = no skills, None = all skills
+            let should_load = match &self.skill_filter {
+                Some(filter) => !filter.is_empty(),
+                None => true, // No filter = load all (system agent behavior)
+            };
+            if should_load {
+                let assigned = extract_assigned_skills(self.workspace.agents.as_deref());
+                let skills_content = load_installed_skills(skills_dir, &assigned, self.max_skill_chars, self.skill_filter.as_deref());
+                if !skills_content.is_empty() {
+                    sections.push(format!(
+                        "\n---\n\n## Installed Skills\n\nYou have the following skills available. Follow the instructions in each skill when relevant to the user's request.\n\n{}",
+                        skills_content
+                    ));
+                }
             }
         }
 
@@ -118,7 +157,8 @@ fn extract_assigned_skills(agents_md: Option<&str>) -> Vec<String> {
 
 /// Load installed skills with relevance filter and character budget (Gap 6).
 /// Assigned skills appear first; total output capped at `max_chars`.
-fn load_installed_skills(skills_dir: &Path, assigned: &[String], max_chars: usize) -> String {
+/// When `skill_filter` is Some, only skills matching the filter names are loaded.
+fn load_installed_skills(skills_dir: &Path, assigned: &[String], max_chars: usize, skill_filter: Option<&[String]>) -> String {
     let entries = match std::fs::read_dir(skills_dir) {
         Ok(e) => e,
         Err(_) => return String::new(),
@@ -129,6 +169,12 @@ fn load_installed_skills(skills_dir: &Path, assigned: &[String], max_chars: usiz
         .filter(|e| e.path().is_dir())
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
+            // Apply skill filter: skip skills not in the filter list
+            if let Some(filter) = skill_filter {
+                if !filter.iter().any(|f| f == &name) {
+                    return None;
+                }
+            }
             let content = std::fs::read_to_string(entry.path().join("SKILL.md")).ok()?;
             Some((name, content))
         })

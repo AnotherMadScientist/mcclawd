@@ -217,6 +217,7 @@ pub async fn basic_scan(skill_path: &Path) -> anyhow::Result<ScanResult> {
 
     // Check for dangerous patterns in skill instructions
     let patterns: &[(&str, &str, &str, &str)] = &[
+        // --- Original 11 patterns ---
         ("rm -rf", "W001", "warning", "Skill references destructive file deletion (rm -rf)"),
         ("sudo ", "W002", "warning", "Skill references sudo/elevated privileges"),
         ("curl.*| sh", "E001", "issue", "Skill pipes remote content to shell (curl | sh)"),
@@ -228,6 +229,29 @@ pub async fn basic_scan(skill_path: &Path) -> anyhow::Result<ScanResult> {
         ("password", "W007", "warning", "Skill references passwords directly"),
         ("chmod 777", "E003", "issue", "Skill sets overly permissive file permissions (777)"),
         ("--no-verify", "W008", "warning", "Skill bypasses verification checks"),
+        // --- New patterns: obfuscation & backdoors ---
+        ("base64 -d", "W009", "warning", "Skill decodes base64 data (possible obfuscation)"),
+        ("nc -l", "E004", "issue", "Skill uses netcat listener (potential backdoor)"),
+        ("reverse shell", "E005", "issue", "Skill references reverse shell"),
+        ("/etc/passwd", "W010", "warning", "Skill accesses system password file"),
+        ("/etc/shadow", "E006", "issue", "Skill accesses shadow password file"),
+        ("ssh-keygen", "W011", "warning", "Skill generates SSH keys"),
+        ("private_key", "W012", "warning", "Skill references private keys"),
+        // --- New patterns: secret/credential references ---
+        ("secret", "W013", "warning", "Skill references secrets directly"),
+        ("token", "W014", "warning", "Skill references tokens directly"),
+        ("credentials", "W015", "warning", "Skill references credentials"),
+        // --- New patterns: cryptocurrency ---
+        ("bitcoin", "W016", "warning", "Skill references cryptocurrency"),
+        ("wallet", "W017", "warning", "Skill references wallets"),
+        // --- New patterns: surveillance ---
+        ("keylogger", "E007", "issue", "Skill references keylogging"),
+        ("screen capture", "W018", "warning", "Skill references screen capture"),
+        // --- New patterns: arbitrary command execution ---
+        ("os.system", "W019", "warning", "Skill uses os.system (arbitrary commands)"),
+        ("subprocess", "W020", "warning", "Skill uses subprocess (arbitrary commands)"),
+        ("import os", "W021", "warning", "Skill imports os module"),
+        ("import sys", "W022", "warning", "Skill imports sys module"),
     ];
 
     for &(pattern, code, severity, description) in patterns {

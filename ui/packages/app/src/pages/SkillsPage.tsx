@@ -16,7 +16,6 @@ import {
   Shield,
   ShieldAlert,
   ShieldCheck,
-  ShieldQuestion,
 } from "lucide-react";
 import { api } from "../api/client";
 import { getToken } from "../api/client";
@@ -101,9 +100,10 @@ function getTagColor(tags: string[]): string {
 function SecurityBadge({ scanResult }: { scanResult?: ScanResult | null }) {
   if (!scanResult || scanResult.status === "NotScanned") {
     return (
-      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-muted text-[10px] text-muted-foreground leading-none">
-        <ShieldQuestion className="w-2.5 h-2.5" />
-        Not Scanned
+      <span title="Not yet scanned" className="text-gray-400 dark:text-gray-600">
+        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        </svg>
       </span>
     );
   }
@@ -158,6 +158,15 @@ function BrowseCard({
 }) {
   const visibleTags = skill.tags ? skill.tags.slice(0, 3) : [];
   const accentColor = getTagColor(skill.tags);
+  const scanTriggered = useRef(false);
+
+  // Auto-trigger preview scan on mount (debounced) if no result yet
+  useEffect(() => {
+    if (scanResult || scanPending || scanTriggered.current) return;
+    scanTriggered.current = true;
+    const timer = setTimeout(() => onScan(), 200 + Math.random() * 800);
+    return () => clearTimeout(timer);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div
@@ -301,6 +310,11 @@ function InstalledRow({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1">
           <p className="text-xs font-medium truncate">{skill.name}</p>
+          {skill.is_stub && (
+            <span className="bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 text-xs px-1.5 py-0.5 rounded">
+              Stub
+            </span>
+          )}
           {scanResult && <SecurityBadge scanResult={scanResult} />}
         </div>
         <p className="text-[10px] text-muted-foreground">v{skill.version}</p>
@@ -732,16 +746,20 @@ function SkillDetailDialog({
     queryFn: () => api.skills.content(name).then((r) => r.content).catch(() => null),
   });
 
-  // Security scan query (for all skills — backend handles both installed and uninstalled)
+  // Security scan query — use full scan for installed, preview-scan for uninstalled
+  const isInstalled = !!installedInfo;
   const { data: scanResult } = useQuery({
     queryKey: ["skill-scan", name],
-    queryFn: () => api.skills.scan(name).catch(() => null),
+    queryFn: () =>
+      (isInstalled ? api.skills.scan(name) : api.skills.previewScan(name)).catch(() => null),
   });
 
   const handleScan = async () => {
     setScanning(true);
     try {
-      const result = await api.skills.scan(name);
+      const result = isInstalled
+        ? await api.skills.scan(name)
+        : await api.skills.previewScan(name);
       queryClient.setQueryData(["skill-scan", name], result);
       if (result.status === "Pass") {
         onNotify("success", `Scan passed — no issues found`);
@@ -749,8 +767,10 @@ function SkillDetailDialog({
         onNotify("error", `Scan found ${result.issues.length} warning(s)`);
       } else if (result.status === "Critical") {
         onNotify("error", `Scan found ${result.issues.length} critical issue(s)`);
+      } else if (result.status === "NotScanned") {
+        onNotify("error", "Skill content not available for scanning");
       } else {
-        onNotify("error", "Scan completed — no results available");
+        onNotify("success", "Scan completed");
       }
     } catch {
       onNotify("error", "Scan failed");
@@ -900,6 +920,14 @@ function SkillDetailDialog({
                   Preview from catalog metadata — install to see full skill content
                 </div>
               )}
+              {skillContent && skillContent.length < 500 && (
+                <div className="mx-6 mt-4 bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-800 rounded-md p-3 mb-4 font-sans">
+                  <p className="text-sm text-amber-800 dark:text-amber-200">
+                    This skill has limited content. The full SKILL.md may not have been downloaded from ClawHub.
+                    Try clicking "Scan" to trigger a content upgrade.
+                  </p>
+                </div>
+              )}
               {sections.map((section, i) => (
                 <div
                   key={`${section.key}-${i}`}
@@ -967,6 +995,7 @@ export function SkillsPage() {
   const [scanningSkill, setScanningSkill] = useState<string | null>(null);
   const [displayCount, setDisplayCount] = useState(48);
   const [scanFilter, setScanFilter] = useState<"all" | "Pass" | "Warning" | "Critical" | "NotScanned">("all");
+  const [upgrading, setUpgrading] = useState(false);
   const scanLoadedRef = useRef(false);
 
   const autoRefreshed = useRef(false);
@@ -1014,6 +1043,24 @@ export function SkillsPage() {
   });
 
   const installedNames = new Set(installed.map((s) => s.name));
+
+  // Pre-load scan results from installed skills' persisted scan_status
+  useEffect(() => {
+    if (scanLoadedRef.current || installed.length === 0) return;
+    scanLoadedRef.current = true;
+    const preloaded: Record<string, ScanResult> = {};
+    for (const skill of installed) {
+      if (skill.scan_status && skill.scan_status !== "NotScanned") {
+        preloaded[skill.name] = {
+          status: skill.scan_status,
+          issues: skill.scan_issues || [],
+        };
+      }
+    }
+    if (Object.keys(preloaded).length > 0) {
+      setScanResults((prev) => ({ ...preloaded, ...prev }));
+    }
+  }, [installed]);
 
   const {
     data: catalog,
@@ -1102,6 +1149,19 @@ export function SkillsPage() {
       }).catch((err) => { console.warn(`Scan unavailable for ${skill.name}:`, err.message); });
     }
   }, [installed]);
+
+  const handleUpgradeStubs = useCallback(async () => {
+    setUpgrading(true);
+    try {
+      const result = await api.skills.upgradeStubs();
+      queryClient.invalidateQueries({ queryKey: ["skills"] });
+      notify("success", `Upgraded ${result.upgraded} stub(s)${result.failed > 0 ? `, ${result.failed} failed` : ""}`);
+    } catch (err: unknown) {
+      notify("error", `Upgrade failed: ${err instanceof Error ? err.message : "unknown error"}`);
+    } finally {
+      setUpgrading(false);
+    }
+  }, [queryClient, notify]);
 
   // Auto-refresh catalog on first load if empty
   useEffect(() => {
@@ -1250,9 +1310,20 @@ export function SkillsPage() {
               <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                 Installed
               </h2>
-              <span className="text-[10px] tabular-nums text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full">
-                {installed.length}
-              </span>
+              <div className="flex items-center gap-1.5">
+                {installed.some((s) => s.is_stub) && (
+                  <button
+                    onClick={handleUpgradeStubs}
+                    disabled={upgrading}
+                    className="text-xs text-blue-600 hover:text-blue-700 dark:text-blue-400 disabled:opacity-50"
+                  >
+                    {upgrading ? "Upgrading..." : "Upgrade Stubs"}
+                  </button>
+                )}
+                <span className="text-[10px] tabular-nums text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full">
+                  {installed.length}
+                </span>
+              </div>
             </div>
 
             {installedLoading && (

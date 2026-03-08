@@ -5,15 +5,23 @@ services:
   postgres:
     image: postgres:16-alpine
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
-      POSTGRES_DB: mcclawd
-      POSTGRES_USER: mcclawd
-      POSTGRES_PASSWORD: mcclawd
+      POSTGRES_DB: ${POSTGRES_DB:-mcclawd}
+      POSTGRES_USER: ${POSTGRES_USER:-mcclawd}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mcclawd}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    tmpfs:
+      - /tmp:size=64M
+      - /run/postgresql:size=16M
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U mcclawd -d mcclawd"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mcclawd} -d ${POSTGRES_DB:-mcclawd}"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -24,15 +32,19 @@ services:
   agentgateway:
     build:
       context: ./docker/agentgateway
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
     volumes:
       - ./config/agentgateway.yaml:/config/agentgateway.yaml:ro
       - mcclawd-data:/data
     environment:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       # Services on the same Compose network use the service name as hostname
-      - DATABASE_URL=postgresql://mcclawd:mcclawd@postgres:5432/mcclawd
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-mcclawd}:${POSTGRES_PASSWORD:-mcclawd}@postgres:5432/${POSTGRES_DB:-mcclawd}
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       postgres:
         condition: service_healthy
@@ -45,6 +57,13 @@ services:
       context: ./docker/security-sidecar
     ports:
       - "127.0.0.1:8082:8082"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
       interval: 10s
@@ -53,6 +72,37 @@ services:
     restart: unless-stopped
     networks:
       - mcclawd-net
+
+  invariant:
+    build: ./docker/invariant
+    ports:
+      - "127.0.0.1:8083:8083"
+    networks:
+      - mcclawd-net
+    environment:
+      - UPSTREAM_URL=http://agentgateway:3000
+    depends_on:
+      agentgateway:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8083/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  agentguard:
+    build: ./docker/agentguard
+    ports:
+      - "127.0.0.1:8084:8084"
+    networks:
+      - mcclawd-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8084/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
 networks:
   mcclawd-net:

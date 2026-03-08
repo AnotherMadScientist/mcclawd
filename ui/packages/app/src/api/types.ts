@@ -14,6 +14,8 @@ export interface McpServer {
   name: string;
   image: string;
   port: number;
+  env?: string[];
+  volumes?: string[];
 }
 
 export type ToolProfile = "Minimal" | "Coding" | "Research" | "Full";
@@ -67,6 +69,7 @@ export interface InstalledSkill {
   version: string;
   source: { Local: string } | { Registry: { registry_url: string } };
   installed_at: string;
+  is_stub?: boolean;
   scan_status?: ScanStatus;
   scan_issues?: ScanIssue[];
 }
@@ -314,8 +317,26 @@ export interface SecuritySummary {
 
 export interface SecurityStatus {
   pipeline_hooks: number;
+  pipeline_active: boolean;
   sidecar_healthy: boolean;
   sidecar_url: string;
+  dlp_pattern_count: number;
+}
+
+export interface DlpPatternInfo {
+  name: string;
+  action: string;
+  category: string;
+}
+
+export interface TaskSecurityGroup {
+  task_id: string | null;
+  task_prompt: string;
+  task_status: string;
+  event_count: number;
+  finding_count: number;
+  threat_levels: Record<string, number>;
+  events: SecurityEvent[];
 }
 
 export interface DlpPolicy {

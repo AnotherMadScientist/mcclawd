@@ -91,8 +91,8 @@ test.describe("Settings Page", () => {
     // Wait for config to load (model value appears)
     await expect(main.getByText(/claude-/).first()).toBeVisible({ timeout: 8000 });
 
-    // Model: should show a non-empty model name
-    const modelText = await main.getByText(/claude-sonnet|claude-opus|claude-haiku/).first().textContent({ timeout: 5000 });
+    // Model: should show a non-empty model name (handles both old "claude-3-haiku-*" and new "claude-haiku-*" formats)
+    const modelText = await main.getByText(/claude-/).first().textContent({ timeout: 5000 });
     expect(modelText?.trim().length).toBeGreaterThan(0);
 
     // Max Turns: rendered as plain number in a <p> — scope to settings-fields to avoid sidebar hits
@@ -183,7 +183,7 @@ test.describe("Settings Page", () => {
     await modelCard.getByRole("button", { name: "Save" }).click();
     // After save, dropdown should be gone and value should show
     await expect(select).not.toBeVisible({ timeout: 5000 });
-    await expect(page.getByText(/claude-haiku|claude-sonnet|claude-opus/).first()).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText(/claude-/).first()).toBeVisible({ timeout: 5000 });
   });
 
   test("can edit Max Turns field", async ({ page }) => {
@@ -229,7 +229,7 @@ test.describe("Settings Page", () => {
     await expect(select).not.toBeVisible({ timeout: 5000 });
     // Success toast or model name shown
     await expect(
-      page.getByText(/claude-haiku|claude-sonnet|claude-opus/).first(),
+      page.getByText(/claude-/).first(),
     ).toBeVisible({ timeout: 5000 });
   });
 

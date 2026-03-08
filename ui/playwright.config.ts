@@ -20,7 +20,7 @@ export default defineConfig({
   webServer: [
     {
       command: "cargo run -p mcclawd-api -- serve",
-      port: 8081,
+      port: 9090,
       reuseExistingServer: true,
       cwd: "..",
       timeout: 120_000,

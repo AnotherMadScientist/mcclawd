@@ -28,6 +28,8 @@ use super::state::AppState;
 pub struct InstalledSkillWithScan {
     #[serde(flatten)]
     pub info: InstalledSkillInfo,
+    /// Whether this skill has a stub SKILL.md (< 500 bytes or no `## ` sections).
+    pub is_stub: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scan_status: Option<ScanStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -107,19 +109,41 @@ async fn build_installer(state: &AppState) -> (ClawHubClient, SkillInstaller) {
 }
 
 /// GET /api/skills — list installed skills.
+/// Skips directories that have no SKILL.md file at all.
+/// Marks stubs (< 500 bytes or no `## ` sections) with `is_stub: true`.
 pub async fn list_installed(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<InstalledSkillWithScan>>, impl IntoResponse> {
     let (_, installer) = build_installer(&state).await;
+    let config = state.config.read().await;
+    let managed_dir = config.skills.managed_dir.clone();
+    drop(config);
+
     match installer.list_installed() {
         Ok(skills) => {
             let enriched: Vec<InstalledSkillWithScan> = skills
                 .into_iter()
+                .filter(|info| {
+                    // Skip dirs that have no SKILL.md at all
+                    let skill_md = managed_dir.join(&info.name).join("SKILL.md");
+                    skill_md.exists()
+                })
                 .map(|info| {
                     let scan = state.scan_cache.get(&info.name).map(|r| r.clone());
+
+                    // Detect stub: < 500 bytes or no `## ` section headers
+                    let is_stub = {
+                        let skill_md = managed_dir.join(&info.name).join("SKILL.md");
+                        match std::fs::read_to_string(&skill_md) {
+                            Ok(content) => content.len() < 500 || !content.contains("## "),
+                            Err(_) => true,
+                        }
+                    };
+
                     InstalledSkillWithScan {
                         scan_status: scan.as_ref().map(|s| s.status.clone()),
                         scan_issues: scan.map(|s| s.issues.clone()),
+                        is_stub,
                         info,
                     }
                 })
@@ -198,10 +222,39 @@ pub async fn install_skill(
     }
 
     // Fallback: install from cached metadata (generates stub SKILL.md)
+    // Then try to upgrade stub with full content from ClawHub in background.
     let cache = build_cache(&state).await;
     match cache.get_skill(&body.name).await {
         Some(meta) => match installer.install_from_meta(&meta) {
-            Ok(info) => Ok(Json(info)),
+            Ok(info) => {
+                // Try to upgrade stub SKILL.md with full content from ClawHub
+                let config2 = state.config.read().await;
+                let skill_dir = config2.skills.managed_dir.join(&body.name);
+                let clawhub_api = config2.skills.clawhub_api.clone();
+                drop(config2);
+                let name2 = body.name.clone();
+                let scan_cache2 = state.scan_cache.clone();
+                let store2 = state.pg_store.clone();
+                tokio::spawn(async move {
+                    let client = mcclawd_core::clawhub::client::ClawHubClient::new(&clawhub_api);
+                    if let Ok(content) = client.download_skill_md(&name2, "latest").await {
+                        let skill_md_path = skill_dir.join("SKILL.md");
+                        if let Err(e) = tokio::fs::write(&skill_md_path, &content).await {
+                            tracing::warn!("Failed to upgrade stub SKILL.md for '{name2}': {e}");
+                            return;
+                        }
+                        tracing::info!("Upgraded stub SKILL.md for '{name2}' ({} bytes)", content.len());
+                        // Auto-scan with full content
+                        if let Ok(result) = scanner::scan_skill(&skill_dir).await {
+                            if let Ok(json_val) = serde_json::to_value(&result) {
+                                let _ = store2.save_scan_result("admin", &name2, &json_val).await;
+                            }
+                            scan_cache2.insert(name2, result);
+                        }
+                    }
+                });
+                Ok(Json(info))
+            }
             Err(e) => {
                 tracing::error!("Failed to install skill '{}' from cache: {e}", body.name);
                 Err((
@@ -431,6 +484,25 @@ pub async fn scan_skill(
     let clawhub_api = config.skills.clawhub_api.clone();
     drop(config);
 
+    // Check if installed SKILL.md is a stub (< 500 bytes or no sections).
+    // If so, try to download the full content first.
+    let skill_md_file = skill_path.join("SKILL.md");
+    let is_installed_stub = if skill_md_file.exists() {
+        let content = tokio::fs::read_to_string(&skill_md_file).await.unwrap_or_default();
+        content.len() < 500 || !content.contains("## ")
+    } else {
+        !skill_path.exists() // not installed at all
+    };
+
+    if is_installed_stub && skill_path.exists() {
+        // Try to upgrade the stub with full content from ClawHub
+        let client = mcclawd_core::clawhub::client::ClawHubClient::new(&clawhub_api);
+        if let Ok(content) = client.download_skill_md(&name, "latest").await {
+            let _ = tokio::fs::write(&skill_md_file, &content).await;
+            tracing::info!("Upgraded stub SKILL.md for scan of '{name}' ({} bytes)", content.len());
+        }
+    }
+
     let scan_path = if skill_path.exists() {
         skill_path
     } else {
@@ -534,11 +606,119 @@ pub async fn preview_scan_skill(
             let _ = tokio::fs::remove_dir_all(&temp_dir).await;
             Ok(Json(result))
         }
-        None => Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Skill content not available for preview scan"})),
-        )),
+        None => {
+            // Content unavailable (e.g. ClawHub 429 rate limit) — return NotScanned
+            // instead of 404 so the frontend renders a neutral badge rather than an error.
+            Ok(Json(ScanResult {
+                status: ScanStatus::NotScanned,
+                issues: vec![],
+            }))
+        }
     }
+}
+
+/// Response for the upgrade-stubs endpoint.
+#[derive(Debug, serde::Serialize)]
+pub struct UpgradeStubsResponse {
+    pub upgraded: u32,
+    pub failed: u32,
+    pub skipped: u32,
+    pub details: Vec<String>,
+}
+
+/// POST /api/skills/upgrade-stubs — attempt to download full SKILL.md for all stubs.
+/// Iterates installed skill directories. For each stub or empty SKILL.md,
+/// tries to download the full content from ClawHub (with retry).
+pub async fn upgrade_stubs(
+    State(state): State<AppState>,
+) -> Json<UpgradeStubsResponse> {
+    let config = state.config.read().await;
+    let managed_dir = config.skills.managed_dir.clone();
+    let clawhub_api = config.skills.clawhub_api.clone();
+    drop(config);
+
+    let mut upgraded = 0u32;
+    let mut failed = 0u32;
+    let mut skipped = 0u32;
+    let mut details = Vec::new();
+
+    let entries = match std::fs::read_dir(&managed_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            return Json(UpgradeStubsResponse {
+                upgraded: 0,
+                failed: 0,
+                skipped: 0,
+                details: vec![format!("Failed to read skills directory: {e}")],
+            });
+        }
+    };
+
+    let client = mcclawd_core::clawhub::client::ClawHubClient::new(&clawhub_api);
+
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+
+        let name = entry.file_name().to_string_lossy().to_string();
+        let skill_md_path = entry.path().join("SKILL.md");
+
+        // Determine if this needs upgrading
+        let needs_upgrade = if !skill_md_path.exists() {
+            true
+        } else {
+            match std::fs::read_to_string(&skill_md_path) {
+                Ok(content) => content.len() < 500 || !content.contains("## "),
+                Err(_) => true,
+            }
+        };
+
+        if !needs_upgrade {
+            skipped += 1;
+            continue;
+        }
+
+        // Try downloading full content from ClawHub
+        match client.download_skill_md(&name, "latest").await {
+            Ok(content) => {
+                if let Err(e) = tokio::fs::write(&skill_md_path, &content).await {
+                    failed += 1;
+                    details.push(format!("{name}: write failed: {e}"));
+                } else {
+                    upgraded += 1;
+                    details.push(format!("{name}: upgraded ({} bytes)", content.len()));
+
+                    // Re-scan with full content
+                    let skill_dir = entry.path();
+                    if let Ok(result) = scanner::scan_skill(&skill_dir).await {
+                        if let Ok(json_val) = serde_json::to_value(&result) {
+                            let _ = state
+                                .pg_store
+                                .save_scan_result("admin", &name, &json_val)
+                                .await;
+                        }
+                        state.scan_cache.insert(name, result);
+                    }
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                details.push(format!("{name}: download failed: {e}"));
+            }
+        }
+    }
+
+    tracing::info!(
+        "Upgrade stubs complete: {upgraded} upgraded, {failed} failed, {skipped} skipped"
+    );
+
+    Json(UpgradeStubsResponse {
+        upgraded,
+        failed,
+        skipped,
+        details,
+    })
 }
 
 #[cfg(test)]

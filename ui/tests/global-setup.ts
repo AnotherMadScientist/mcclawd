@@ -71,7 +71,7 @@ export default async function globalSetup() {
   // but seed anyway in case the server's auto-seed from .env hasn't run yet.
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (apiKey) {
-    await fetch("http://localhost:8081/api/secrets", {
+    await fetch("http://localhost:9090/api/secrets", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -82,7 +82,7 @@ export default async function globalSetup() {
   }
 
   // Seed a test-only secret for E2E secret management tests.
-  await fetch("http://localhost:8081/api/secrets", {
+  await fetch("http://localhost:9090/api/secrets", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

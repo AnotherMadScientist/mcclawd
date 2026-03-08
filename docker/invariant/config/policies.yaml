@@ -1,0 +1,51 @@
+# Invariant Gateway — Flow-based security policies
+# Policy types:
+#   after_sequence: block tool B if tool A was called in the same session
+#   rate_limit:     block tool if called more than max_calls times per window_seconds
+#   blocked_tools:  always block these tools unconditionally
+
+policies:
+  # Prevent exfiltration: block network calls after file reads
+  - name: no_network_after_file_read
+    type: after_sequence
+    trigger: bash  # tool A (reads files via shell)
+    block: fetch   # tool B (outbound network)
+    message: "Policy violation: network tool blocked after file-read tool in same session"
+
+  - name: no_exfil_after_secrets
+    type: after_sequence
+    trigger: secrets_read
+    block: bash
+    message: "Policy violation: shell execution blocked after secrets access"
+
+  # Rate limits — prevent runaway tool loops
+  - name: bash_rate_limit
+    type: rate_limit
+    tool: bash
+    max_calls: 30
+    window_seconds: 60
+    message: "Policy violation: bash tool rate limit exceeded (30/min)"
+
+  - name: fetch_rate_limit
+    type: rate_limit
+    tool: fetch
+    max_calls: 20
+    window_seconds: 60
+    message: "Policy violation: fetch tool rate limit exceeded (20/min)"
+
+  - name: write_file_rate_limit
+    type: rate_limit
+    tool: write_file
+    max_calls: 50
+    window_seconds: 60
+    message: "Policy violation: write_file rate limit exceeded (50/min)"
+
+  # Unconditionally blocked tools
+  - name: blocked_dangerous_tools
+    type: blocked_tools
+    tools:
+      - rm_rf          # recursive delete
+      - format_disk    # disk formatting
+      - drop_database  # database destruction
+      - shutdown       # system shutdown
+    message: "Policy violation: tool is unconditionally blocked by security policy"

@@ -213,15 +213,20 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
     let config = McclawdConfig::load(&config_path)?;
 
     // PostgreSQL is a required dependency — fail loudly if unavailable.
-    // Priority: DATABASE_URL env var > config.toml > localhost fallback.
-    // In Docker Compose, set DATABASE_URL=postgresql://mcclawd:mcclawd@postgres:5432/mcclawd
+    // Priority: DATABASE_URL env var > config.toml > constructed from POSTGRES_* env vars.
+    // In Docker Compose, set DATABASE_URL=postgresql://user:pass@postgres:5432/mcclawd
     // to use the service name on the internal network.
     let database_url = std::env::var("DATABASE_URL")
         .ok()
         .filter(|s| !s.is_empty())
         .or_else(|| config.database_url.clone())
         .unwrap_or_else(|| {
-            "postgresql://mcclawd:mcclawd@localhost:5432/mcclawd".to_string()
+            let user = std::env::var("POSTGRES_USER").unwrap_or_else(|_| "mcclawd".into());
+            let pass = std::env::var("POSTGRES_PASSWORD").unwrap_or_else(|_| "mcclawd".into());
+            let host = std::env::var("POSTGRES_HOST").unwrap_or_else(|_| "localhost".into());
+            let port = std::env::var("POSTGRES_PORT").unwrap_or_else(|_| "5432".into());
+            let db = std::env::var("POSTGRES_DB").unwrap_or_else(|_| "mcclawd".into());
+            format!("postgresql://{user}:{pass}@{host}:{port}/{db}")
         });
     let pg_store = connect_postgres(&database_url).await?;
 
@@ -418,6 +423,13 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
         }
     }
 
+    // Clean up orphaned security events (from previously deleted tasks)
+    match pg_store.cleanup_orphaned_security_events().await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(removed = n, "Cleaned up orphaned security events"),
+        Err(e) => tracing::warn!(error = %e, "Failed to clean up orphaned security events"),
+    }
+
     // Hydrate scan cache from postgres
     match pg_store.load_scan_cache("admin").await {
         Ok(rows) => {
@@ -467,6 +479,31 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
         }
         Err(e) => {
             tracing::warn!(error = %e, "Failed to load swarm runs from database");
+        }
+    }
+
+    // Hydrate config from Postgres (DB wins over file config).
+    // The "main" key stores the full McclawdConfig as a JSON blob.
+    match pg_store.get_config_key("admin", "main").await {
+        Ok(Some(value)) => {
+            match serde_json::from_value::<McclawdConfig>(value) {
+                Ok(db_config) => {
+                    let mut cfg = state.config.write().await;
+                    cfg.agent.model = db_config.agent.model;
+                    cfg.agent.max_turns = db_config.agent.max_turns;
+                    cfg.agent.default_workspace = db_config.agent.default_workspace;
+                    tracing::info!("Config hydrated from database (DB wins over file)");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to deserialize config from DB, using file config");
+                }
+            }
+        }
+        Ok(None) => {
+            tracing::debug!("No config in DB yet, using file config");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to load config from DB, using file config");
         }
     }
 
@@ -969,12 +1006,23 @@ async fn container_gc_loop(state: AppState) {
                         drop(mgr);
                         gc_count += 1;
                     }
-                } else if status == "Failed" {
-                    // Failed tasks with no container record at all → fully orphaned, delete
+                } else if status == "Failed" || status == "Completed" {
+                    // Failed/Completed tasks with no container record at all → fully orphaned, delete
+                    // Completed tasks get a 1-hour retention period so users can review results
                     if !has_db_container && !has_container {
-                        tracing::info!(task_id, "GC: failed task with no container — deleting");
+                        if status == "Completed" {
+                            let is_old = state.pg_store.is_task_older_than(task_id, 1).await.unwrap_or(false);
+                            if !is_old {
+                                continue; // Keep recent completed tasks for review
+                            }
+                        }
+                        tracing::info!(task_id, status, "GC: orphan task with no container — deleting");
                         let tid = TaskId(task_id.clone());
                         state.pg_delete_task_sync(&tid).await;
+                        let _ = state
+                            .pg_store
+                            .delete_persistent_containers_by_task(task_id)
+                            .await;
                         state.task_streams.write().await.remove(&tid);
                         state.task_chat_history.write().await.remove(&tid);
                         state.task_events.write().await.remove(&tid);

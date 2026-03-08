@@ -18,6 +18,54 @@ use super::pipeline::{PendingFinding, SecurityContext};
 use super::SecurityHook;
 use crate::McclawdError;
 
+/// Info about a DLP pattern for API responses (no compiled regex).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DlpPatternInfo {
+    pub name: String,
+    pub action: String,
+    pub category: String,
+}
+
+/// Derive a human-readable category from the pattern name.
+fn categorize_pattern(name: &str) -> String {
+    let n = name.to_lowercase();
+    if n.starts_with("aws ") || n.starts_with("azure ") || n.starts_with("gcp ") || n.starts_with("ibm ") {
+        "Cloud Keys".to_string()
+    } else if n.starts_with("openai ") || n.starts_with("anthropic ") || n.starts_with("cohere ") || n.starts_with("huggingface ") {
+        "AI/ML Keys".to_string()
+    } else if n.starts_with("github ") || n.starts_with("gitlab ") || n.starts_with("bitbucket ") {
+        "Source Control".to_string()
+    } else if n.starts_with("slack ") || n.starts_with("discord ") || n.starts_with("twilio ") || n.starts_with("sendgrid ") || n.starts_with("stripe ") || n.starts_with("shopify ") {
+        "SaaS Tokens".to_string()
+    } else if n.starts_with("npm ") || n.starts_with("pypi ") || n.starts_with("nuget ") || n.starts_with("rubygems ") {
+        "Package Tokens".to_string()
+    } else if n.contains("crypto") || n.contains("private key") || n.contains("mnemonic") {
+        "Crypto".to_string()
+    } else if n.starts_with("jwt ") || n.starts_with("basic auth") || n.starts_with("bearer ") || n.starts_with("session ") {
+        "Auth Tokens".to_string()
+    } else if n.starts_with("email") || n.starts_with("phone") || n.starts_with("ip address") {
+        "PII".to_string()
+    } else if n.contains("ssn") || n.contains("driver") || n.contains("passport") || n.contains("tax") {
+        "US PII".to_string()
+    } else if n.contains("hipaa") || n.contains("medical") || n.contains("health") || n.contains("patient") {
+        "HIPAA".to_string()
+    } else if n.contains("prompt injection") || n.contains("system prompt") {
+        "Prompt Injection".to_string()
+    } else if n.contains("command injection") || n.contains("path traversal") || n.contains("shell") {
+        "Command Injection".to_string()
+    } else if n.contains("sql injection") {
+        "SQL Injection".to_string()
+    } else if n.contains("encoding") || n.contains("unicode") || n.contains("base64") {
+        "Encoding Bypass".to_string()
+    } else if n.contains("social engineering") || n.contains("urgency") || n.contains("authority") {
+        "Social Engineering".to_string()
+    } else if n.contains("data exfil") || n.contains("bulk") || n.contains("mass") {
+        "Data Exfiltration".to_string()
+    } else {
+        "Other".to_string()
+    }
+}
+
 /// Action to take when a DLP pattern matches.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DlpAction {
@@ -810,6 +858,27 @@ impl DlpHook {
     /// Construct a hook loaded with all built-in default patterns.
     pub fn with_defaults() -> Self {
         Self::new(DlpConfig::default())
+    }
+
+    /// Number of active DLP patterns.
+    pub fn pattern_count(&self) -> usize {
+        self.config.patterns.len()
+    }
+
+    /// Return pattern info suitable for API responses (without compiled regex).
+    pub fn list_patterns(&self) -> Vec<DlpPatternInfo> {
+        self.config
+            .patterns
+            .iter()
+            .map(|p| {
+                let category = categorize_pattern(&p.name);
+                DlpPatternInfo {
+                    name: p.name.clone(),
+                    action: format!("{:?}", p.action).to_lowercase(),
+                    category,
+                }
+            })
+            .collect()
     }
 
     pub fn with_context(mut self, ctx: Arc<RwLock<SecurityContext>>) -> Self {

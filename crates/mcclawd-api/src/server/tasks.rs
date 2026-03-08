@@ -260,7 +260,7 @@ async fn run_agent(
         }
     });
 
-    run_agent_host(state, task_id, prompt, workspace_name, tx).await;
+    run_agent_host(state, task_id, prompt, workspace_name, task_skills, tx).await;
 }
 
 /// Run agent task inside a Docker sandbox container using the JSONL runner protocol.
@@ -288,9 +288,31 @@ async fn run_agent_sandboxed(
         )
         .await;
 
-    // 2. Update status to Running and notify frontend immediately.
-    //    The StatusIndicator is persisted so the WS client sees it on history
-    //    replay (the WS often connects AFTER the task is already spawned).
+    // 2a. Scan the initial prompt through DLP pipeline (inbound content scanning).
+    //     The prompt may contain PII, secrets, or injection attempts that should be detected.
+    {
+        state
+            .security_pipeline
+            .set_task_context(&task_id.0)
+            .await;
+        let prompt_json = serde_json::json!({"prompt": prompt});
+        if let Err(e) = state
+            .security_pipeline
+            .before_tool_call("user_prompt", &prompt_json)
+            .await
+        {
+            tracing::warn!(
+                task_id = %task_id.0,
+                error = %e,
+                "Security pipeline flagged user prompt"
+            );
+            // Don't block the task — log and continue. DLP findings are recorded.
+        }
+    }
+
+    // 2b. Update status to Running and notify frontend immediately.
+    //     The StatusIndicator is persisted so the WS client sees it on history
+    //     replay (the WS often connects AFTER the task is already spawned).
     {
         let mut mgr = state.tasks.write().await;
         mgr.running(&task_id);
@@ -703,6 +725,65 @@ async fn run_agent_sandboxed(
                         .send_and_persist(&fwd_task_id, &fwd_tx, chunk)
                         .await;
                 }
+                // ToolEnd: scan tool results for DLP/secrets via after_tool_call
+                OutboundChunk::ToolEnd {
+                    ref name,
+                    ref summary,
+                } => {
+                    if let Some(text) = summary {
+                        let result_json = serde_json::json!({"result": text});
+                        if let Err(e) = fwd_state
+                            .security_pipeline
+                            .after_tool_call(name, &result_json)
+                            .await
+                        {
+                            tracing::warn!(
+                                tool = %name,
+                                task_id = %fwd_task_id.0,
+                                error = %e,
+                                "Security pipeline flagged tool result"
+                            );
+                        }
+                    }
+                    fwd_state
+                        .send_and_persist(&fwd_task_id, &fwd_tx, chunk)
+                        .await;
+                }
+                // TextBlock: scan LLM responses for leaked secrets/PII
+                OutboundChunk::TextBlock(ref text) => {
+                    let text_json = serde_json::json!({"text": text});
+                    fwd_state
+                        .security_pipeline
+                        .set_task_context(&fwd_task_id.0)
+                        .await;
+                    if let Err(e) = fwd_state
+                        .security_pipeline
+                        .after_tool_call("llm_response", &text_json)
+                        .await
+                    {
+                        tracing::warn!(
+                            task_id = %fwd_task_id.0,
+                            error = %e,
+                            "Security pipeline flagged LLM response"
+                        );
+                    }
+                    fwd_state
+                        .send_and_persist(&fwd_task_id, &fwd_tx, chunk)
+                        .await;
+                }
+                // Done: update task status to Completed, then broadcast
+                OutboundChunk::Done => {
+                    {
+                        let mut mgr = fwd_state.tasks.write().await;
+                        mgr.complete_task(&fwd_task_id);
+                    }
+                    fwd_state
+                        .pg_update_status(&fwd_task_id, "Completed", None)
+                        .await;
+                    fwd_state
+                        .send_and_persist(&fwd_task_id, &fwd_tx, OutboundChunk::Done)
+                        .await;
+                }
                 // All other chunks: broadcast + persist as normal
                 other => {
                     fwd_state
@@ -759,10 +840,31 @@ async fn run_agent_host(
     task_id: TaskId,
     prompt: &str,
     workspace_name: &str,
+    task_skills: &[String],
     tx: tokio::sync::broadcast::Sender<OutboundChunk>,
 ) {
     // Persist the user message for history replay (human/assistant turn separation)
     state.send_and_persist(&task_id, &tx, OutboundChunk::UserMessage(prompt.to_string())).await;
+
+    // Scan the initial prompt through DLP pipeline (inbound content scanning)
+    {
+        state
+            .security_pipeline
+            .set_task_context(&task_id.0)
+            .await;
+        let prompt_json = serde_json::json!({"prompt": prompt});
+        if let Err(e) = state
+            .security_pipeline
+            .before_tool_call("user_prompt", &prompt_json)
+            .await
+        {
+            tracing::warn!(
+                task_id = %task_id.0,
+                error = %e,
+                "Security pipeline flagged user prompt (host)"
+            );
+        }
+    }
 
     // Helper: broadcast-only (transient status, not persisted to history)
     let broadcast = |tx: &tokio::sync::broadcast::Sender<OutboundChunk>, chunk: OutboundChunk| {
@@ -891,7 +993,9 @@ async fn run_agent_host(
     // 3. Build the agent
     broadcast(&tx, OutboundChunk::TextDelta("Building agent...".to_string()));
     let pipeline = Some(state.security_pipeline.clone());
-    let (agent, _memory, _mcp_conns) = match AgentEngine::build(workspace, &api_key, config.agent.max_turns, &config, pipeline).await {
+    // Pass task_skills as filter: empty = no skills, non-empty = only those skills
+    let skill_filter = Some(task_skills.to_vec());
+    let (agent, _memory, _mcp_conns) = match AgentEngine::build_with_skill_filter(workspace, &api_key, config.agent.max_turns, &config, pipeline, skill_filter).await {
         Ok(result) => result,
         Err(e) => {
             let msg = format!("Failed to build agent: {e}");
@@ -958,7 +1062,11 @@ async fn run_agent_host(
                 }
             }
             Ok(MultiTurnStreamItem::StreamUserItem(_)) => {
-                // Tool results auto-injected by Rig
+                // Tool results auto-injected by Rig.
+                // TODO: Rig doesn't expose tool results in the stream, so we can't
+                // scan them here. The GuardedTool wrapper in engine.rs already calls
+                // after_tool_call for builtin tools. For MCP tools routed through
+                // AgentGateway, consider adding after_tool_call in the MCP client layer.
             }
             Ok(MultiTurnStreamItem::FinalResponse(final_resp)) => {
                 // Record token usage from the LLM response
@@ -1266,6 +1374,12 @@ pub async fn delete_all_tasks(
 
     // Bulk-delete from Postgres by tag (fire-and-forget) when tag filter is present
     if let Some(ref tag) = query.tag {
+        // Delete security events for each task before bulk-deleting the tasks
+        for id in &to_delete {
+            if let Err(e) = state.pg_store.delete_security_events_by_task(&id.0).await {
+                tracing::warn!(task_id = %id.0, error = %e, "Failed to delete security events for task");
+            }
+        }
         let store = state.pg_store.clone();
         let tag_c = tag.clone();
         tokio::spawn(async move {

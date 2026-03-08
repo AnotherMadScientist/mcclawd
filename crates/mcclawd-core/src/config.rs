@@ -59,6 +59,7 @@ impl Default for AgentConfig {
 
 /// Tool access profile — determines which MCP tool prefixes are allowed by default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum ToolProfile {
     /// Only memory.store / memory.recall — no MCP tools.
     Minimal,
