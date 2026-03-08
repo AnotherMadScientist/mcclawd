@@ -82,10 +82,10 @@ export const api = {
   },
   tasks: {
     list: () => apiFetch<Task[]>("/api/tasks"),
-    create: (prompt: string, workspace?: string, model?: string, delayStart?: boolean, tags?: string[]) =>
+    create: (prompt: string, workspace?: string, model?: string, delayStart?: boolean, tags?: string[], skills?: string[], toolProfile?: string) =>
       apiFetch<Task>("/api/tasks", {
         method: "POST",
-        body: JSON.stringify({ prompt, workspace, model, delay_start: delayStart ?? false, tags }),
+        body: JSON.stringify({ prompt, workspace, model, delay_start: delayStart ?? false, tags, skills, tool_profile: toolProfile }),
       }),
     get: (id: string) => apiFetch<Task>(`/api/tasks/${id}`),
     cancel: (id: string) => apiFetch<void>(`/api/tasks/${id}`, { method: "DELETE" }),
@@ -129,6 +129,23 @@ export const api = {
         method: "PUT",
         body: JSON.stringify({ content }),
       }),
+    profiles: () =>
+      apiFetch<{ name: string; description: string; builtin: boolean }[]>(
+        "/api/workspace/profiles",
+      ),
+    applyProfile: (name: string) =>
+      apiFetch<{ applied: string }>(`/api/workspace/profiles/${name}/apply`, {
+        method: "POST",
+      }),
+    saveProfile: (name: string, description?: string) =>
+      apiFetch<{ saved: string }>(`/api/workspace/profiles/${name}/save`, {
+        method: "POST",
+        body: JSON.stringify({ description: description || "" }),
+      }),
+    deleteProfile: (name: string) =>
+      apiFetch<{ deleted: string }>(`/api/workspace/profiles/${name}`, {
+        method: "DELETE",
+      }),
   },
   secrets: {
     list: () => apiFetch<{ name: string }[]>("/api/secrets"),
@@ -147,7 +164,7 @@ export const api = {
   },
   config: {
     get: () => apiFetch<McclawdConfig>("/api/config"),
-    update: (update: { model?: string; max_turns?: number; default_workspace?: string }) =>
+    update: (update: { model?: string; max_turns?: number; default_workspace?: string; default_tool_profile?: string }) =>
       apiFetch<void>("/api/config", {
         method: "PUT",
         body: JSON.stringify(update),
@@ -202,6 +219,10 @@ export const api = {
       apiFetch<void>(`/api/skills/${encodeURIComponent(name)}`, { method: "DELETE" }),
     scan: (name: string) =>
       apiFetch<ScanResult>(`/api/skills/${encodeURIComponent(name)}/scan`),
+    previewScan: (name: string) =>
+      apiFetch<ScanResult>(`/api/skills/${encodeURIComponent(name)}/preview-scan`, {
+        method: "POST",
+      }),
   },
   providers: {
     list: () => apiFetch<Provider[]>("/api/providers"),

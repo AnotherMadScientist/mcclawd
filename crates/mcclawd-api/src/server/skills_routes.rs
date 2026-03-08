@@ -146,9 +146,24 @@ pub async fn install_skill(
             let store = state.pg_store.clone();
             let name = body.name.clone();
             let ver = body.version.clone();
+            let scan_cache = state.scan_cache.clone();
+            let config = state.config.read().await;
+            let skill_dir = config.skills.managed_dir.join(&name);
+            drop(config);
             tokio::spawn(async move {
                 if let Err(e) = store.save_skill("admin", &name, ver.as_deref(), None).await {
                     tracing::warn!("Failed to persist installed skill to DB: {e}");
+                }
+                // Auto-scan after install and persist result
+                if skill_dir.exists() {
+                    if let Ok(result) = scanner::scan_skill(&skill_dir).await {
+                        if let Ok(json_val) = serde_json::to_value(&result) {
+                            if let Err(e) = store.save_scan_result("admin", &name, &json_val).await {
+                                tracing::warn!("Failed to persist scan result: {e}");
+                            }
+                        }
+                        scan_cache.insert(name, result);
+                    }
                 }
             });
             return Ok(Json(info));
@@ -427,7 +442,13 @@ pub async fn scan_skill(
 
     match scanner::scan_skill(&scan_path).await {
         Ok(result) => {
-            state.scan_cache.insert(name, result.clone());
+            state.scan_cache.insert(name.clone(), result.clone());
+            // Persist scan result to DB
+            if let Ok(json_val) = serde_json::to_value(&result) {
+                if let Err(e) = state.pg_store.save_scan_result("admin", &name, &json_val).await {
+                    tracing::warn!("Failed to persist scan result: {e}");
+                }
+            }
             Ok(Json(result))
         }
         Err(e) => {
@@ -438,6 +459,61 @@ pub async fn scan_skill(
             };
             Ok(Json(result))
         }
+    }
+}
+
+/// POST /api/skills/{name}/preview-scan -- lightweight scan without full install.
+/// Downloads SKILL.md from cache/ClawHub, runs basic_scan only (fast, no VT).
+/// Returns result but does NOT persist to DB.
+pub async fn preview_scan_skill(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<ScanResult>, (StatusCode, Json<serde_json::Value>)> {
+    // Check cache first
+    if let Some(cached) = state.scan_cache.get(&name) {
+        return Ok(Json(cached.clone()));
+    }
+
+    let config = state.config.read().await;
+    let installed_path = config.skills.managed_dir.join(&name).join("SKILL.md");
+    let cache_dir = config.skills.cache_dir.clone();
+    let clawhub_api = config.skills.clawhub_api.clone();
+    drop(config);
+
+    let content = if installed_path.exists() {
+        tokio::fs::read_to_string(&installed_path).await.ok()
+    } else {
+        // Try content cache
+        let content_cache = cache_dir.join("skill_content").join(format!("{}.md", &name));
+        if content_cache.exists() {
+            tokio::fs::read_to_string(&content_cache).await.ok()
+        } else {
+            // Try downloading from ClawHub
+            let client = mcclawd_core::clawhub::client::ClawHubClient::new(&clawhub_api);
+            client.download_skill_md(&name, "latest").await.ok()
+        }
+    };
+
+    match content {
+        Some(content) => {
+            let temp_dir = std::env::temp_dir().join(format!("mcclawd-preview-{name}"));
+            let _ = tokio::fs::create_dir_all(&temp_dir).await;
+            let _ = tokio::fs::write(temp_dir.join("SKILL.md"), &content).await;
+
+            let result = scanner::basic_scan(&temp_dir)
+                .await
+                .unwrap_or(ScanResult {
+                    status: ScanStatus::NotScanned,
+                    issues: vec![],
+                });
+
+            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+            Ok(Json(result))
+        }
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Skill content not available for preview scan"})),
+        )),
     }
 }
 

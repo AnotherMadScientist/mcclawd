@@ -976,10 +976,10 @@ export function SkillsPage() {
   }, []);
 
   const handleCardScan = useCallback(
-    (name: string) => {
+    (name: string, isInstalled = false) => {
       setScanningSkill(name);
-      api.skills
-        .scan(name)
+      const scanFn = isInstalled ? api.skills.scan(name) : api.skills.previewScan(name);
+      scanFn
         .then((result) => {
           setScanResults((prev) => ({ ...prev, [name]: result }));
         })
@@ -1034,8 +1034,8 @@ export function SkillsPage() {
       queryClient.invalidateQueries({ queryKey: ["skills"] });
       notify("success", `Installed "${variables.name}"`);
       setInstallingSkill(null);
-      // Auto-scan after install
-      handleCardScan(variables.name);
+      // Auto-scan after install (full scan since now installed)
+      handleCardScan(variables.name, true);
     },
     onError: (err: Error) => {
       notify("error", `Install failed: ${err.message}`);

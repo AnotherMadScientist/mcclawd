@@ -90,6 +90,20 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             "/api/workspace/{file}",
             get(workspace::get_file).put(workspace::put_file),
         )
+        // Workspace profiles
+        .route("/api/workspace/profiles", get(workspace::list_profiles))
+        .route(
+            "/api/workspace/profiles/{name}/apply",
+            post(workspace::apply_profile),
+        )
+        .route(
+            "/api/workspace/profiles/{name}/save",
+            post(workspace::save_profile),
+        )
+        .route(
+            "/api/workspace/profiles/{name}",
+            delete(workspace::delete_profile),
+        )
         // Secrets
         .route(
             "/api/secrets",
@@ -105,6 +119,16 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .route(
             "/api/config",
             get(config_routes::get_config).put(config_routes::put_config),
+        )
+        .route(
+            "/api/config/keys",
+            get(config_routes::list_config_keys),
+        )
+        .route(
+            "/api/config/keys/{key}",
+            get(config_routes::get_config_key)
+                .put(config_routes::put_config_key)
+                .delete(config_routes::delete_config_key),
         )
         // MCP
         .route(
@@ -192,6 +216,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             get(skills_routes::skill_content),
         )
         .route("/api/skills/{name}/scan", get(skills_routes::scan_skill))
+        .route("/api/skills/{name}/preview-scan", post(skills_routes::preview_scan_skill))
         .route("/api/skills/updates", get(skills_routes::get_skill_updates))
         .route("/api/skills/{name}", delete(skills_routes::uninstall_skill))
         // Providers
