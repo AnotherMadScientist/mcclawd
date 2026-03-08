@@ -23,6 +23,17 @@ use mcclawd_core::scanner::{self, ScanResult, ScanStatus};
 
 use super::state::AppState;
 
+/// Installed skill info enriched with scan results.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InstalledSkillWithScan {
+    #[serde(flatten)]
+    pub info: InstalledSkillInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_status: Option<ScanStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_issues: Option<Vec<scanner::ScanIssue>>,
+}
+
 /// Query parameters for the search endpoint.
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
@@ -98,10 +109,23 @@ async fn build_installer(state: &AppState) -> (ClawHubClient, SkillInstaller) {
 /// GET /api/skills — list installed skills.
 pub async fn list_installed(
     State(state): State<AppState>,
-) -> Result<Json<Vec<InstalledSkillInfo>>, impl IntoResponse> {
+) -> Result<Json<Vec<InstalledSkillWithScan>>, impl IntoResponse> {
     let (_, installer) = build_installer(&state).await;
     match installer.list_installed() {
-        Ok(skills) => Ok(Json(skills)),
+        Ok(skills) => {
+            let enriched: Vec<InstalledSkillWithScan> = skills
+                .into_iter()
+                .map(|info| {
+                    let scan = state.scan_cache.get(&info.name).map(|r| r.clone());
+                    InstalledSkillWithScan {
+                        scan_status: scan.as_ref().map(|s| s.status.clone()),
+                        scan_issues: scan.map(|s| s.issues.clone()),
+                        info,
+                    }
+                })
+                .collect();
+            Ok(Json(enriched))
+        }
         Err(e) => {
             tracing::error!("Failed to list installed skills: {e}");
             Err((

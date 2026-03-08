@@ -1292,7 +1292,12 @@ export function SkillsPage() {
                       quickUninstall.mutate(skill.name);
                     }}
                     uninstallPending={uninstallingSkill === skill.name}
-                    scanResult={scanResults[skill.name]}
+                    scanResult={
+                      scanResults[skill.name] ||
+                      (skill.scan_status
+                        ? { status: skill.scan_status, issues: skill.scan_issues || [] }
+                        : undefined)
+                    }
                   />
                 ))}
               </div>
