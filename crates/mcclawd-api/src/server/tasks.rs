@@ -23,6 +23,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio_util::io::ReaderStream;
 
+use mcclawd_core::hooks::SecurityHook;
+use mcclawd_tools::agent_security;
+
 use super::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -70,10 +73,37 @@ impl From<&TaskRecord> for TaskResponse {
     }
 }
 
-/// GET /api/tasks — list all tasks
+/// GET /api/tasks — list all tasks (DB-primary with in-memory merge for recent tasks)
 pub async fn list_tasks(State(state): State<AppState>) -> Json<Vec<TaskResponse>> {
+    let mut tasks: Vec<TaskResponse> = Vec::new();
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // DB is source of truth
+    if let Ok(rows) = state.pg_store.list_tasks().await {
+        for (id, prompt, status, error_message, tags) in rows {
+            seen_ids.insert(id.clone());
+            let task_status = match status.as_str() {
+                "Running" => TaskStatus::Running,
+                "Completed" => TaskStatus::Completed,
+                "Pending" => TaskStatus::Pending,
+                "Building" => TaskStatus::Building,
+                "Failed" => TaskStatus::Failed(
+                    error_message.unwrap_or_else(|| "Unknown error".to_string()),
+                ),
+                _ => TaskStatus::Failed(format!("Unknown status: {status}")),
+            };
+            tasks.push(TaskResponse { id, prompt, status: task_status, tags });
+        }
+    }
+
+    // Merge in-memory tasks not yet in DB (recently created, race window)
     let mgr = state.tasks.read().await;
-    let tasks: Vec<TaskResponse> = mgr.all_tasks().iter().map(|t| TaskResponse::from(*t)).collect();
+    for t in mgr.all_tasks() {
+        if !seen_ids.contains(&t.id.0) {
+            tasks.push(TaskResponse::from(t));
+        }
+    }
+
     Json(tasks)
 }
 
@@ -91,6 +121,21 @@ pub async fn create_task(
         );
     }
     let prompt = sanitized.text;
+
+    // Agent security: validate prompt against security policies (blocks secret refs, shell injection, etc.)
+    if let Err(reason) = agent_security::validate_task_prompt(&prompt) {
+        tracing::warn!(reason = %reason, "Task creation blocked by agent security");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(TaskResponse {
+                id: String::new(),
+                prompt,
+                status: TaskStatus::Failed(format!("Blocked: {reason}")),
+                tags: Vec::new(),
+            }),
+        );
+    }
+
     let workspace_name = body.workspace.clone().unwrap_or_else(|| "default".to_string());
 
     // Create task record
@@ -318,14 +363,36 @@ async fn run_agent_sandboxed(
 
     // Use McpPorter to get correct Docker-internal gateway URL (http://agentgateway:3000),
     // ensure network exists, and resolve installed skills → MCP tool filtering.
+    // Task agents get full skill resolution — skills and MCP tools are injected here.
     // Falls back to manual construction with container_gateway_url() if McpPorter unavailable.
     let agent_env = if let Some(ref porter) = state.mcp_porter {
-        // TODO: Load installed skills from DB/disk for full skill→MCP tool resolution + caching.
-        // For now, empty skills still gives us correct gateway_url (http://agentgateway:3000)
-        // and network setup. All tools are allowed via "*".
-        let all_skills = std::collections::HashMap::new();
+        // Load installed skills from disk (~/.mcclawd/skills/) for skill→MCP tool resolution.
+        // TODO: Per-task skill assignment — each task agent should only get its specific skills,
+        // not ALL installed skills. The pattern is 1:1 agent-task→skill, 1:M skill→MCP tools.
+        // For now, loads all installed skills as a temporary default until task-level skill
+        // assignment is implemented (via prompt matching, tags, or explicit assignment).
+        let all_skills: std::collections::HashMap<String, mcclawd_core::skills::LoadedSkill> = {
+            let skills_dir = &config.skills.managed_dir;
+            let mut map = std::collections::HashMap::new();
+            if skills_dir.exists() {
+                if let Ok(entries) = std::fs::read_dir(skills_dir) {
+                    for entry in entries.flatten() {
+                        let skill_md = entry.path().join("SKILL.md");
+                        if skill_md.exists() {
+                            if let Ok(content) = std::fs::read_to_string(&skill_md) {
+                                if let Ok(skill) = mcclawd_core::skill_parser::parse_skill_md(&content) {
+                                    map.insert(skill.name.clone(), skill);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            map
+        };
+        let skill_count = all_skills.len();
         match porter
-            .prepare_system_agent_environment(
+            .prepare_task_environment(
                 &all_skills,
                 &config.mcp.servers,
                 &config,
@@ -338,8 +405,9 @@ async fn run_agent_sandboxed(
                 tracing::info!(
                     gateway_url = %env.gateway_url,
                     tools = ?env.allowed_tools,
+                    skills_loaded = skill_count,
                     skill_context_len = env.skill_context.len(),
-                    "McpPorter resolved agent environment for task"
+                    "McpPorter resolved agent environment for task (with skills)"
                 );
                 env
             }
@@ -743,7 +811,8 @@ async fn run_agent_host(
 
     // 3. Build the agent
     broadcast(&tx, OutboundChunk::TextDelta("Building agent...".to_string()));
-    let (agent, _memory, _mcp_conns) = match AgentEngine::build(workspace, &api_key, config.agent.max_turns, &config).await {
+    let pipeline = Some(state.security_pipeline.clone());
+    let (agent, _memory, _mcp_conns) = match AgentEngine::build(workspace, &api_key, config.agent.max_turns, &config, pipeline).await {
         Ok(result) => result,
         Err(e) => {
             let msg = format!("Failed to build agent: {e}");
@@ -788,6 +857,18 @@ async fn run_agent_host(
                         accumulated_text.push_str(&text.text);
                     }
                     StreamedAssistantContent::ToolCall { tool_call, .. } => {
+                        // Run security pipeline before tool execution
+                        let args_json = serde_json::to_value(&tool_call.function.arguments)
+                            .unwrap_or_default();
+                        if let Err(e) = state.security_pipeline.before_tool_call(
+                            &tool_call.function.name, &args_json,
+                        ).await {
+                            tracing::warn!(
+                                tool = %tool_call.function.name,
+                                error = %e,
+                                "Security pipeline blocked tool call"
+                            );
+                        }
                         // Persist tool calls so history shows them
                         state.send_and_persist(&task_id, &tx, OutboundChunk::ToolStart { name: tool_call.function.name.clone() }).await;
                     }
@@ -953,6 +1034,13 @@ pub async fn send_message(
         );
     }
     let message = sanitized.text;
+
+    // Agent security: validate follow-up message against security policies
+    if let Err(reason) = agent_security::validate_task_prompt(&message) {
+        tracing::warn!(reason = %reason, "Follow-up message blocked by agent security");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let task_id = TaskId(id);
 
     // Verify task exists

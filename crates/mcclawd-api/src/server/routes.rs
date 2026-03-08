@@ -153,8 +153,18 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             post(channels::test_channel),
         )
         // Security
-        .route("/api/security/hooks", get(security::list_hooks))
-        .route("/api/security/backends", get(security::list_backends))
+        .route("/api/security/events", get(security::list_events))
+        .route("/api/security/summary", get(security::get_summary))
+        .route("/api/security/status", get(security::get_status))
+        .route(
+            "/api/security/policies",
+            get(security::list_policies).post(security::create_policy),
+        )
+        .route(
+            "/api/security/policies/{id}",
+            delete(security::delete_policy),
+        )
+        .route("/api/security/trace/{task_id}", get(security::get_trace))
         // Channel state persistence
         .route(
             "/api/channels/state",

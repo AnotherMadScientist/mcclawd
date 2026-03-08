@@ -7,15 +7,21 @@ pub mod audit;
 pub mod dlp;
 pub mod pipeline;
 pub mod secret_scanner;
+pub mod security_event;
+pub mod security_sidecar;
+pub mod taint_trace;
 pub mod user_hook;
 
 use async_trait::async_trait;
 
 // Re-export everything for backward compatibility
-pub use audit::{AuditAction, AuditEvent, AuditHook, AuditSink, FileAuditSink, TracingAuditSink};
+pub use audit::{AuditAction, AuditEvent, AuditHook, AuditSink, FileAuditSink, PgAuditSink, TracingAuditSink};
 pub use dlp::{DlpAction, DlpConfig, DlpHook, DlpPattern};
 pub use pipeline::HookPipeline;
 pub use secret_scanner::{SecretScannerConfig, SecretScannerHook};
+pub use security_event::{DlpFinding, ScanDirection, SecurityAction, SecurityEvent, SecurityEventType, ThreatLevel};
+pub use security_sidecar::SecuritySidecarHook;
+pub use taint_trace::{TaintSpan, TaintTrace};
 pub use user_hook::{UserHook, UserHookAction, UserHookConfig, UserHookTrigger, UserHookType};
 
 /// Hook called before/after tool dispatch.

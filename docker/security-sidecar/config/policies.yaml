@@ -1,0 +1,18 @@
+rules:
+  - name: block_email_after_injection
+    description: Block send_email after prompt injection detected in tool output
+    policy: |
+      from invariant.detectors import prompt_injection
+      raise "Blocked: email after injection" if:
+        (output: ToolOutput) -> (call2: ToolCall)
+        output is tool:*
+        prompt_injection(output.content, threshold=0.7)
+        call2 is tool:send_email
+
+  - name: block_write_after_scrape
+    description: Block file write after web scrape (data exfiltration prevention)
+    policy: |
+      raise "Blocked: write after web scrape" if:
+        (call1: ToolCall) -> (call2: ToolCall)
+        call1 is tool:web_scrape
+        call2 is tool:write_file

@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Server, Plus, Trash2, RotateCw, X, Loader2 } from "lucide-react";
+import { Server, Plus, Trash2, RotateCw, X, Loader2, Wrench } from "lucide-react";
 import { api } from "../api/client";
 import { ListSkeleton } from "../components/LoadingSkeleton";
 import { ErrorState } from "../components/ErrorState";
-import type { McpServer } from "../api/types";
+import type { McpServer, McpToolOverview, ContainerInfo } from "../api/types";
 
 export function McpServersPage() {
   const queryClient = useQueryClient();
@@ -133,6 +133,8 @@ export function McpServersPage() {
           </div>
         )}
       </div>
+
+      <McpToolsOverview servers={servers} />
 
       {showAddDialog && (
         <AddServerDialog
@@ -302,6 +304,107 @@ function AddServerDialog({
             )}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function useMcpToolsOverview(servers: McpServer[]): {
+  tools: McpToolOverview[];
+  isLoading: boolean;
+} {
+  const { data: containers = [], isLoading } = useQuery({
+    queryKey: ["docker-containers"],
+    queryFn: api.docker.containers,
+    refetchInterval: 5000,
+  });
+
+  const tools = useMemo(() => {
+    return servers.map((s) => {
+      const matched = containers.filter(
+        (c: ContainerInfo) => c.mcp_tools?.includes(s.name),
+      );
+      const active = matched.some(
+        (c: ContainerInfo) => c.state === "running",
+      );
+      return {
+        name: s.name,
+        image: s.image,
+        port: s.port,
+        status: active ? ("active" as const) : ("idle" as const),
+        containers: matched.map((c: ContainerInfo) => ({
+          id: c.id,
+          name: c.name,
+          task_id: c.task_id,
+          state: c.state,
+        })),
+      };
+    });
+  }, [servers, containers]);
+
+  return { tools, isLoading };
+}
+
+function McpToolsOverview({ servers }: { servers: McpServer[] }) {
+  const { tools, isLoading } = useMcpToolsOverview(servers);
+
+  if (isLoading) return null;
+
+  const activeCount = tools.filter((t) => t.status === "active").length;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <Wrench className="w-4 h-4 text-muted-foreground" />
+        <h2 className="text-lg font-semibold">MCP Tools</h2>
+        <span className="px-1.5 py-0.5 text-[10px] font-medium rounded-full bg-muted text-muted-foreground">
+          {activeCount}/{tools.length}
+        </span>
+      </div>
+
+      <div className="space-y-2">
+        {tools.map((t) => (
+          <div
+            key={t.name}
+            data-testid={`mcp-tool-${t.name}`}
+            className="flex items-center justify-between p-3 rounded-xl bg-card border border-border"
+          >
+            <div className="flex items-center gap-3">
+              <span
+                className={`w-2 h-2 rounded-full ${t.status === "active" ? "bg-green-500" : "bg-muted-foreground/30"}`}
+              />
+              <div>
+                <p className="text-sm font-medium">{t.name}</p>
+                <p className="text-xs text-muted-foreground font-mono">
+                  {t.image}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 flex-wrap justify-end">
+              {t.containers.length === 0 && (
+                <span className="text-[10px] text-muted-foreground/50 px-2 py-0.5 rounded-full bg-muted">
+                  No containers
+                </span>
+              )}
+              {t.containers.map((c) => (
+                <span
+                  key={c.id}
+                  className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${
+                    c.task_id === "__system__"
+                      ? "bg-violet-500/15 text-violet-400"
+                      : "bg-blue-500/15 text-blue-400"
+                  }`}
+                >
+                  {c.task_id === "__system__"
+                    ? "system"
+                    : c.task_id
+                      ? c.task_id.slice(0, 8)
+                      : c.name}
+                </span>
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );

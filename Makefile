@@ -4,7 +4,7 @@
 # Uses a trap to ensure Ctrl+C kills both background processes cleanly.
 dev:
 	@echo "Starting dev environment (auto-restart on code changes)..."
-	@echo "API: http://localhost:9090 (cargo-watch)"
+	@echo "API: http://localhost:8081 (cargo-watch)"
 	@echo "UI:  http://localhost:8080 (vite)"
 	@echo "Press Ctrl+C to stop both servers."
 	@trap 'kill 0' INT TERM; \

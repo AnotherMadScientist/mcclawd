@@ -116,83 +116,43 @@ fn build_system_prompt(workspace_prompt: &str) -> String {
 
 ## System Agent Instructions
 
-You are McClawd's system agent — an always-on assistant that helps users control the application through natural language commands. You have access to tools for:
+You are McClawd's system agent — a minimal UI controller. You have exactly 2 tools:
 
-1. **Navigation**: Navigate the UI to any page (tasks, skills, workspace, config, secrets)
-2. **Task Management**: Create new agent tasks
-3. **Skill Management**: Install, uninstall, and list skills from ClawHub
-4. **Secret Management**: Set, delete, and list secrets (API keys, credentials)
-5. **Workspace Management**: Read and update workspace files (SOUL.md, AGENTS.md, USER.md)
+1. `navigate_to` — navigate the app to a page
+2. `create_task` — create a new agent task
 
-When the user asks you to do something, use the appropriate tool. Be concise in your responses.
-When navigating, use the tool — don't just tell the user to navigate manually.
-When managing skills or secrets, use the tools to perform the action.
+**RULES (strict):**
+- ALWAYS call a tool. Never respond with just text.
+- You CANNOT install skills, manage secrets, edit workspace files, or run code.
+- If the user asks for something outside your 2 tools, call `navigate_to` to take them to the right page.
 
-Keep responses short and action-oriented. Confirm what you did, don't explain what you could do."#
+**Pages for navigate_to:**
+- `/` — task list (home)
+- `/tasks/new` — new task form
+- `/workspace` — workspace editor
+- `/config` — settings
+- `/config/skills` — skills browser
+- `/config/secrets` — secrets management
+- `/config/mcp` — MCP servers
+- `/config/docker` — agent containers
+- `/config/usage` — usage & spending
+
+**Response style:** Call the tool, then confirm in 1 short sentence. Example: "Navigated to skills." or "Created task.""#
     )
 }
 
 /// Run the system agent with streaming output.
 ///
-/// Tries Docker-sandboxed execution first. Falls back to in-process host execution
-/// when Docker is unavailable (unless strict_sandbox is enabled).
+/// Always runs in-process (host mode) so it has access to the UI action tools
+/// (navigate_to, create_task, install_skill, etc.). The system agent is a
+/// lightweight UI controller — it doesn't need Docker sandboxing.
 async fn run_system_agent(
     state: AppState,
     task_id: TaskId,
     prompt: &str,
     tx: tokio::sync::broadcast::Sender<OutboundChunk>,
 ) {
-    let strict = state.config.read().await.sandbox.strict_sandbox;
-
-    // Wait for runner image if build is in progress (up to 5 min)
-    if !crate::server::runner_build::is_image_ready(&state.runner_build).await {
-        let _ = tx.send(OutboundChunk::StatusIndicator(ChannelStatus::Typing));
-        state.send_and_persist(
-            &task_id, &tx,
-            OutboundChunk::TextDelta("Waiting for runner image to build...".into()),
-        ).await;
-        if !crate::server::runner_build::wait_for_image_ready(
-            &state.runner_build,
-            std::time::Duration::from_secs(300),
-        ).await {
-            state.send_and_persist(&task_id, &tx, OutboundChunk::Error(
-                "Runner image not available. Check Docker page in Settings.".into(),
-            )).await;
-            state.send_and_persist(&task_id, &tx, OutboundChunk::Done).await;
-            return;
-        }
-    }
-
-    // Try Docker-sandboxed execution first
-    if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
-        if orch.health_check().await {
-            run_system_agent_sandboxed(state, task_id, prompt, tx).await;
-            return;
-        }
-    }
-
-    // Docker unavailable — behavior depends on strict_sandbox
-    if strict {
-        state
-            .send_and_persist(
-                &task_id,
-                &tx,
-                OutboundChunk::UserMessage(prompt.to_string()),
-            )
-            .await;
-        let msg = "Docker required for system agent (strict sandbox mode). Start Docker or set strict_sandbox = false.".to_string();
-        tracing::error!(task_id = %task_id.0, "{msg}");
-        state
-            .send_and_persist(&task_id, &tx, OutboundChunk::Error(msg))
-            .await;
-        state
-            .send_and_persist(&task_id, &tx, OutboundChunk::Done)
-            .await;
-        return;
-    }
-
-    // Fall through to in-process host execution
-    tracing::info!("Docker unavailable, running system agent in-process");
+    tracing::info!("Running system agent in-process (host mode)");
     run_system_agent_host(state, task_id, prompt, tx).await;
 }
 
@@ -242,24 +202,15 @@ pub async fn ensure_system_agent_container(
     secrets.insert("ANTHROPIC_API_KEY".to_string(), api_key);
 
     // Use McpPorter for correct Docker-internal gateway URL (http://agentgateway:3000).
-    // Falls back to container_gateway_url() if McpPorter unavailable.
+    // CRITICAL: System agent gets base environment ONLY — no skills, no MCP tool injection.
+    // Skills and MCP tools are exclusively for task agents.
     let agent_env = if let Some(ref porter) = state.mcp_porter {
-        let all_skills = std::collections::HashMap::new();
-        match porter
-            .prepare_system_agent_environment(
-                &all_skills,
-                &config.mcp.servers,
-                &config,
-            )
-            .await
-        {
+        match porter.prepare_base_environment(&config).await {
             Ok(mut env) => {
                 env.image = "mcclawd-runner:latest".to_string();
-                // System agent gets all tools
-                env.allowed_tools = vec!["*".to_string()];
                 tracing::info!(
                     gateway_url = %env.gateway_url,
-                    "McpPorter resolved system agent environment"
+                    "McpPorter resolved system agent base environment (no skills/MCP tools)"
                 );
                 env
             }

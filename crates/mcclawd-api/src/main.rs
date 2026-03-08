@@ -37,7 +37,7 @@ enum Commands {
     },
     /// Start the web server
     Serve {
-        #[arg(short, long, default_value = "9090")]
+        #[arg(short, long, default_value = "8081")]
         port: u16,
     },
     /// Manage ClawHub skills

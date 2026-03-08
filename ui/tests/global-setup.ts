@@ -66,13 +66,12 @@ export default async function globalSetup() {
   );
   writeFileSync(AUTH_TOKEN_PATH, JSON.stringify({ token }));
 
-  // Re-seed ANTHROPIC_API_KEY into the fresh vault.
-  // register_finish generates a new vault key and wipes secrets.enc, so any
-  // previously-stored API key is lost. Re-seed from the env so LLM streaming
-  // works in E2E tests (fixes BUG-005).
+  // Re-seed ANTHROPIC_API_KEY into the vault after re-registration.
+  // Note: register_finish now preserves vault.key (and thus secrets.enc),
+  // but seed anyway in case the server's auto-seed from .env hasn't run yet.
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (apiKey) {
-    await fetch("http://localhost:9090/api/secrets", {
+    await fetch("http://localhost:8081/api/secrets", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -83,7 +82,7 @@ export default async function globalSetup() {
   }
 
   // Seed a test-only secret for E2E secret management tests.
-  await fetch("http://localhost:9090/api/secrets", {
+  await fetch("http://localhost:8081/api/secrets", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

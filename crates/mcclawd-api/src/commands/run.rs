@@ -14,7 +14,7 @@ pub async fn execute(prompt: &str, workspace_name: &str, swarm: bool) -> anyhow:
     }
 
     // Try daemon mode first
-    let daemon_port = 9090;
+    let daemon_port = 8081;
     if let Ok(true) = try_daemon(prompt, workspace_name, daemon_port).await {
         return Ok(());
     }
@@ -96,7 +96,7 @@ async fn run_in_process(
 
     let max_turns = config.agent.max_turns;
     let (agent, _memory, _mcp_conns) =
-        AgentEngine::build(workspace, &api_key, max_turns, config).await?;
+        AgentEngine::build(workspace, &api_key, max_turns, config, None).await?;
     tracing::info!(max_turns, "Agent built");
 
     eprintln!("McClawd v0.5.0 — thinking...\n");

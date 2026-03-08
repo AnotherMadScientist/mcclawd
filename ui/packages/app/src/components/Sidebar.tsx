@@ -9,6 +9,8 @@ import {
   ChevronDown,
   LogOut,
   Container,
+  DollarSign,
+  Shield,
 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "../lib/utils";
@@ -19,8 +21,10 @@ const configItems = [
   { to: "/config/skills", icon: Puzzle, label: "Skills" },
   { to: "/config/mcp", icon: Server, label: "MCP Servers" },
   { to: "/config/secrets", icon: KeyRound, label: "Secrets" },
+  { to: "/config/docker", icon: Container, label: "Agents" },
+  { to: "/config/usage", icon: DollarSign, label: "Usage" },
+  { to: "/config/security", icon: Shield, label: "Security" },
   { to: "/config/settings", icon: Settings, label: "Settings" },
-  { to: "/config/docker", icon: Container, label: "Docker" },
 ];
 
 export function Sidebar() {

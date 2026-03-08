@@ -310,7 +310,7 @@ test.describe(
       // Pre-flight: check backend + LLM health
       try {
         const health = await page.request.get(
-          "http://localhost:9090/api/health/llm",
+          "http://localhost:8081/api/health/llm",
         );
         if (!health.ok()) {
           test.skip(true, "Backend /api/health/llm not OK — skipping");

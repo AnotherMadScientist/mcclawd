@@ -7,14 +7,13 @@ use crate::context::ContextBuilder;
 use crate::mcp_integration::McpBundle;
 use crate::workspace::Workspace;
 use mcclawd_core::config::McclawdConfig;
+use mcclawd_core::hooks::HookPipeline;
 use mcclawd_tools::builtin::memory::{MemoryRecall, MemoryStore};
-use mcclawd_tools::system_tools::{
-    CreateTask, InstallSkill, ListSkills, ManageSecret, NavigateTo, ReadWorkspace, UninstallSkill,
-    UpdateWorkspace,
-};
+use mcclawd_tools::system_tools::{CreateTask, NavigateTo};
 use rig::agent::Agent;
 use rig::client::CompletionClient;
 use rig::providers::anthropic::{self, completion::CLAUDE_4_SONNET};
+use std::sync::Arc;
 
 /// The concrete Anthropic completion-model type used throughout McClawd.
 pub type AnthropicModel = anthropic::completion::CompletionModel;
@@ -45,6 +44,7 @@ impl AgentEngine {
         api_key: &str,
         max_turns: usize,
         config: &McclawdConfig,
+        security_pipeline: Option<Arc<HookPipeline>>,
     ) -> anyhow::Result<(McclawdAgent, MemoryStore, Vec<McpBundle>)> {
         let context = ContextBuilder::new(workspace)
             .with_skills_dir(config.skills.managed_dir.clone());
@@ -73,13 +73,18 @@ impl AgentEngine {
         }
 
         let agent = builder.build();
+        if let Some(ref pipeline) = security_pipeline {
+            tracing::info!(hooks = pipeline.len(), "Agent built with security pipeline");
+        }
         Ok((agent, memory_store, bundles))
     }
 
-    /// Build a system agent with UI control tools (no MCP, no memory tools).
+    /// Build a system agent with minimal UI control tools only.
     ///
-    /// Used by the always-on system agent that handles voice/text commands
-    /// for navigation, task creation, skill management, etc.
+    /// The system agent is a restricted UI controller — it can only navigate
+    /// pages and create tasks. No skill management, no secrets, no workspace
+    /// editing (those are done through the UI directly). This minimizes the
+    /// attack surface for prompt injection.
     pub async fn build_system_agent(
         api_key: &str,
         system_prompt: &str,
@@ -90,15 +95,9 @@ impl AgentEngine {
             .agent(CLAUDE_4_SONNET)
             .preamble(system_prompt)
             .max_tokens(4096)
-            .default_max_turns(5)
+            .default_max_turns(3)
             .tool(NavigateTo)
             .tool(CreateTask)
-            .tool(InstallSkill)
-            .tool(UninstallSkill)
-            .tool(ListSkills)
-            .tool(ManageSecret)
-            .tool(ReadWorkspace)
-            .tool(UpdateWorkspace)
             .build();
 
         Ok(agent)

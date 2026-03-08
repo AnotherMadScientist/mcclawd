@@ -18,6 +18,8 @@ services:
       timeout: 3s
       retries: 5
     restart: always
+    networks:
+      - mcclawd-net
 
   agentgateway:
     build:
@@ -35,6 +37,26 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+    networks:
+      - mcclawd-net
+
+  security-sidecar:
+    build:
+      context: ./docker/security-sidecar
+    ports:
+      - "127.0.0.1:8082:8082"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - mcclawd-net
+
+networks:
+  mcclawd-net:
+    driver: bridge
 
 volumes:
   mcclawd-data:

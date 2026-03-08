@@ -4,7 +4,7 @@ import type {
   RegistrationResponseJSON,
   AuthenticationResponseJSON,
 } from "@simplewebauthn/browser";
-import type { AttachmentMeta, McclawdConfig, McpServer, Task, WorkspaceFile, InstalledSkill, CachedSearchResult, ClawHubSkillMeta, ScanResult, Provider, DetailedUsageSummary, BudgetInfo, BudgetUpdate, AnthropicModel, ModelPricing, CreditsResponse, DockerBuildStatus, ContainerInfo, ContainerDetail } from "./types";
+import type { AttachmentMeta, McclawdConfig, McpServer, Task, WorkspaceFile, InstalledSkill, CachedSearchResult, ClawHubSkillMeta, ScanResult, Provider, DetailedUsageSummary, BudgetInfo, BudgetUpdate, AnthropicModel, ModelPricing, CreditsResponse, DockerBuildStatus, ContainerInfo, ContainerDetail, SecurityEvent, SecuritySummary, SecurityStatus, DlpPolicy } from "./types";
 
 const TOKEN_KEY = "mcclawd_token";
 
@@ -244,5 +244,24 @@ export const api = {
         `/api/docker/containers/${encodeURIComponent(id)}`,
         { method: "DELETE" },
       ),
+  },
+  security: {
+    events: (taskId?: string, since?: string) => {
+      const params = new URLSearchParams();
+      if (taskId) params.set("task_id", taskId);
+      if (since) params.set("since", since);
+      return apiFetch<SecurityEvent[]>(`/api/security/events?${params}`);
+    },
+    summary: (since = "24h") =>
+      apiFetch<SecuritySummary>(`/api/security/summary?since=${encodeURIComponent(since)}`),
+    status: () => apiFetch<SecurityStatus>("/api/security/status"),
+    policies: () => apiFetch<DlpPolicy[]>("/api/security/policies"),
+    createPolicy: (policy: Omit<DlpPolicy, "id" | "updated_at">) =>
+      apiFetch<DlpPolicy>("/api/security/policies", {
+        method: "POST",
+        body: JSON.stringify(policy),
+      }),
+    deletePolicy: (id: number) =>
+      apiFetch<void>(`/api/security/policies/${id}`, { method: "DELETE" }),
   },
 };

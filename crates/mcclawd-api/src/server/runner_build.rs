@@ -746,11 +746,29 @@ pub async fn delete_container(
 
     // Clean up associated task if found
     if let Some(tid) = &task_id {
+        let task_id_typed = mcclawd_core::types::TaskId(tid.clone());
+
         // Remove from in-memory task_containers map
-        state.task_containers.write().await.remove(&mcclawd_core::types::TaskId(tid.clone()));
+        state.task_containers.write().await.remove(&task_id_typed);
+
+        // Remove task from in-memory task manager (so it disappears from UI)
+        {
+            let mut mgr = state.tasks.write().await;
+            if let Some(t) = mgr.get_task(&task_id_typed) {
+                if matches!(t.status, mcclawd_tasks::manager::TaskStatus::Running) {
+                    mgr.fail_task(&task_id_typed, "Container removed".to_string());
+                }
+            }
+            mgr.delete_task(&task_id_typed);
+        }
+
+        // Clean up broadcast channel + chat history
+        state.task_streams.write().await.remove(&task_id_typed);
+        state.task_chat_history.write().await.remove(&task_id_typed);
+        state.task_events.write().await.remove(&task_id_typed);
 
         // Delete task from postgres
-        let _ = state.pg_store.delete_task(tid).await;
+        state.pg_delete_task(&task_id_typed).await;
 
         // Delete persistent container record
         let _ = state.pg_store.delete_persistent_container(&container_id).await;

@@ -134,6 +134,51 @@ impl SecurityHook for AuditHook {
     }
 }
 
+/// PostgreSQL-backed audit sink -- writes security events to the database.
+/// Requires a sqlx::PgPool. Events are written synchronously (per-event).
+/// For production, consider adding batch insert with a background flush task.
+pub struct PgAuditSink {
+    pool: sqlx::PgPool,
+}
+
+impl PgAuditSink {
+    pub fn new(pool: sqlx::PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+impl AuditSink for PgAuditSink {
+    fn record(&self, event: &AuditEvent) {
+        let pool = self.pool.clone();
+        let event = event.clone();
+        // Spawn async write -- AuditSink::record is sync, so we fire-and-forget
+        tokio::spawn(async move {
+            let details = serde_json::json!({
+                "args_summary": event.args_summary,
+                "result_size": event.result_size,
+                "duration_ms": event.duration_ms,
+                "dlp_flags": event.dlp_flags,
+            });
+            let action_str = match event.action {
+                AuditAction::PreCall => "pre_call",
+                AuditAction::PostCall => "post_call",
+            };
+            if let Err(e) = sqlx::query(
+                "INSERT INTO security_events (event_type, tool_name, direction, details, action_taken)
+                 VALUES ('audit', $1, $2, $3, 'allowed')",
+            )
+            .bind(&event.tool_name)
+            .bind(action_str)
+            .bind(&details)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(error = %e, "Failed to write audit event to postgres");
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

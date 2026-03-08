@@ -147,6 +147,14 @@ impl TaskManager {
         }
         self.tasks.push(TaskRecord { id, prompt, status, tags: Vec::new() });
     }
+
+    /// Hydrate a task from DB with full metadata including tags.
+    pub fn hydrate_task(&mut self, id: TaskId, prompt: String, status: TaskStatus, tags: Vec<String>) {
+        if self.tasks.iter().any(|t| t.id == id) {
+            return;
+        }
+        self.tasks.push(TaskRecord { id, prompt, status, tags });
+    }
 }
 
 #[cfg(test)]

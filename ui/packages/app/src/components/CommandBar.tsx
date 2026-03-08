@@ -55,7 +55,7 @@ export function CommandBar() {
     return () => window.removeEventListener("keydown", handler);
   }, [responseVisible]);
 
-  // Parse tool call results for UI actions
+  // Parse tool call results for UI actions (system agent only has navigate + create_task)
   const executeAction = useCallback(
     (text: string) => {
       try {
@@ -75,37 +75,6 @@ export function CommandBar() {
               return true;
             }
             break;
-          case "install_skill":
-            if (typeof parsed.name === "string") {
-              api.skills
-                .install(
-                  parsed.name as string,
-                  parsed.version as string | undefined,
-                )
-                .then(() => {
-                  navigate("/config/skills");
-                });
-              return true;
-            }
-            break;
-          case "uninstall_skill":
-            if (typeof parsed.name === "string") {
-              api.skills.uninstall(parsed.name as string).then(() => {
-                navigate("/config/skills");
-              });
-              return true;
-            }
-            break;
-          case "list_skills":
-            navigate("/config/skills");
-            return true;
-          case "manage_secret":
-            navigate("/config/secrets");
-            return true;
-          case "read_workspace":
-          case "update_workspace":
-            navigate("/workspace");
-            return true;
         }
       } catch {
         // Not JSON — try natural language navigation patterns

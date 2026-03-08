@@ -53,6 +53,8 @@ impl Tool for NavigateTo {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        crate::agent_security::validate_route(&args.path)
+            .map_err(|e| SystemToolError(e))?;
         Ok(json!({
             "action": "navigate",
             "path": args.path
@@ -98,6 +100,8 @@ impl Tool for CreateTask {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        crate::agent_security::validate_task_prompt(&args.prompt)
+            .map_err(|e| SystemToolError(e))?;
         Ok(json!({
             "action": "create_task",
             "prompt": args.prompt

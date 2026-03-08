@@ -904,6 +904,197 @@ impl PgTaskStore {
         .map_err(pg_err)?;
         Ok(())
     }
+
+    // ─── Security Events ────────────────────────────────────────────
+
+    pub async fn insert_security_event(
+        &self,
+        task_id: Option<&str>,
+        user_id: &str,
+        agent_id: Option<&str>,
+        trace_id: Option<&str>,
+        span_id: Option<&str>,
+        event_type: &str,
+        tool_name: Option<&str>,
+        direction: Option<&str>,
+        threat_level: Option<&str>,
+        details: &serde_json::Value,
+        action_taken: &str,
+    ) -> anyhow::Result<i64> {
+        let row = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO security_events (task_id, user_id, agent_id, trace_id, span_id, event_type, tool_name, direction, threat_level, details, action_taken)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             RETURNING id"
+        )
+        .bind(task_id)
+        .bind(user_id)
+        .bind(agent_id)
+        .bind(trace_id)
+        .bind(span_id)
+        .bind(event_type)
+        .bind(tool_name)
+        .bind(direction)
+        .bind(threat_level)
+        .bind(details)
+        .bind(action_taken)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn insert_dlp_finding(
+        &self,
+        security_event_id: i64,
+        finding_type: &str,
+        tag: &str,
+        pattern_name: Option<&str>,
+        confidence: Option<f32>,
+        data_hash: Option<&str>,
+        redacted_preview: Option<&str>,
+    ) -> anyhow::Result<i64> {
+        let row = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO dlp_findings (security_event_id, finding_type, tag, pattern_name, confidence, data_hash, redacted_preview)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING id"
+        )
+        .bind(security_event_id)
+        .bind(finding_type)
+        .bind(tag)
+        .bind(pattern_name)
+        .bind(confidence)
+        .bind(data_hash)
+        .bind(redacted_preview)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_security_events(
+        &self,
+        task_id: Option<&str>,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let rows = sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT json_build_object(
+                'id', e.id, 'task_id', e.task_id, 'agent_id', e.agent_id,
+                'trace_id', e.trace_id, 'span_id', e.span_id,
+                'event_type', e.event_type, 'tool_name', e.tool_name,
+                'direction', e.direction, 'threat_level', e.threat_level,
+                'details', e.details, 'action_taken', e.action_taken,
+                'created_at', e.created_at,
+                'findings', COALESCE((
+                    SELECT json_agg(json_build_object(
+                        'id', f.id, 'finding_type', f.finding_type,
+                        'tag', f.tag, 'pattern_name', f.pattern_name,
+                        'confidence', f.confidence, 'redacted_preview', f.redacted_preview
+                    ))
+                    FROM dlp_findings f WHERE f.security_event_id = e.id
+                ), '[]'::json)
+            )
+            FROM security_events e
+            WHERE ($1::text IS NULL OR e.task_id = $1)
+              AND ($2::timestamptz IS NULL OR e.created_at >= $2)
+            ORDER BY e.created_at DESC
+            LIMIT $3"
+        )
+        .bind(task_id)
+        .bind(since)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn security_summary(
+        &self,
+        user_id: &str,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let row = sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT json_build_object(
+                'total_events', COUNT(*),
+                'blocked', COUNT(*) FILTER (WHERE action_taken = 'blocked'),
+                'warned', COUNT(*) FILTER (WHERE action_taken = 'warned'),
+                'allowed', COUNT(*) FILTER (WHERE action_taken = 'allowed'),
+                'by_type', COALESCE((
+                    SELECT json_object_agg(event_type, cnt)
+                    FROM (SELECT event_type, COUNT(*) as cnt FROM security_events
+                          WHERE user_id = $1 AND ($2::timestamptz IS NULL OR created_at >= $2)
+                          GROUP BY event_type) sub
+                ), '{}'::json),
+                'by_threat', COALESCE((
+                    SELECT json_object_agg(threat_level, cnt)
+                    FROM (SELECT COALESCE(threat_level, 'unknown') as threat_level, COUNT(*) as cnt
+                          FROM security_events
+                          WHERE user_id = $1 AND ($2::timestamptz IS NULL OR created_at >= $2)
+                          GROUP BY threat_level) sub
+                ), '{}'::json)
+            )
+            FROM security_events
+            WHERE user_id = $1 AND ($2::timestamptz IS NULL OR created_at >= $2)"
+        )
+        .bind(user_id)
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_dlp_policies(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+        let rows = sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT json_build_object(
+                'id', id, 'name', name, 'description', description,
+                'tag_pattern', tag_pattern, 'tool_pattern', tool_pattern,
+                'action', action, 'enabled', enabled,
+                'created_at', created_at, 'updated_at', updated_at
+            )
+            FROM dlp_policies ORDER BY id"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn upsert_dlp_policy(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        tag_pattern: &str,
+        tool_pattern: Option<&str>,
+        action: &str,
+        enabled: bool,
+    ) -> anyhow::Result<i32> {
+        let row = sqlx::query_scalar::<_, i32>(
+            "INSERT INTO dlp_policies (name, description, tag_pattern, tool_pattern, action, enabled, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, NOW())
+             ON CONFLICT (name) DO UPDATE SET
+               description = EXCLUDED.description,
+               tag_pattern = EXCLUDED.tag_pattern,
+               tool_pattern = EXCLUDED.tool_pattern,
+               action = EXCLUDED.action,
+               enabled = EXCLUDED.enabled,
+               updated_at = NOW()
+             RETURNING id"
+        )
+        .bind(name)
+        .bind(description)
+        .bind(tag_pattern)
+        .bind(tool_pattern)
+        .bind(action)
+        .bind(enabled)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn delete_dlp_policy(&self, id: i32) -> anyhow::Result<bool> {
+        let result = sqlx::query("DELETE FROM dlp_policies WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 #[cfg(test)]

@@ -10,6 +10,7 @@ use crate::supervisor::AgentSupervisor;
 use dashmap::DashMap;
 use mcclawd_channels::OutboundChunk;
 use mcclawd_core::providers::{ProviderPool, ProviderPoolConfig};
+use mcclawd_core::hooks::HookPipeline;
 use mcclawd_core::scanner::ScanResult;
 use mcclawd_core::secrets::SecretBackend;
 use mcclawd_core::types::TaskId;
@@ -69,6 +70,8 @@ pub struct AppState {
     pub task_containers: Arc<RwLock<HashMap<TaskId, PersistentHandle>>>,
     /// Runner image build state (progress, logs, status).
     pub runner_build: Arc<RwLock<RunnerBuildState>>,
+    /// Security hook pipeline (DLP + secret scanner + sidecar + audit).
+    pub security_pipeline: Arc<HookPipeline>,
 }
 
 impl AppState {
@@ -113,6 +116,7 @@ impl AppState {
             system_agent: Arc::new(RwLock::new(None)),
             task_containers: Arc::new(RwLock::new(HashMap::new())),
             runner_build: Arc::new(RwLock::new(RunnerBuildState::default())),
+            security_pipeline: Arc::new(HookPipeline::default()),
         })
     }
 

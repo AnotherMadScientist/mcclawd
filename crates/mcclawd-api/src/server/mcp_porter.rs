@@ -1,6 +1,15 @@
 //! McpPorter — builds on-demand Docker images for agent skill-sets and orchestrates
 //! the full agent execution environment (network, image, gateway, tool filtering).
 //!
+//! ## Architecture
+//!
+//! - **System agent**: Uses `prepare_base_environment()` — gets network + gateway URL only.
+//!   No skills, no MCP tool injection. The system agent is a UI controller with fixed tools.
+//!
+//! - **Task agents**: Use `prepare_task_environment()` — each task gets its own subset of
+//!   skills and MCP tools. Pattern: 1:1 agent-task→skill, 1:M skill→MCP tools.
+//!   Skills are resolved from disk, not inherited from a shared pool.
+//!
 //! Named after the MCPorter concept (TypeScript MCP bridge), adapted for McClawd's
 //! Docker-first, Rust-native architecture.
 
@@ -196,26 +205,49 @@ impl McpPorter {
         Ok(())
     }
 
-    /// Prepare a full-skill environment for the system agent.
+    /// Prepare a minimal base environment — network + gateway URL only.
     ///
-    /// Resolves ALL installed skills into a single image.
-    pub async fn prepare_system_agent_environment(
+    /// **No skills, no MCP tool filtering, no custom image builds.**
+    /// Used for the system agent which must NEVER have skills or MCP tools injected.
+    /// The system agent is a lightweight UI controller (navigate_to, create_task).
+    pub async fn prepare_base_environment(
+        &self,
+        config: &McclawdConfig,
+    ) -> anyhow::Result<AgentEnvironment> {
+        let network = &config.sandbox.network;
+        self.lifecycle.ensure_network_exists(network).await?;
+
+        // Ensure AgentGateway is on the network
+        if let Err(e) = self
+            .lifecycle
+            .ensure_on_network("agentgateway", network)
+            .await
+        {
+            tracing::warn!("Could not connect AgentGateway to network: {e}");
+        }
+
+        Ok(AgentEnvironment {
+            image: config.sandbox.base_image.clone(),
+            network: network.clone(),
+            gateway_url: "http://agentgateway:3000".to_string(),
+            allowed_tools: vec!["*".to_string()],
+            skill_context: String::new(),
+        })
+    }
+
+    /// Prepare a full-skill environment for a task agent.
+    ///
+    /// Resolves ALL installed skills into a single image with proper MCP tool filtering.
+    /// **Only for task agents — NEVER for the system agent.**
+    pub async fn prepare_task_environment(
         &self,
         all_skills: &HashMap<String, LoadedSkill>,
         mcp_servers: &[mcclawd_core::config::McpServerConfig],
         config: &McclawdConfig,
     ) -> anyhow::Result<AgentEnvironment> {
         if all_skills.is_empty() {
-            // No skills installed — use base image with all tools allowed
-            let network = &config.sandbox.network;
-            self.lifecycle.ensure_network_exists(network).await?;
-            return Ok(AgentEnvironment {
-                image: config.sandbox.base_image.clone(),
-                network: network.clone(),
-                gateway_url: "http://agentgateway:3000".to_string(),
-                allowed_tools: vec!["*".to_string()],
-                skill_context: String::new(),
-            });
+            // No skills installed — use base environment with all tools allowed
+            return self.prepare_base_environment(config).await;
         }
 
         let skill_names: Vec<String> = all_skills.keys().cloned().collect();

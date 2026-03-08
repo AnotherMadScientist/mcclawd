@@ -182,6 +182,169 @@ test.describe("McpPorter: API Health & Docker @mcpporter @docker", () => {
   });
 });
 
+test.describe("McpPorter: MCP Tools Overview @mcpporter", () => {
+  let consoleErrors: ConsoleError[] = [];
+
+  test.beforeEach(async ({ page }) => {
+    consoleErrors = collectConsoleErrors(page);
+    await login(page);
+    await page.goto("/config/mcp");
+    await expect(
+      page.getByRole("heading", { name: "MCP Servers" })
+    ).toBeVisible();
+  });
+
+  test.afterEach(async () => {
+    const unexpected = unexpectedErrors(consoleErrors);
+    expect(
+      unexpected,
+      `Unexpected console errors: ${JSON.stringify(unexpected)}`
+    ).toHaveLength(0);
+  });
+
+  test("MCP tools overview shows tool names @mcpporter", async ({ page }) => {
+    await expect(
+      page.getByRole("heading", { name: "MCP Tools" })
+    ).toBeVisible({ timeout: 10000 });
+    const main = page.locator("main");
+    await expect(main.getByTestId("mcp-tool-filesystem")).toBeVisible();
+    await expect(main.getByTestId("mcp-tool-langextract")).toBeVisible();
+    await expect(main.getByTestId("mcp-tool-scrapling")).toBeVisible();
+  });
+
+  test("MCP tools overview shows container mapping @mcpporter", async ({
+    page,
+  }) => {
+    await expect(
+      page.getByRole("heading", { name: "MCP Tools" })
+    ).toBeVisible({ timeout: 10000 });
+    // Each tool row should show either container pills or "No containers"
+    for (const name of ["filesystem", "langextract", "scrapling"]) {
+      const row = page.getByTestId(`mcp-tool-${name}`);
+      await expect(row).toBeVisible();
+      // Row must contain either a container pill or the "No containers" badge
+      const hasPill = await row.locator("span.rounded-full").count();
+      expect(hasPill).toBeGreaterThan(0);
+    }
+  });
+});
+
+test.describe("McpPorter: MCP Tools Live Updates @mcpporter", () => {
+  let consoleErrors: ConsoleError[] = [];
+
+  test.beforeEach(async ({ page }) => {
+    consoleErrors = collectConsoleErrors(page);
+    await login(page);
+  });
+
+  test.afterEach(async () => {
+    const unexpected = unexpectedErrors(consoleErrors);
+    expect(
+      unexpected,
+      `Unexpected console errors: ${JSON.stringify(unexpected)}`
+    ).toHaveLength(0);
+  });
+
+  /** Helper: get auth token */
+  async function getToken(page: import("@playwright/test").Page) {
+    return page.evaluate(() => localStorage.getItem("mcclawd_token"));
+  }
+
+  /** Helper: create task via API (starts immediately so container is created) */
+  async function createTaskViaApi(page: import("@playwright/test").Page, prompt: string) {
+    const token = await getToken(page);
+    const resp = await page.request.post("/api/tasks", {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { prompt, tags: ["e2e-test"] },
+    });
+    expect(resp.ok()).toBeTruthy();
+    return (await resp.json()).id as string;
+  }
+
+  /** Helper: get containers via API */
+  async function getContainers(page: import("@playwright/test").Page) {
+    const token = await getToken(page);
+    const resp = await page.request.get("/api/docker/containers", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return resp.ok() ? await resp.json() : [];
+  }
+
+  /** Helper: delete container via API */
+  async function deleteContainer(page: import("@playwright/test").Page, id: string) {
+    const token = await getToken(page);
+    return page.request.delete(`/api/docker/containers/${encodeURIComponent(id)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  }
+
+  test("MCP tools overview updates live when task container appears and disappears @mcpporter", async ({
+    page,
+  }) => {
+    // Navigate to MCP page and verify tools section loads
+    await page.goto("/config/mcp");
+    await expect(
+      page.getByRole("heading", { name: "MCP Tools" })
+    ).toBeVisible({ timeout: 10000 });
+
+    // Record initial container pills count for the first tool row
+    const toolRows = page.locator("[data-testid^='mcp-tool-']");
+    const initialRowCount = await toolRows.count();
+    expect(initialRowCount).toBeGreaterThan(0);
+
+    // Count initial total container pills (excluding "No containers" badges)
+    const initialPills = async () => {
+      let count = 0;
+      for (let i = 0; i < initialRowCount; i++) {
+        const row = toolRows.nth(i);
+        const pills = row.locator("span.rounded-full").filter({ hasNotText: "No containers" });
+        count += await pills.count();
+      }
+      return count;
+    };
+    const pillsBefore = await initialPills();
+
+    // Create a task — this spawns a container with MCP tools
+    const taskId = await createTaskViaApi(page, "List files in current directory");
+
+    // Wait for container to appear in Docker API
+    let taskContainerId: string | null = null;
+    await expect(async () => {
+      const containers = await getContainers(page);
+      const match = containers.find(
+        (c: any) => c.task_id && taskId && c.task_id.includes(taskId.slice(0, 8))
+      );
+      expect(match).toBeTruthy();
+      taskContainerId = match?.id;
+    }).toPass({ timeout: 15000, intervals: [1000] });
+
+    // The MCP page polls every 5s — wait for the container pill to appear in the UI
+    // A new container with mcp_tools should show up as a blue pill in a tool row
+    await expect(async () => {
+      const pillsNow = await initialPills();
+      expect(pillsNow).toBeGreaterThan(pillsBefore);
+    }).toPass({ timeout: 15000, intervals: [2000] });
+
+    // Verify the task ID prefix appears in a container pill somewhere
+    const shortId = taskId.slice(0, 8);
+    await expect(page.locator(`text=${shortId}`).first()).toBeVisible({ timeout: 5000 });
+
+    // Now delete the container
+    expect(taskContainerId).toBeTruthy();
+    const delResp = await deleteContainer(page, taskContainerId!);
+    expect(delResp.ok()).toBeTruthy();
+
+    // Wait for the pill to disappear from the MCP tools overview (5s polling)
+    await expect(async () => {
+      const pillsAfterDelete = await initialPills();
+      expect(pillsAfterDelete).toBeLessThanOrEqual(pillsBefore);
+    }).toPass({ timeout: 20000, intervals: [2000] });
+
+    // The task ID pill should no longer be visible
+    await expect(page.locator(`text=${shortId}`)).toHaveCount(0, { timeout: 5000 });
+  });
+});
+
 test.describe("McpPorter: Skills + Tool Resolution @mcpporter", () => {
   let consoleErrors: ConsoleError[] = [];
 

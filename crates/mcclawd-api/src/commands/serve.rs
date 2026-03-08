@@ -10,6 +10,9 @@ use crate::server::pg_store::PgTaskStore;
 use crate::server::runner_build;
 use crate::server::{routes, state::AppState};
 use crate::supervisor::AgentSupervisor;
+use mcclawd_core::hooks::{
+    AuditHook, DlpHook, HookPipeline, PgAuditSink, SecretScannerHook, SecuritySidecarHook,
+};
 use mcclawd_core::secrets::{EncryptedFileBackend, SecretBackend};
 use mcclawd_core::skills::SandboxConfig;
 use mcclawd_core::types::TaskId;
@@ -249,7 +252,27 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
         }
     };
 
+    // Extract vault paths BEFORE config is consumed by AppState::new (avoids RwLock deadlock)
+    let vault_data_dir = config.data_dir.clone();
+    let vault_secrets_path = config.secrets_path();
+
     let mut state = AppState::new(config, supervisor, pg_store.clone())?;
+
+    // Build security hook pipeline (DLP → secret scanner → sidecar → audit)
+    {
+        let sidecar_url = std::env::var("SECURITY_SIDECAR_URL")
+            .unwrap_or_else(|_| "http://localhost:8082".to_string());
+        let pipeline = HookPipeline::new()
+            .add(Arc::new(DlpHook::with_defaults()))
+            .add(Arc::new(SecretScannerHook::with_defaults()))
+            .add(Arc::new(SecuritySidecarHook::new(&sidecar_url)))
+            .add(Arc::new(AuditHook::new(Arc::new(PgAuditSink::new(
+                pg_store.pool().clone(),
+            )))));
+        let hook_count = pipeline.len();
+        state.security_pipeline = Arc::new(pipeline);
+        tracing::info!(hooks = hook_count, sidecar_url = %sidecar_url, "Security pipeline initialized");
+    }
 
     // Hydrate usage data from database on startup
     match (
@@ -274,16 +297,14 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
             tracing::warn!("Failed to load usage data from database: {e}");
         }
     }
-
     // Open vault and auto-seed API keys from .env on every startup.
     // Vault is long-lived on disk — survives server restarts and re-registrations.
-    // If vault.key is missing, create it. If secrets.enc is missing or corrupt, recreate.
-    // Then seed ANTHROPIC_API_KEY and ANTHROPIC_ADMIN_KEY from env if not already present.
+    // If vault.key is missing, create it. If secrets.enc is missing, create empty.
+    // If secrets.enc is CORRUPT: log error, start without vault. Human must run
+    // `mc secrets reset -y && mc secrets init` to recover. NEVER auto-delete secrets.
+    // Seeds ALL keys from .env file (not just a hardcoded subset).
     {
-        let (data_dir, secrets_path) = {
-            let c = state.config.read().await;
-            (c.data_dir.clone(), c.secrets_path())
-        };
+        let (data_dir, secrets_path) = (vault_data_dir, vault_secrets_path);
         let vault_key_path = data_dir.join("vault.key");
 
         // Ensure vault.key exists (create if missing — first-time or after full reset)
@@ -316,42 +337,36 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
                     match EncryptedFileBackend::new(&secrets_path, &passphrase) {
                         Ok(b) => {
                             tracing::info!("Vault unlocked");
-                            b
+                            Some(b)
                         }
                         Err(e) => {
-                            // secrets.enc is corrupted or key mismatch — recreate
-                            tracing::warn!("Vault decrypt failed ({e}), recreating secrets.enc");
-                            let _ = fs::remove_file(&secrets_path);
-                            EncryptedFileBackend::new_empty(&secrets_path, &passphrase)
-                                .map_err(|e| anyhow::anyhow!("Failed to create vault: {e}"))?
+                            // Vault is corrupted or key mismatch — DO NOT auto-delete.
+                            // Require explicit human action: `mc secrets reset -y` to wipe.
+                            tracing::error!(
+                                "VAULT CORRUPTED: {e}. \
+                                 secrets.enc cannot be decrypted with current vault.key. \
+                                 Run `mc secrets reset -y && mc secrets init` to reset, \
+                                 or restore secrets.enc from backup. \
+                                 Server will start WITHOUT secrets."
+                            );
+                            None
                         }
                     }
                 } else {
                     tracing::info!("Creating new secrets vault");
-                    EncryptedFileBackend::new_empty(&secrets_path, &passphrase)
-                        .map_err(|e| anyhow::anyhow!("Failed to create vault: {e}"))?
+                    Some(
+                        EncryptedFileBackend::new_empty(&secrets_path, &passphrase)
+                            .map_err(|e| anyhow::anyhow!("Failed to create vault: {e}"))?,
+                    )
                 };
 
-                // Auto-seed API keys from environment (idempotent — skips if already present)
-                for env_key in &["ANTHROPIC_API_KEY", "ANTHROPIC_ADMIN_KEY"] {
-                    if let Ok(val) = std::env::var(env_key) {
-                        if !val.is_empty() {
-                            match backend.get(env_key).await {
-                                Ok(Some(existing)) if existing == val => {}
-                                _ => {
-                                    if let Err(e) = backend.set(env_key, &val).await {
-                                        tracing::warn!("Failed to seed {env_key}: {e}");
-                                    } else {
-                                        tracing::info!("{env_key} seeded into vault from environment");
-                                    }
-                                }
-                            }
-                        }
-                    }
+                if let Some(backend) = backend {
+                    // No auto-seeding from .env on startup — secrets are only imported
+                    // via explicit `mc secrets init` command. This prevents accidental
+                    // overwrites and keeps the vault under human control.
+                    let mut secrets = state.secrets.write().await;
+                    *secrets = Some(Arc::new(backend));
                 }
-
-                let mut secrets = state.secrets.write().await;
-                *secrets = Some(Arc::new(backend));
             }
             Err(e) => {
                 tracing::error!("vault.key unreadable: {e}");
@@ -359,19 +374,34 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
         }
     }
 
-    // Hydrate in-memory TaskManager from postgres on startup
+    // Hydrate in-memory TaskManager from postgres on startup.
+    // Running/Building tasks are marked Failed (server restarted — container is gone).
     match pg_store.list_tasks().await {
         Ok(rows) => {
             let mut mgr = state.tasks.write().await;
-            for (id, prompt, status, error_message, _tags) in &rows {
-                let task_id = TaskId(id.clone());
-                let task_status = row_to_status(status, error_message.as_deref());
-                mgr.restore_task(task_id, prompt.clone(), task_status);
+            for (id, prompt, status, error_message, tags) in rows {
+                let task_status = match status.as_str() {
+                    "Running" | "Building" => {
+                        mcclawd_tasks::manager::TaskStatus::Failed(
+                            "Server restarted".to_string(),
+                        )
+                    }
+                    _ => row_to_status(&status, error_message.as_deref()),
+                };
+                mgr.hydrate_task(
+                    mcclawd_core::types::TaskId(id),
+                    prompt,
+                    task_status,
+                    tags,
+                );
             }
-            tracing::info!(count = rows.len(), "Restored {} tasks from postgres", rows.len());
+            let count = mgr.all_tasks().len();
+            if count > 0 {
+                tracing::info!(count, "Hydrated tasks from database");
+            }
         }
         Err(e) => {
-            tracing::warn!(error = %e, "Failed to load tasks from postgres");
+            tracing::warn!(error = %e, "Failed to hydrate tasks from DB");
         }
     }
 
@@ -429,22 +459,29 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
 
     state.config_path = Some(config_path);
 
-    // Reconnect to persistent containers that survived a restart.
-    // Containers have restart_policy=unless-stopped, so they keep running
-    // even when the API server restarts (cargo-watch, crash, etc.).
-    match pg_store.load_persistent_containers().await {
-        Ok(rows) if !rows.is_empty() => {
-            let count = rows.len();
-            let reconnect_state = state.clone();
-            tokio::spawn(async move {
-                reconnect_persistent_containers(reconnect_state, rows).await;
-            });
-            tracing::info!(count, "Reconnecting to persistent containers in background");
-        }
-        Ok(_) => {} // no containers to reconnect
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to load persistent containers from database");
-        }
+    // ── Task↔Container 1:1 Enforcement ────────────────────────────────
+    // Phase A: Reconcile Docker containers with postgres task records.
+    //   - Containers WITHOUT matching active tasks → orphans → remove
+    //   - DB container records for non-existent Docker containers → stale → remove
+    //   - Running containers WITH matching tasks → reconnect handles
+    // Phase B: After reconciliation, check tasks without containers → mark failed
+    {
+        let reconcile_state = state.clone();
+        let reconcile_pg = pg_store.clone();
+        tokio::spawn(async move {
+            reconcile_containers_and_tasks(reconcile_state, reconcile_pg).await;
+        });
+        tracing::info!("Container↔task reconciliation started in background");
+    }
+
+    // Spawn periodic GC: every 60s, cross-reference Docker containers with tasks
+    // and clean up orphans that appear during runtime (e.g., from crashed task creation).
+    {
+        let gc_state = state.clone();
+        tokio::spawn(async move {
+            container_gc_loop(gc_state).await;
+        });
+        tracing::info!("Container GC loop started (60s interval)");
     }
 
     // Auto-build runner image in background if Docker is available and image doesn't exist.
@@ -555,6 +592,287 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
     tracing::info!("McClawd daemon shut down cleanly");
     result?;
     Ok(())
+}
+
+/// Full startup reconciliation: enforces 1:1 between tasks and containers.
+///
+/// Direction 1 (Container→Task): Find Docker containers with no matching active task → cleanup.
+/// Direction 2 (DB→Docker): Find DB container records with no live Docker container → cleanup.
+/// Direction 3 (Task→Container): Find active tasks without containers → mark failed.
+/// Finally: Reconnect valid containers to their task handles.
+async fn reconcile_containers_and_tasks(state: AppState, pg_store: PgTaskStore) {
+    let docker = match bollard::Docker::connect_with_local_defaults() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(error = %e, "Cannot reconcile — Docker unavailable");
+            return;
+        }
+    };
+
+    // 1. List ALL mcclawd Docker containers (running + exited)
+    let mut filters = std::collections::HashMap::new();
+    filters.insert("name".to_string(), vec!["mcclawd-persistent-".to_string()]);
+    let docker_containers = match docker
+        .list_containers(Some(bollard::container::ListContainersOptions {
+            all: true,
+            filters,
+            ..Default::default()
+        }))
+        .await
+    {
+        Ok(cs) => cs,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to list Docker containers for reconciliation");
+            return;
+        }
+    };
+
+    // 2. Load active tasks from postgres
+    let active_task_ids: std::collections::HashSet<String> = match pg_store.list_tasks().await {
+        Ok(rows) => rows.into_iter().map(|(id, _, _, _, _)| id).collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to load tasks for reconciliation");
+            return;
+        }
+    };
+
+    // 3. Load DB container records
+    let db_containers = match pg_store.load_persistent_containers().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to load container records for reconciliation");
+            return;
+        }
+    };
+
+    let db_container_ids: std::collections::HashSet<String> =
+        db_containers.iter().map(|(cid, _, _, _)| cid.clone()).collect();
+
+    let mut orphans_removed = 0u32;
+    let mut stale_db_removed = 0u32;
+    let mut reconnected = 0u32;
+    let mut tasks_failed = 0u32;
+
+    // ── Direction 1: Docker containers without matching active tasks → orphans
+    for container in &docker_containers {
+        let cid = container.id.as_deref().unwrap_or_default();
+        if cid.is_empty() {
+            continue;
+        }
+
+        // Extract task_id from container name (mcclawd-persistent-{task_id_prefix})
+        // or from DB records
+        let container_task_id = db_containers
+            .iter()
+            .find(|(db_cid, _, _, _)| db_cid == cid || cid.starts_with(db_cid.as_str()))
+            .map(|(_, tid, _, _)| tid.clone());
+
+        let has_active_task = container_task_id
+            .as_ref()
+            .map(|tid| active_task_ids.contains(tid))
+            .unwrap_or(false);
+
+        if !has_active_task {
+            // Orphan container — no matching active task
+            tracing::info!(
+                container_id = %cid,
+                task_id = ?container_task_id,
+                "Orphan container found (no active task) — removing"
+            );
+            // Stop + remove
+            let _ = docker
+                .stop_container(cid, Some(bollard::container::StopContainerOptions { t: 5 }))
+                .await;
+            let _ = docker
+                .remove_container(
+                    cid,
+                    Some(bollard::container::RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+            // Clean DB record
+            let _ = pg_store.delete_persistent_container(cid).await;
+            orphans_removed += 1;
+        }
+    }
+
+    // ── Direction 2: DB records for containers not in Docker → stale
+    let docker_ids: std::collections::HashSet<String> = docker_containers
+        .iter()
+        .filter_map(|c| c.id.clone())
+        .collect();
+
+    for (db_cid, _, _, _) in &db_containers {
+        if !docker_ids.iter().any(|did| did == db_cid || did.starts_with(db_cid.as_str())) {
+            tracing::info!(container_id = %db_cid, "Stale DB container record (Docker container gone) — removing");
+            let _ = pg_store.delete_persistent_container(db_cid).await;
+            stale_db_removed += 1;
+        }
+    }
+
+    // ── Direction 3: Reconnect valid containers + fail orphan tasks
+    // Reload DB containers after cleanup
+    let valid_containers = match pg_store.load_persistent_containers().await {
+        Ok(rows) => rows,
+        Err(_) => Vec::new(),
+    };
+
+    if !valid_containers.is_empty() {
+        reconnect_persistent_containers(state.clone(), valid_containers).await;
+        reconnected = state.task_containers.read().await.len() as u32;
+        if state.system_agent.read().await.is_some() {
+            reconnected += 1;
+        }
+    }
+
+    // ── Direction 4: Active Running/Pending tasks without container handles → mark failed
+    {
+        let mgr = state.tasks.read().await;
+        let containers = state.task_containers.read().await;
+        let system_agent = state.system_agent.read().await;
+
+        for task in mgr.all_tasks() {
+            // Skip system agent
+            if task.id.0 == "system-agent" || task.id.0 == "__system__" {
+                continue;
+            }
+            // Only check Running tasks — Pending tasks haven't started containers yet
+            if matches!(task.status, TaskStatus::Running) {
+                if !containers.contains_key(&task.id) {
+                    tracing::warn!(
+                        task_id = %task.id.0,
+                        "Running task has no container — marking as failed"
+                    );
+                    tasks_failed += 1;
+                    // We need to drop the read lock to write, so collect and do after
+                }
+            }
+        }
+    }
+
+    // Now fail orphan tasks (needs write lock)
+    if tasks_failed > 0 {
+        let task_ids_to_fail: Vec<TaskId> = {
+            let mgr = state.tasks.read().await;
+            let containers = state.task_containers.read().await;
+            mgr.all_tasks()
+                .iter()
+                .filter(|t| {
+                    t.id.0 != "system-agent"
+                        && t.id.0 != "__system__"
+                        && matches!(t.status, TaskStatus::Running)
+                        && !containers.contains_key(&t.id)
+                })
+                .map(|t| t.id.clone())
+                .collect()
+        };
+        let mut mgr = state.tasks.write().await;
+        for tid in &task_ids_to_fail {
+            mgr.fail_task(tid, "Container lost after server restart".to_string());
+            state.pg_update_status(tid, "Failed", Some("Container lost after server restart")).await;
+        }
+    }
+
+    tracing::info!(
+        orphans_removed,
+        stale_db_removed,
+        reconnected,
+        tasks_failed,
+        "Container↔task reconciliation complete"
+    );
+}
+
+/// Periodic garbage collection: every 60s, scan for orphan containers.
+async fn container_gc_loop(state: AppState) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+    interval.tick().await; // skip first immediate tick (startup reconciliation handles it)
+
+    loop {
+        interval.tick().await;
+
+        let docker = match bollard::Docker::connect_with_local_defaults() {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        // List mcclawd containers
+        let mut filters = std::collections::HashMap::new();
+        filters.insert("name".to_string(), vec!["mcclawd-persistent-".to_string()]);
+        let containers = match docker
+            .list_containers(Some(bollard::container::ListContainersOptions {
+                all: true,
+                filters,
+                ..Default::default()
+            }))
+            .await
+        {
+            Ok(cs) => cs,
+            Err(_) => continue,
+        };
+
+        if containers.is_empty() {
+            continue;
+        }
+
+        // Cross-reference with task_containers + system_agent handles
+        let task_container_ids: std::collections::HashSet<String> = {
+            let tc = state.task_containers.read().await;
+            tc.values().map(|h| h.container_id.clone()).collect()
+        };
+        let system_cid = state
+            .system_agent
+            .read()
+            .await
+            .as_ref()
+            .map(|h| h.container_id.clone());
+
+        let mut gc_count = 0u32;
+        for container in &containers {
+            let cid = container.id.as_deref().unwrap_or_default();
+            if cid.is_empty() {
+                continue;
+            }
+
+            // Skip if it's a known container
+            if task_container_ids.contains(cid)
+                || system_cid.as_deref() == Some(cid)
+            {
+                continue;
+            }
+
+            // Check if exited — only remove exited orphans during GC
+            // (running containers might be mid-startup)
+            let state_str = container
+                .state
+                .as_deref()
+                .unwrap_or("unknown")
+                .to_lowercase();
+            if state_str == "exited" || state_str == "dead" {
+                tracing::info!(
+                    container_id = %cid,
+                    state = %state_str,
+                    "GC: removing orphan container"
+                );
+                let _ = docker
+                    .remove_container(
+                        cid,
+                        Some(bollard::container::RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await;
+                let _ = state.pg_store.delete_persistent_container(cid).await;
+                gc_count += 1;
+            }
+        }
+
+        if gc_count > 0 {
+            tracing::info!(removed = gc_count, "Container GC cycle complete");
+        }
+    }
 }
 
 /// Reconnect to persistent containers that survived a server restart.

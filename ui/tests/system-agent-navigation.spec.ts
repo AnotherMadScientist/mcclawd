@@ -53,7 +53,7 @@ test.describe("System Agent Navigation (Critical Workflow)", () => {
     // --- Pre-flight ---
     try {
       const health = await page.request.get(
-        "http://localhost:9090/api/health/llm",
+        "http://localhost:8081/api/health/llm",
       );
       if (!health.ok()) {
         test.skip(true, "Backend not OK");
@@ -118,7 +118,7 @@ test.describe("System Agent Navigation (Critical Workflow)", () => {
     // Pre-flight
     try {
       const health = await page.request.get(
-        "http://localhost:9090/api/health/llm",
+        "http://localhost:8081/api/health/llm",
       );
       if (!health.ok()) {
         test.skip(true, "Backend not OK");
@@ -194,7 +194,7 @@ test.describe("System Agent Navigation (Critical Workflow)", () => {
 
     // This test doesn't need LLM — just checks navigation works
     try {
-      const health = await page.request.get("http://localhost:9090/api/health");
+      const health = await page.request.get("http://localhost:8081/api/health");
       if (!health.ok()) {
         test.skip(true, "Backend not reachable");
         return;
@@ -239,7 +239,7 @@ test.describe("System Agent Navigation (Critical Workflow)", () => {
     test.setTimeout(30_000);
 
     try {
-      const health = await page.request.get("http://localhost:9090/api/health");
+      const health = await page.request.get("http://localhost:8081/api/health");
       if (!health.ok()) {
         test.skip(true, "Backend not reachable");
         return;

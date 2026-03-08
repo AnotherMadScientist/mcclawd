@@ -243,6 +243,21 @@ export interface ContainerDetail {
   labels: Record<string, string>;
 }
 
+// --- MCP Tool Overview types ---
+
+export interface McpToolOverview {
+  name: string;
+  image: string;
+  port: number;
+  status: "active" | "idle";
+  containers: Array<{
+    id: string;
+    name: string;
+    task_id: string | null;
+    state: string;
+  }>;
+}
+
 export type ScanStatus = "Pass" | "Warning" | "Critical" | "NotScanned";
 
 export interface ScanIssue {
@@ -254,4 +269,56 @@ export interface ScanIssue {
 export interface ScanResult {
   status: ScanStatus;
   issues: ScanIssue[];
+}
+
+// --- Security types ---
+
+export interface SecurityEvent {
+  id: number;
+  task_id: string | null;
+  user_id: string;
+  agent_id: string | null;
+  trace_id: string | null;
+  span_id: string | null;
+  event_type: string; // "dlp_match" | "secret_detected" | "pii_detected" | "injection_attempt" | "flow_violation" | "tool_blocked"
+  tool_name: string | null;
+  direction: string | null; // "inbound" | "outbound"
+  threat_level: string | null; // "safe" | "suspicious" | "dangerous" | "critical"
+  details: Record<string, unknown>;
+  action_taken: string; // "allowed" | "warned" | "blocked" | "redacted"
+  findings: DlpFindingRow[];
+  created_at: string;
+}
+
+export interface DlpFindingRow {
+  finding_type: string;
+  tag: string;
+  pattern_name: string | null;
+  confidence: number | null;
+  redacted_preview: string | null;
+}
+
+export interface SecuritySummary {
+  total_events: number;
+  events_by_type: Record<string, number>;
+  events_by_level: Record<string, number>;
+  recent_blocks: number;
+  since: string;
+}
+
+export interface SecurityStatus {
+  pipeline_hooks: number;
+  sidecar_healthy: boolean;
+  sidecar_url: string;
+}
+
+export interface DlpPolicy {
+  id: number;
+  name: string;
+  description: string | null;
+  tag_pattern: string;
+  tool_pattern: string;
+  action: string;
+  enabled: boolean;
+  updated_at: string;
 }

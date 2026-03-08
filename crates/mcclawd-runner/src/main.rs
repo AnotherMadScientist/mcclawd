@@ -279,7 +279,7 @@ async fn run_server() -> Result<()> {
         (agent, None, vec![])
     } else {
         let (agent, mem, bundles) =
-            AgentEngine::build(workspace, &api_key, max_turns, &config).await?;
+            AgentEngine::build(workspace, &api_key, max_turns, &config, None).await?;
         (agent, Some(mem), bundles)
     };
 
@@ -443,7 +443,7 @@ async fn run() -> Result<()> {
         (agent, None, vec![])
     } else {
         let (agent, mem, bundles) =
-            AgentEngine::build(workspace, &cfg.api_key, cfg.max_turns, &config).await?;
+            AgentEngine::build(workspace, &cfg.api_key, cfg.max_turns, &config, None).await?;
         (agent, Some(mem), bundles)
     };
 
