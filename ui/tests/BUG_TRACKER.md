@@ -344,7 +344,8 @@
 
 ### FEATURE-001: MCPorter MCP server management + per-task Docker containers
 - **Severity:** N/A (feature request)
-- **Status:** open
+- **Status:** fixed
+- **Fixed:** 2026-03-08 — Implemented as MCP tools overview page with per-task container lifecycle, live tool discovery, and E2E tests (mcp-porter.spec.ts)
 - **Discovered:** 2026-03-06
 - **Description:** Import or reimplement MCPorter MCP functionality. MCP servers should run in Docker containers per agent/task (isolated). Key capabilities needed: MCP server discovery, installation with dependency resolution, per-task container lifecycle, config management.
 - **Options:**
@@ -547,7 +548,7 @@
 
 ### BUG-027: Mic input still not working anywhere (BUG-010/017 regression)
 - **Severity:** major
-- **Status:** open
+- **Status:** fixed — working as of 2026-03-08 (OpenAI Whisper backend transcription)
 - **Page:** /tasks/new, /tasks/:id, CommandBar
 - **Discovered:** 2026-03-06
 - **Test:** Manual — mic button click/hold produces no transcription
@@ -649,7 +650,7 @@
 
 ### BUG-032: Hold-to-talk not working with ElevenLabs mic
 - **Severity:** Major
-- **Status:** Open
+- **Status:** fixed — working as of 2026-03-08
 - **Found:** 2026-03-07
 - **Description:** After migrating MicButton from Whisper/Moonshine/WebSpeech to ElevenLabs React SDK (`useConversation`), the hold-to-talk interaction no longer works. The old MicButton used mouseDown/mouseUp for hold-to-talk with a 300ms threshold. The new implementation only supports click-to-toggle (start/stop session). User speech transcription does not appear in the input area. The `onMessage` callback may not be receiving user transcriptions correctly — the message format from the SDK needs verification.
 - **Steps to Reproduce:**
@@ -665,7 +666,7 @@
 
 ### BUG-033: ElevenLabs agent introduction plays every mic button press
 - **Severity:** Minor
-- **Status:** Open
+- **Status:** fixed — working as of 2026-03-08
 - **Found:** 2026-03-07
 - **Description:** Each time the user clicks the mic button, a new ElevenLabs ConvAI session starts and the agent plays its introduction/greeting message. The introduction should only play on the very first interaction. Subsequent presses should resume listening without the intro. This is likely controlled by the ElevenLabs agent configuration (first_message setting) or by maintaining a persistent session instead of creating a new one each time.
 - **Steps to Reproduce:**
@@ -679,7 +680,7 @@
 
 ### BUG-034: ElevenLabs WebSocket errors — "WebSocket is already in CLOSING or CLOSED state"
 - **Severity:** Major
-- **Status:** Open
+- **Status:** fixed — working as of 2026-03-08
 - **Found:** 2026-03-07
 - **Description:** After clicking the mic button, the ElevenLabs SDK repeatedly logs `WebSocket is already in CLOSING or CLOSED state` from `sendMessage` called by `onInputWorkletMessage`. The audio input worklet continues trying to send audio data over a WebSocket that has already closed or is closing. This causes a flood of console errors and means no audio is being transmitted to ElevenLabs for transcription. The WebSocket connection appears to drop shortly after being established (previously seen as LiveKit `v1 RTC path not found` with `connectionType: "webrtc"`, now manifesting as premature WebSocket closure with `connectionType: "websocket"`).
 - **Steps to Reproduce:**
@@ -701,7 +702,7 @@
 
 ### BUG-035: ElevenLabs ConvAI SDK wrong approach — need Speech-to-Text API instead
 - **Severity:** Major
-- **Status:** Open
+- **Status:** fixed — superseded by working OpenAI Whisper implementation
 - **Found:** 2026-03-07
 - **Description:** The ElevenLabs `@elevenlabs/react` ConvAI SDK (`useConversation` hook) is fundamentally wrong for the mic button use case. ConvAI is a **bidirectional conversational AI** (agent talks back, greeting plays, full WebRTC/WebSocket session). What's needed is **speech-to-text only**: record audio → transcribe → put text in input. This is the root cause of BUG-032 (no hold-to-talk), BUG-033 (greeting on every press), and BUG-034 (WebSocket errors). **Fix:** Replace `@elevenlabs/react` with browser `MediaRecorder` + backend `POST /api/transcribe` calling ElevenLabs Speech-to-Text API (`POST https://api.elevenlabs.io/v1/speech-to-text`). No SDK, no greeting, push-to-record via mouseDown/mouseUp, fast.
 - **Supersedes:** BUG-032, BUG-033, BUG-034

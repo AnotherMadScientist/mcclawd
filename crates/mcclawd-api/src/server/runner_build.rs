@@ -602,6 +602,12 @@ pub async fn list_containers(
 
         let name = format!("mcclawd-{agent_type}-{}", &task_id[..std::cmp::min(task_id.len(), 8)]);
 
+        // Skip containers that no longer exist in Docker — clean up stale DB rows
+        if docker_state == "removed" {
+            let _ = state.pg_store.delete_persistent_container(container_id).await;
+            continue;
+        }
+
         result.push(ContainerInfo {
             id: container_id.clone(),
             name,
