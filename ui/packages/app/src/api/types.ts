@@ -300,10 +300,11 @@ export interface DlpFindingRow {
 
 export interface SecuritySummary {
   total_events: number;
-  events_by_type: Record<string, number>;
-  events_by_level: Record<string, number>;
-  recent_blocks: number;
-  since: string;
+  by_type: Record<string, number>;
+  by_threat: Record<string, number>;
+  blocked: number;
+  allowed: number;
+  warned: number;
 }
 
 export interface SecurityStatus {

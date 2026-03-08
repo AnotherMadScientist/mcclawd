@@ -447,8 +447,8 @@ export function SecurityPage() {
   });
 
   const totalEvents = summary?.total_events ?? 0;
-  const blocked = summary?.recent_blocks ?? 0;
-  const warned = summary?.events_by_level?.suspicious ?? 0;
+  const blocked = summary?.blocked ?? 0;
+  const warned = summary?.warned ?? 0;
   const clean = Math.max(0, totalEvents - blocked - warned);
 
   return (
