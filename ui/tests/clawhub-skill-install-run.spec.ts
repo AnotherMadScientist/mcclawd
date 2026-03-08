@@ -245,6 +245,19 @@ test.describe("ClawHub Skill Install + McpPorter + Agent Run", () => {
   }) => {
     test.setTimeout(120_000);
 
+    // Pre-flight: skip if MCP Docker containers aren't running
+    const healthCheck = await apiGet(page, "/api/docker/containers");
+    const allContainers: any[] = healthCheck.ok() ? await healthCheck.json() : [];
+    const runningMcp = allContainers.filter(
+      (c: any) =>
+        c.state === "running" &&
+        (c.mcp_tools?.length > 0 || c.name?.includes("mcp") || c.name?.includes("agentgateway")),
+    );
+    if (runningMcp.length === 0) {
+      test.skip(true, "MCP containers not running — skipping live test");
+      return;
+    }
+
     // Step 1: Install the doc-reader skill
     await apiPost(page, "/api/skills/create", {
       name: "doc-reader-e2e",

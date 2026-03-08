@@ -164,12 +164,16 @@ test.describe(
       });
 
       if (chatRes.ok()) {
-        // Wait for container to start
-        await page.waitForTimeout(5000);
+        // Poll for container to appear (up to 15s)
+        let containers: any[] = [];
+        for (let i = 0; i < 8; i++) {
+          const { body } = await getContainers(page);
+          containers = body ?? [];
+          if (containers.length > 0) break;
+          await page.waitForTimeout(2000);
+        }
 
-        // Check containers for system agent
-        const { body: containers } = await getContainers(page);
-        if (containers) {
+        if (containers.length > 0) {
           const systemAgent = containers.find(
             (c: any) => c.labels?.agent_type === "system",
           );

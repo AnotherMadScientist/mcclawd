@@ -77,9 +77,11 @@ test.describe("System Agent Navigation (Critical Workflow)", () => {
     );
 
     // Clear previous chat history so accumulated context doesn't confuse the LLM
-    await page.request.delete("/api/system-agent/history", {
+    const clearRes = await page.request.delete("/api/system-agent/history", {
       headers: { Authorization: `Bearer ${token}` },
     });
+    // Wait for clear to confirm before sending new message
+    expect(clearRes.status()).toBeLessThan(500);
 
     const chatRes = await page.request.post("/api/system-agent/chat", {
       headers: {
@@ -97,14 +99,16 @@ test.describe("System Agent Navigation (Critical Workflow)", () => {
 
     // --- Step 2: Navigate to system agent task and verify response ---
     await page.goto(`/tasks/${chatData.task_id}`);
+    await page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
 
     const responseArea = page.locator("main");
+    // Poll until "paris" appears — LLM response can take up to 60s
     await expect(async () => {
       const text = await responseArea.textContent();
       expect(text?.toLowerCase()).toContain("paris");
-    }).toPass({ timeout: 60_000, intervals: [2000, 3000, 5000] });
+    }).toPass({ timeout: 75_000, intervals: [2000, 3000, 5000] });
 
-    // Wait for completion
+    // Wait for completion indicator
     const doneIndicator = page
       .getByText(/complete|done/i)
       .or(page.locator("textarea[placeholder*='follow']"))
