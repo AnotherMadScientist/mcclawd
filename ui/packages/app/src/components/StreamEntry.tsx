@@ -2,10 +2,11 @@ import { useState, useRef, useEffect } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { AlertCircle, Download, FileText, User, RotateCcw, Pencil, Check, X } from "lucide-react";
+import { AlertCircle, Download, FileText, User, RotateCcw, Pencil, Check, X, Shield, Wrench } from "lucide-react";
 import { SpeechButton } from "./SpeechButton";
 import { cn } from "../lib/utils";
 import type { StreamEvent } from "../hooks/useTaskStream";
+import type { SecurityEvent } from "../api/types";
 import { MermaidBlock } from "./MermaidBlock";
 import { CodeBlock } from "./CodeBlock";
 
@@ -13,9 +14,29 @@ interface StreamEntryProps {
   event: StreamEvent;
   onRetry?: (message: string) => void;
   onEditRetry?: (message: string) => void;
+  securityEvents?: SecurityEvent[];
 }
 
-export function StreamEntry({ event, onRetry, onEditRetry }: StreamEntryProps) {
+function getToolSecurityBadge(toolName: string, securityEvents?: SecurityEvent[]) {
+  if (!securityEvents?.length) return null;
+  const matches = securityEvents.filter((e) => e.tool_name === toolName);
+  if (matches.length === 0) return null;
+
+  // Use the worst threat level
+  const levels = ["critical", "dangerous", "suspicious", "safe"];
+  const worst = levels.find((l) => matches.some((e) => e.threat_level === l));
+  const blocked = matches.some((e) => e.action_taken === "blocked");
+
+  if (blocked || worst === "critical" || worst === "dangerous") {
+    return { color: "text-red-400", bg: "bg-red-500/10", label: "Blocked" };
+  }
+  if (worst === "suspicious") {
+    return { color: "text-amber-400", bg: "bg-amber-500/10", label: "Warning" };
+  }
+  return { color: "text-emerald-400", bg: "bg-emerald-500/10", label: "Clean" };
+}
+
+export function StreamEntry({ event, onRetry, onEditRetry, securityEvents }: StreamEntryProps) {
   const [editing, setEditing] = useState(false);
   const [editValue, setEditValue] = useState(event.content);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -215,6 +236,37 @@ export function StreamEntry({ event, onRetry, onEditRetry }: StreamEntryProps) {
             })}
           </div>
         </div>
+      </div>
+    );
+  }
+
+  if (event.type === "tool_start" && event.toolName) {
+    const badge = getToolSecurityBadge(event.toolName, securityEvents);
+    return (
+      <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-muted-foreground">
+        <Wrench className="w-3 h-3 shrink-0" />
+        <span className="font-mono">{event.toolName}</span>
+        {badge && (
+          <span
+            className={cn(
+              "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium",
+              badge.bg,
+              badge.color,
+            )}
+          >
+            <Shield className="w-2.5 h-2.5" />
+            {badge.label}
+          </span>
+        )}
+      </div>
+    );
+  }
+
+  if (event.type === "tool_end") {
+    if (!event.content) return null;
+    return (
+      <div className="flex items-center gap-2 px-3 py-1 text-xs text-muted-foreground/70 ml-5 border-l-2 border-border pl-3">
+        <span className="truncate">{event.content}</span>
       </div>
     );
   }

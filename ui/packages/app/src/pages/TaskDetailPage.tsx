@@ -14,6 +14,7 @@ import {
 } from "../components/FileAttachments";
 import type { AttachedFile } from "../components/FileAttachments";
 import { MicButton } from "../components/MicButton";
+import { SecurityAuditTrail } from "../components/SecurityAuditTrail";
 
 export function TaskDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -29,6 +30,13 @@ export function TaskDetailPage() {
     queryKey: ["task", id],
     queryFn: () => api.tasks.get(id!),
     enabled: !!id,
+  });
+
+  const { data: securityEvents } = useQuery({
+    queryKey: ["security-events", id],
+    queryFn: () => api.security.events(id!),
+    enabled: !!id,
+    refetchInterval: done ? false : 10_000,
   });
 
   // Auto-scroll to bottom on new events or status changes
@@ -180,6 +188,7 @@ export function TaskDetailPage() {
           <StreamEntry
             key={i}
             event={event}
+            securityEvents={securityEvents}
             onRetry={event.type === "user" ? (msg: string) => handleRetry(msg, i) : undefined}
             onEditRetry={event.type === "user" ? (msg: string) => handleEditRetry(msg, i) : undefined}
           />
@@ -191,6 +200,9 @@ export function TaskDetailPage() {
             <span className="text-sm">{statusMessage}</span>
           </div>
         )}
+
+        {/* Security audit trail — shows only when events exist */}
+        {id && <SecurityAuditTrail taskId={id} />}
 
         <div ref={bottomRef} />
       </div>

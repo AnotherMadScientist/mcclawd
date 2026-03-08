@@ -2,9 +2,10 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import type { StreamChunk } from "../api/types";
 
 export interface StreamEvent {
-  type: "text" | "error" | "user" | "attachments" | "generated_files";
+  type: "text" | "error" | "user" | "attachments" | "generated_files" | "tool_start" | "tool_end";
   content: string;
   timestamp: Date;
+  toolName?: string;
   attachments?: Array<{
     name: string;
     size: number;
@@ -156,8 +157,26 @@ export function useTaskStream(taskId: string | undefined) {
           // Tool call interrupts streaming — next TextDeltas start a new text block
           newBlockRef.current = true;
           setStatusMessage(`Using ${chunk.ToolStart.name}...`);
+          setEvents((prev) => [
+            ...prev,
+            {
+              type: "tool_start" as const,
+              content: chunk.ToolStart.name,
+              toolName: chunk.ToolStart.name,
+              timestamp,
+            },
+          ]);
         } else if ("ToolEnd" in chunk) {
           setStatusMessage(null);
+          setEvents((prev) => [
+            ...prev,
+            {
+              type: "tool_end" as const,
+              content: chunk.ToolEnd.summary || "",
+              toolName: chunk.ToolEnd.name,
+              timestamp,
+            },
+          ]);
         } else if ("StatusIndicator" in chunk) {
           if (chunk.StatusIndicator === "Processing") {
             seenProcessingRef.current = true;
