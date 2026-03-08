@@ -43,6 +43,19 @@ pub struct CreateTaskRequest {
     /// Optional tags for categorizing and filtering tasks.
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// Optional list of skill names to include for this task.
+    /// If None or empty, no skills are injected (explicit selection required).
+    #[serde(default)]
+    pub skills: Option<Vec<String>>,
+    /// Tool access profile (minimal/coding/research/full). Falls back to config default.
+    #[serde(default)]
+    pub tool_profile: Option<mcclawd_core::config::ToolProfile>,
+    /// Extra tool prefixes to allow beyond the profile.
+    #[serde(default)]
+    pub tools_allow: Vec<String>,
+    /// Tool prefixes to deny (overrides profile + allow).
+    #[serde(default)]
+    pub tools_deny: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +157,7 @@ pub async fn create_task(
     }
 
     let workspace_name = body.workspace.clone().unwrap_or_else(|| "default".to_string());
+    let task_skills = body.skills.unwrap_or_default();
 
     // Create task record
     let tags = body.tags.unwrap_or_default();
@@ -183,12 +197,18 @@ pub async fn create_task(
     // Create broadcast channel for streaming
     let tx = state.create_task_stream(&id).await;
 
+    // Store per-task skill selection for follow-up messages
+    {
+        let mut skills_map = state.task_skills.write().await;
+        skills_map.insert(id.clone(), task_skills.clone());
+    }
+
     if !body.delay_start {
         // Spawn agent execution in background immediately
         let state_clone = state.clone();
         let task_id = id.clone();
         tokio::spawn(async move {
-            run_agent(state_clone, task_id, &prompt, &workspace_name, tx).await;
+            run_agent(state_clone, task_id, &prompt, &workspace_name, &task_skills, tx).await;
         });
     }
 
@@ -205,6 +225,7 @@ async fn run_agent(
     task_id: TaskId,
     prompt: &str,
     workspace_name: &str,
+    task_skills: &[String],
     tx: tokio::sync::broadcast::Sender<OutboundChunk>,
 ) {
     let strict = state.config.read().await.sandbox.strict_sandbox;
@@ -212,7 +233,7 @@ async fn run_agent(
     // Always try Docker-sandboxed execution first
     if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
         if orch.health_check().await {
-            run_agent_sandboxed(state, task_id, prompt, workspace_name, tx).await;
+            run_agent_sandboxed(state, task_id, prompt, workspace_name, task_skills, tx).await;
             return;
         }
     }
@@ -253,6 +274,7 @@ async fn run_agent_sandboxed(
     task_id: TaskId,
     prompt: &str,
     _workspace_name: &str,
+    task_skills: &[String],
     tx: tokio::sync::broadcast::Sender<OutboundChunk>,
 ) {
     use crate::sandbox::SandboxOrchestrator;
@@ -374,10 +396,8 @@ async fn run_agent_sandboxed(
     // Falls back to manual construction with container_gateway_url() if McpPorter unavailable.
     let agent_env = if let Some(ref porter) = state.mcp_porter {
         // Load installed skills from disk (~/.mcclawd/skills/) for skill→MCP tool resolution.
-        // TODO: Per-task skill assignment — each task agent should only get its specific skills,
-        // not ALL installed skills. The pattern is 1:1 agent-task→skill, 1:M skill→MCP tools.
-        // For now, loads all installed skills as a temporary default until task-level skill
-        // assignment is implemented (via prompt matching, tags, or explicit assignment).
+        // Per-task skill assignment: only skills explicitly selected for this task are included.
+        // If task_skills is empty, no skills are injected (explicit selection required).
         let all_skills: std::collections::HashMap<String, mcclawd_core::skills::LoadedSkill> = {
             let skills_dir = &config.skills.managed_dir;
             let mut map = std::collections::HashMap::new();
@@ -395,7 +415,14 @@ async fn run_agent_sandboxed(
                     }
                 }
             }
-            map
+            // Filter to only task-selected skills (empty = no skills)
+            if task_skills.is_empty() {
+                std::collections::HashMap::new()
+            } else {
+                map.into_iter()
+                    .filter(|(name, _)| task_skills.iter().any(|s| s == name))
+                    .collect()
+            }
         };
         let skill_count = all_skills.len();
         match porter
@@ -630,6 +657,21 @@ async fn run_agent_sandboxed(
                             );
                         }
                     }
+                }
+                // ToolStart: run security pipeline (audit/DLP) on tool calls from containers
+                OutboundChunk::ToolStart { ref name } => {
+                    // Set task context so events land with correct task_id
+                    fwd_state.security_pipeline.set_task_context(&fwd_task_id.0).await;
+                    // Run before_tool_call — for sandboxed agents this is post-hoc auditing
+                    // (tool already executed in container), but it records DLP/audit events.
+                    let args_json = serde_json::json!({"tool": name});
+                    if let Err(e) = fwd_state.security_pipeline.before_tool_call(name, &args_json).await {
+                        tracing::warn!(tool=%name, task_id=%fwd_task_id.0, error=%e, "Security pipeline flagged tool call");
+                    }
+                    // Still broadcast the ToolStart to the frontend
+                    fwd_state
+                        .send_and_persist(&fwd_task_id, &fwd_tx, chunk)
+                        .await;
                 }
                 // All other chunks: broadcast + persist as normal
                 other => {
@@ -1110,10 +1152,14 @@ pub async fn send_message(
 
     // Spawn agent execution for the follow-up message
     let workspace_name = "default".to_string();
+    let task_skills = {
+        let skills_map = state.task_skills.read().await;
+        skills_map.get(&task_id).cloned().unwrap_or_default()
+    };
     let state_clone = state.clone();
     let tid = task_id.clone();
     tokio::spawn(async move {
-        run_agent(state_clone, tid, &message, &workspace_name, tx).await;
+        run_agent(state_clone, tid, &message, &workspace_name, &task_skills, tx).await;
     });
 
     Ok(StatusCode::ACCEPTED)

@@ -51,6 +51,8 @@ pub struct AppState {
     pub config_path: Option<PathBuf>,
     /// Per-task LLM conversation history for multi-turn follow-ups.
     pub task_chat_history: Arc<RwLock<HashMap<TaskId, Vec<Message>>>>,
+    /// Per-task skill selection (stored on creation, read on follow-up messages).
+    pub task_skills: Arc<RwLock<HashMap<TaskId, Vec<String>>>>,
     /// PostgreSQL store for durable persistence (required).
     pub pg_store: PgTaskStore,
     /// Cache for security scan results (skill name -> ScanResult).
@@ -104,6 +106,7 @@ impl AppState {
             provider_pool: Arc::new(RwLock::new(provider_pool)),
             config_path: None,
             task_chat_history: Arc::new(RwLock::new(HashMap::new())),
+            task_skills: Arc::new(RwLock::new(HashMap::new())),
             pg_store,
             scan_cache: Arc::new(DashMap::new()),
             scheduler: TaskScheduler::new(),

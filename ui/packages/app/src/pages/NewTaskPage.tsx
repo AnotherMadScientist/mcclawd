@@ -61,6 +61,7 @@ export function NewTaskPage() {
   const [selectedModel, setSelectedModel] = useState<string>("");
   const [selectedWorkspace, setSelectedWorkspace] = useState<string>("");
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
+  const [selectedToolProfile, setSelectedToolProfile] = useState<string>("");
   const [tagsInput, setTagsInput] = useState("");
   const { files, addFiles, removeFile, clear: clearFiles } = useFileAttachments();
   const navigate = useNavigate();
@@ -113,6 +114,7 @@ export function NewTaskPage() {
         selectedModel || undefined,
         hasFiles,
         parsedTags.length > 0 ? parsedTags : undefined,
+        selectedSkills.length > 0 ? selectedSkills : undefined,
       );
       if (hasFiles) {
         // Retry upload + sendMessage up to 3 times (handles transient 503 from server restarts)

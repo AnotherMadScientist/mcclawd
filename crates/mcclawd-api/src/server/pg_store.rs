@@ -478,6 +478,57 @@ impl PgTaskStore {
         Ok(rows)
     }
 
+    /// Get a single config value for a user by key.
+    pub async fn get_config_key(
+        &self,
+        user_id: &str,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, McclawdError> {
+        let row = sqlx::query_as::<_, (serde_json::Value,)>(
+            "SELECT value FROM app_config WHERE user_id = $1 AND key = $2",
+        )
+        .bind(user_id)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(pg_err)?;
+        Ok(row.map(|(v,)| v))
+    }
+
+    /// Delete a single config key for a user.
+    pub async fn delete_config_key(
+        &self,
+        user_id: &str,
+        key: &str,
+    ) -> Result<(), McclawdError> {
+        sqlx::query("DELETE FROM app_config WHERE user_id = $1 AND key = $2")
+            .bind(user_id)
+            .bind(key)
+            .execute(&self.pool)
+            .await
+            .map_err(pg_err)?;
+        Ok(())
+    }
+
+    /// List all config keys and their string-serialized values for a user.
+    pub async fn list_configs(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<(String, String)>, McclawdError> {
+        let rows = self.load_config(user_id).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(k, v)| {
+                let s = if let serde_json::Value::String(s) = &v {
+                    s.clone()
+                } else {
+                    v.to_string()
+                };
+                (k, s)
+            })
+            .collect())
+    }
+
     // -----------------------------------------------------------------------
     // Workspace files (tenant-scoped)
     // -----------------------------------------------------------------------
@@ -504,6 +555,25 @@ impl PgTaskStore {
         Ok(())
     }
 
+    /// Get a single workspace file for a user.
+    pub async fn get_workspace_file(
+        &self,
+        user_id: &str,
+        workspace: &str,
+        filename: &str,
+    ) -> Result<Option<String>, McclawdError> {
+        let row = sqlx::query_as::<_, (String,)>(
+            "SELECT content FROM workspace_files WHERE user_id = $1 AND workspace = $2 AND filename = $3",
+        )
+        .bind(user_id)
+        .bind(workspace)
+        .bind(filename)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(pg_err)?;
+        Ok(row.map(|r| r.0))
+    }
+
     /// Load all workspace files for a user in a given workspace.
     pub async fn load_workspace_files(
         &self,
@@ -519,6 +589,96 @@ impl PgTaskStore {
         .await
         .map_err(pg_err)?;
         Ok(rows)
+    }
+
+    // -----------------------------------------------------------------------
+    // Workspace profiles (tenant-scoped)
+    // -----------------------------------------------------------------------
+
+    /// List custom workspace profiles for a user (name + description).
+    pub async fn list_workspace_profiles(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<(String, String)>, McclawdError> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT DISTINCT profile_name, COALESCE(MAX(description), '') FROM workspace_profiles WHERE user_id = $1 GROUP BY profile_name ORDER BY profile_name",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(pg_err)?;
+        Ok(rows)
+    }
+
+    /// Save a workspace profile (set of files) for a user.
+    pub async fn save_workspace_profile(
+        &self,
+        user_id: &str,
+        name: &str,
+        description: &str,
+        files: &[(String, String)],
+    ) -> Result<(), McclawdError> {
+        // Delete existing profile files
+        sqlx::query("DELETE FROM workspace_profiles WHERE user_id = $1 AND profile_name = $2")
+            .bind(user_id)
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .map_err(pg_err)?;
+
+        // Insert new files
+        for (filename, content) in files {
+            sqlx::query(
+                "INSERT INTO workspace_profiles (user_id, profile_name, description, filename, content) VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(user_id)
+            .bind(name)
+            .bind(description)
+            .bind(filename)
+            .bind(content)
+            .execute(&self.pool)
+            .await
+            .map_err(pg_err)?;
+        }
+        Ok(())
+    }
+
+    /// Load a workspace profile by name.
+    pub async fn load_workspace_profile(
+        &self,
+        user_id: &str,
+        name: &str,
+    ) -> Result<Option<Vec<(String, String)>>, McclawdError> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT filename, content FROM workspace_profiles WHERE user_id = $1 AND profile_name = $2",
+        )
+        .bind(user_id)
+        .bind(name)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(pg_err)?;
+
+        if rows.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(rows))
+        }
+    }
+
+    /// Delete a custom workspace profile.
+    pub async fn delete_workspace_profile(
+        &self,
+        user_id: &str,
+        name: &str,
+    ) -> Result<bool, McclawdError> {
+        let result =
+            sqlx::query("DELETE FROM workspace_profiles WHERE user_id = $1 AND profile_name = $2")
+                .bind(user_id)
+                .bind(name)
+                .execute(&self.pool)
+                .await
+                .map_err(pg_err)?;
+        Ok(result.rows_affected() > 0)
     }
 
     // -----------------------------------------------------------------------

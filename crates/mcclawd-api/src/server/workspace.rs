@@ -1,9 +1,10 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
+    response::IntoResponse,
     Json,
 };
-use mcclawd_agent::workspace::WorkspaceLoader;
+use mcclawd_agent::workspace::{builtin_profiles, WorkspaceLoader};
 use serde::{Deserialize, Serialize};
 
 use super::state::AppState;
@@ -118,5 +119,215 @@ pub async fn put_file(
             tracing::error!("Failed to write workspace file: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Profile endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/workspace/profiles — list available profiles (built-in + custom)
+pub async fn list_profiles(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
+    let mut profiles: Vec<serde_json::Value> = builtin_profiles()
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "name": p.name,
+                "description": p.description,
+                "builtin": true,
+            })
+        })
+        .collect();
+
+    // Load custom profiles from DB
+    if let Ok(custom) = state.pg_store.list_workspace_profiles("admin").await {
+        for (name, desc) in custom {
+            profiles.push(serde_json::json!({
+                "name": name,
+                "description": desc,
+                "builtin": false,
+            }));
+        }
+    }
+
+    Json(profiles)
+}
+
+/// POST /api/workspace/profiles/{name}/apply — overwrite workspace with profile content
+pub async fn apply_profile(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    // Check built-in profiles first
+    if let Some(profile) = builtin_profiles().into_iter().find(|p| p.name == name) {
+        let files = [
+            ("SOUL.md", profile.soul),
+            ("AGENTS.md", profile.agents),
+            ("USER.md", profile.user),
+            ("IDENTITY.md", profile.identity),
+            ("TOOLS.md", profile.tools),
+            ("HEARTBEAT.md", profile.heartbeat),
+        ];
+        for (filename, content) in &files {
+            if let Err(e) = state
+                .pg_store
+                .save_workspace_file("admin", "default", filename, content)
+                .await
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("{e}")})),
+                )
+                    .into_response();
+            }
+        }
+        // Also write to disk
+        let config = state.config.read().await;
+        let workspace_dir = config.data_dir.join(&config.agent.default_workspace);
+        drop(config);
+        let _ = tokio::fs::create_dir_all(&workspace_dir).await;
+        for (filename, content) in &files {
+            let _ = tokio::fs::write(workspace_dir.join(filename), content).await;
+        }
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"applied": name})),
+        )
+            .into_response();
+    }
+
+    // Check custom profiles in DB
+    if let Ok(Some(files)) = state.pg_store.load_workspace_profile("admin", &name).await {
+        for (filename, content) in &files {
+            if let Err(e) = state
+                .pg_store
+                .save_workspace_file("admin", "default", filename, content)
+                .await
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("{e}")})),
+                )
+                    .into_response();
+            }
+        }
+        // Also write to disk
+        let config = state.config.read().await;
+        let workspace_dir = config.data_dir.join(&config.agent.default_workspace);
+        drop(config);
+        let _ = tokio::fs::create_dir_all(&workspace_dir).await;
+        for (filename, content) in &files {
+            let _ = tokio::fs::write(workspace_dir.join(filename), content).await;
+        }
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"applied": name})),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error": "Profile not found"})),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveProfileRequest {
+    #[serde(default)]
+    pub description: String,
+}
+
+/// POST /api/workspace/profiles/{name}/save — save current workspace as custom profile
+pub async fn save_profile(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    body: Option<Json<SaveProfileRequest>>,
+) -> impl IntoResponse {
+    // Prevent overwriting built-in profiles
+    if builtin_profiles().iter().any(|p| p.name == name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Cannot overwrite built-in profile"})),
+        )
+            .into_response();
+    }
+
+    let description = body.map(|b| b.description.clone()).unwrap_or_default();
+
+    // Read current workspace files from DB
+    let ws_files = [
+        "SOUL.md",
+        "AGENTS.md",
+        "USER.md",
+        "IDENTITY.md",
+        "TOOLS.md",
+        "HEARTBEAT.md",
+    ];
+    let mut profile_data = Vec::new();
+    for filename in &ws_files {
+        let content = state
+            .pg_store
+            .get_workspace_file("admin", "default", filename)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        profile_data.push((filename.to_string(), content));
+    }
+
+    if let Err(e) = state
+        .pg_store
+        .save_workspace_profile("admin", &name, &description, &profile_data)
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{e}")})),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({"saved": name})),
+    )
+        .into_response()
+}
+
+/// DELETE /api/workspace/profiles/{name} — delete a custom profile
+pub async fn delete_profile(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    if builtin_profiles().iter().any(|p| p.name == name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Cannot delete built-in profile"})),
+        )
+            .into_response();
+    }
+
+    match state
+        .pg_store
+        .delete_workspace_profile("admin", &name)
+        .await
+    {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"deleted": name})),
+        )
+            .into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Profile not found"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{e}")})),
+        )
+            .into_response(),
     }
 }
