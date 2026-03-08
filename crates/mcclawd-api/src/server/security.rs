@@ -90,13 +90,10 @@ pub async fn list_events(
         .list_security_events(params.task_id.as_deref(), since, limit)
         .await
     {
-        Ok(events) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "ok": true, "events": events })),
-        ),
+        Ok(events) => (StatusCode::OK, Json(serde_json::json!(events))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+            Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
 }
@@ -112,13 +109,10 @@ pub async fn get_summary(
     let user_id = "default";
 
     match state.pg_store.security_summary(user_id, since).await {
-        Ok(summary) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "ok": true, "summary": summary })),
-        ),
+        Ok(summary) => (StatusCode::OK, Json(serde_json::json!(summary))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+            Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
 }
@@ -136,15 +130,9 @@ pub async fn get_status(
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "ok": true,
-            "pipeline": {
-                "active": pipeline_active,
-                "hooks_count": pipeline_hooks,
-            },
-            "sidecar": {
-                "url": "http://localhost:8082",
-                "healthy": sidecar_healthy,
-            },
+            "pipeline_hooks": pipeline_hooks,
+            "sidecar_healthy": sidecar_healthy,
+            "sidecar_url": "http://localhost:8082",
         })),
     )
 }
@@ -169,13 +157,10 @@ pub async fn list_policies(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     match state.pg_store.list_dlp_policies().await {
-        Ok(policies) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "ok": true, "policies": policies })),
-        ),
+        Ok(policies) => (StatusCode::OK, Json(serde_json::json!(policies))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+            Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
 }
@@ -199,11 +184,11 @@ pub async fn create_policy(
     {
         Ok(id) => (
             StatusCode::OK,
-            Json(serde_json::json!({ "ok": true, "id": id })),
+            Json(serde_json::json!({ "id": id, "name": body.name, "tag_pattern": body.tag_pattern, "action": body.action, "enabled": body.enabled })),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+            Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
 }
@@ -214,17 +199,14 @@ pub async fn delete_policy(
     Path(id): Path<i32>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     match state.pg_store.delete_dlp_policy(id).await {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "ok": true, "deleted": true })),
-        ),
+        Ok(true) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
         Ok(false) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "ok": false, "error": "Policy not found" })),
+            Json(serde_json::json!({ "error": "Policy not found" })),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+            Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
 }
@@ -243,18 +225,10 @@ pub async fn get_trace(
         .list_security_events(Some(&task_id), None, 500)
         .await
     {
-        Ok(events) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "ok": true,
-                "task_id": task_id,
-                "trace": events,
-                "note": "Full taint-propagation trace is planned for a future phase."
-            })),
-        ),
+        Ok(events) => (StatusCode::OK, Json(serde_json::json!(events))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+            Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
 }
