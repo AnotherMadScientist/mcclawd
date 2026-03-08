@@ -34,9 +34,10 @@ test.describe("Settings Page", () => {
 
   test("shows Max Turns field with numeric value", async ({ page }) => {
     await expect(page.getByText("Max Turns")).toBeVisible();
-    // The value is rendered inside a card after the label
-    const main = page.locator("main");
-    await expect(main.getByText(/^\d+$/).first()).toBeVisible({
+    // Scope to settings-fields to avoid matching numeric strings in sidebar or elsewhere
+    const settingsFields = page.locator("[data-testid='settings-fields']");
+    await expect(settingsFields).toBeVisible({ timeout: 5000 });
+    await expect(settingsFields.getByText(/^\d+$/).first()).toBeVisible({
       timeout: 5000,
     });
   });
@@ -87,14 +88,16 @@ test.describe("Settings Page", () => {
 
   test("all config fields have non-empty values", async ({ page }) => {
     const main = page.locator("main");
-    await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible({ timeout: 5000 });
+    // Wait for config to load (model value appears)
+    await expect(main.getByText(/claude-/).first()).toBeVisible({ timeout: 8000 });
 
     // Model: should show a non-empty model name
     const modelText = await main.getByText(/claude-sonnet|claude-opus|claude-haiku/).first().textContent({ timeout: 5000 });
     expect(modelText?.trim().length).toBeGreaterThan(0);
 
-    // Max Turns: should show a numeric value
-    const turnsEl = main.getByText(/^\d+$/).first();
+    // Max Turns: rendered as plain number in a <p> — scope to settings-fields to avoid sidebar hits
+    const settingsFields = page.locator("[data-testid='settings-fields']");
+    const turnsEl = settingsFields.getByText(/^\d+$/).first();
     const turnsText = await turnsEl.textContent({ timeout: 5000 });
     expect(Number(turnsText?.trim())).toBeGreaterThan(0);
 
@@ -185,13 +188,14 @@ test.describe("Settings Page", () => {
 
   test("can edit Max Turns field", async ({ page }) => {
     await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible({ timeout: 5000 });
-    await page.getByRole("button", { name: "Edit Max Turns" }).click();
-    const input = page.locator("input[type='number']");
+    const settingsFields = page.locator("[data-testid='settings-fields']");
+    await settingsFields.getByRole("button", { name: "Edit Max Turns" }).click();
+    const input = settingsFields.locator("input[type='number']");
     await expect(input).toBeVisible();
     await input.fill("42");
-    await page.getByRole("button", { name: "Save" }).click();
+    await settingsFields.getByRole("button", { name: "Save" }).first().click();
     await expect(input).not.toBeVisible({ timeout: 5000 });
-    await expect(page.getByText("42").first()).toBeVisible({ timeout: 5000 });
+    await expect(settingsFields.getByText("42").first()).toBeVisible({ timeout: 5000 });
   });
 
   test("all settings fields visible", async ({ page }) => {
@@ -213,14 +217,15 @@ test.describe("Settings Page", () => {
     await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible({
       timeout: 5000,
     });
-    await page.getByRole("button", { name: "Edit Model" }).click();
-    const select = page.locator("select").first();
+    const modelCard = page.locator("[data-testid='model-card']");
+    await modelCard.getByRole("button", { name: "Edit Model" }).click();
+    const select = modelCard.locator("select");
     await expect(select).toBeVisible();
     // Select an option different from whatever is current
     const options = await select.locator("option").allInnerTexts();
     const target = options.find((o) => o.includes("haiku")) ?? options[0];
     await select.selectOption({ label: target });
-    await page.getByRole("button", { name: "Save" }).click();
+    await modelCard.getByRole("button", { name: "Save" }).click();
     await expect(select).not.toBeVisible({ timeout: 5000 });
     // Success toast or model name shown
     await expect(
@@ -232,11 +237,12 @@ test.describe("Settings Page", () => {
     await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible({
       timeout: 5000,
     });
-    await page.getByRole("button", { name: "Edit Max Turns" }).click();
-    const input = page.locator("input[type='number']");
+    const settingsFields = page.locator("[data-testid='settings-fields']");
+    await settingsFields.getByRole("button", { name: "Edit Max Turns" }).click();
+    const input = settingsFields.locator("input[type='number']");
     await expect(input).toBeVisible();
     await input.fill("0");
-    await page.getByRole("button", { name: "Save" }).click();
+    await settingsFields.getByRole("button", { name: "Save" }).first().click();
     // Validation toast: "Max Turns must be between 1 and 100"
     await expect(
       page.getByText(/Max Turns must be between 1 and 100/),
@@ -244,7 +250,7 @@ test.describe("Settings Page", () => {
     // Input should still be visible (edit mode not exited on error)
     await expect(input).toBeVisible();
     // Cancel to clean up
-    await page.getByRole("button", { name: "Cancel" }).click();
+    await settingsFields.getByRole("button", { name: "Cancel" }).click();
   });
 
   test("read-only fields have no edit button", async ({ page }) => {
