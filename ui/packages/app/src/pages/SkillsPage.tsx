@@ -966,6 +966,7 @@ export function SkillsPage() {
   const [scanResults, setScanResults] = useState<Record<string, ScanResult>>({});
   const [scanningSkill, setScanningSkill] = useState<string | null>(null);
   const [displayCount, setDisplayCount] = useState(48);
+  const [scanFilter, setScanFilter] = useState<"all" | "Pass" | "Warning" | "Critical" | "NotScanned">("all");
   const scanLoadedRef = useRef(false);
 
   const autoRefreshed = useRef(false);
@@ -1280,27 +1281,52 @@ export function SkillsPage() {
             )}
 
             {!installedLoading && installed.length > 0 && (
-              <div className="space-y-0.5 max-h-[60vh] overflow-y-auto">
-                {installed.map((skill: InstalledSkill) => (
-                  <InstalledRow
-                    key={skill.name}
-                    skill={skill}
-                    isSelected={selectedSkill === skill.name}
-                    onClick={() => setSelectedSkill(skill.name)}
-                    onUninstall={() => {
-                      setUninstallingSkill(skill.name);
-                      quickUninstall.mutate(skill.name);
-                    }}
-                    uninstallPending={uninstallingSkill === skill.name}
-                    scanResult={
-                      scanResults[skill.name] ||
-                      (skill.scan_status
-                        ? { status: skill.scan_status, issues: skill.scan_issues || [] }
-                        : undefined)
-                    }
-                  />
-                ))}
-              </div>
+              <>
+                <select
+                  value={scanFilter}
+                  onChange={(e) => setScanFilter(e.target.value as typeof scanFilter)}
+                  className="w-full mb-1.5 px-1.5 py-1 rounded-md bg-muted text-[10px] text-muted-foreground border-0 focus:ring-1 focus:ring-primary"
+                >
+                  <option value="all">All</option>
+                  <option value="Pass">Clean</option>
+                  <option value="Warning">Warning</option>
+                  <option value="Critical">Critical</option>
+                  <option value="NotScanned">Not Scanned</option>
+                </select>
+                <div className="space-y-0.5 max-h-[60vh] overflow-y-auto">
+                  {installed
+                    .filter((skill: InstalledSkill) => {
+                      if (scanFilter === "all") return true;
+                      const status = scanResults[skill.name]?.status || skill.scan_status || "NotScanned";
+                      return status === scanFilter;
+                    })
+                    .sort((a: InstalledSkill, b: InstalledSkill) => {
+                      const order: Record<string, number> = { Critical: 0, Warning: 1, NotScanned: 2, Pass: 3 };
+                      const sa = scanResults[a.name]?.status || a.scan_status || "NotScanned";
+                      const sb = scanResults[b.name]?.status || b.scan_status || "NotScanned";
+                      return (order[sa] ?? 2) - (order[sb] ?? 2);
+                    })
+                    .map((skill: InstalledSkill) => (
+                      <InstalledRow
+                        key={skill.name}
+                        skill={skill}
+                        isSelected={selectedSkill === skill.name}
+                        onClick={() => setSelectedSkill(skill.name)}
+                        onUninstall={() => {
+                          setUninstallingSkill(skill.name);
+                          quickUninstall.mutate(skill.name);
+                        }}
+                        uninstallPending={uninstallingSkill === skill.name}
+                        scanResult={
+                          scanResults[skill.name] ||
+                          (skill.scan_status
+                            ? { status: skill.scan_status, issues: skill.scan_issues || [] }
+                            : undefined)
+                        }
+                      />
+                    ))}
+                </div>
+              </>
             )}
           </div>
         </div>
