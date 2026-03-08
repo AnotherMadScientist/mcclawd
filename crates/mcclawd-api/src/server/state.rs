@@ -296,7 +296,7 @@ impl AppState {
         }
     }
 
-    /// Update task status in postgres.
+    /// Update task status in postgres (fire-and-forget).
     pub async fn pg_update_status(&self, task_id: &TaskId, status: &str, error_message: Option<&str>) {
         let store = self.pg_store.clone();
         let tid = task_id.0.clone();
@@ -307,6 +307,13 @@ impl AppState {
                 tracing::warn!(task_id = %tid, error = %e, "Failed to update task status in postgres");
             }
         });
+    }
+
+    /// Update task status in postgres synchronously (awaits completion).
+    pub async fn pg_update_status_sync(&self, task_id: &TaskId, status: &str, error_message: Option<&str>) {
+        if let Err(e) = self.pg_store.update_status(&task_id.0, status, error_message).await {
+            tracing::warn!(task_id = %task_id.0, error = %e, "Failed to update task status in postgres");
+        }
     }
 
     /// Delete task from postgres (fire-and-forget, spawned in background).

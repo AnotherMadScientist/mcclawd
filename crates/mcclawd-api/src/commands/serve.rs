@@ -1050,26 +1050,33 @@ async fn docker_event_listener(state: AppState) {
 
             let task_id_typed = TaskId(tid.clone());
 
-            // Cascade: remove handle, fail task, clean DB
+            // Cascade: remove handle, fail task, clean DB + memory
             state.task_containers.write().await.remove(&task_id_typed);
 
             state
-                .pg_update_status(&task_id_typed, "Failed", Some("Container stopped"))
+                .pg_update_status_sync(&task_id_typed, "Failed", Some("Container stopped"))
                 .await;
             let _ = state
                 .pg_store
                 .delete_persistent_containers_by_task(&tid)
                 .await;
 
-            let mut mgr = state.tasks.write().await;
-            if let Some(t) = mgr.get_task(&task_id_typed) {
-                if matches!(
-                    t.status,
-                    TaskStatus::Running | TaskStatus::Building
-                ) {
-                    mgr.fail_task(&task_id_typed, "Container stopped".to_string());
+            {
+                let mut mgr = state.tasks.write().await;
+                if let Some(t) = mgr.get_task(&task_id_typed) {
+                    if matches!(
+                        t.status,
+                        TaskStatus::Running | TaskStatus::Building
+                    ) {
+                        mgr.fail_task(&task_id_typed, "Container stopped".to_string());
+                    }
                 }
             }
+
+            // Clean in-memory caches
+            state.task_streams.write().await.remove(&task_id_typed);
+            state.task_chat_history.write().await.remove(&task_id_typed);
+            state.task_events.write().await.remove(&task_id_typed);
         }
     }
 
