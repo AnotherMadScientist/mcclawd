@@ -16,12 +16,15 @@ export interface McpServer {
   port: number;
 }
 
+export type ToolProfile = "Minimal" | "Coding" | "Research" | "Full";
+
 export interface McclawdConfig {
   data_dir: string;
   agent: {
     max_turns: number;
     model: string;
     default_workspace: string;
+    default_tool_profile: ToolProfile;
   };
   providers: {
     anthropic?: { api_key_secret: string };
@@ -64,6 +67,8 @@ export interface InstalledSkill {
   version: string;
   source: { Local: string } | { Registry: { registry_url: string } };
   installed_at: string;
+  scan_status?: ScanStatus;
+  scan_issues?: ScanIssue[];
 }
 
 export interface ClawHubSkillMeta {

@@ -115,6 +115,7 @@ export function NewTaskPage() {
         hasFiles,
         parsedTags.length > 0 ? parsedTags : undefined,
         selectedSkills.length > 0 ? selectedSkills : undefined,
+        selectedToolProfile || undefined,
       );
       if (hasFiles) {
         // Retry upload + sendMessage up to 3 times (handles transient 503 from server restarts)
@@ -266,6 +267,22 @@ export function NewTaskPage() {
                 {config?.agent.default_workspace && config.agent.default_workspace !== "default" && (
                   <option value={config.agent.default_workspace}>{config.agent.default_workspace}</option>
                 )}
+              </select>
+            </div>
+
+            {/* Tool profile selector */}
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Tool Profile</label>
+              <select
+                value={selectedToolProfile || config?.agent.default_tool_profile || "Coding"}
+                onChange={(e) => setSelectedToolProfile(e.target.value)}
+                className="w-full text-sm font-mono bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                aria-label="Tool Profile"
+              >
+                <option value="Minimal">Minimal - memory tools only</option>
+                <option value="Coding">Coding - filesystem, git, shell</option>
+                <option value="Research">Research - web, fetch, browser</option>
+                <option value="Full">Full - all available tools</option>
               </select>
             </div>
 

@@ -447,25 +447,55 @@ async fn run_agent_sandboxed(
             }
             Err(e) => {
                 tracing::warn!("McpPorter failed, using fallback: {e}");
+                // Derive allowed_tools from skill mcp_tools (fallback when porter unavailable)
+                let fallback_tools: Vec<String> = if all_skills.is_empty() {
+                    vec![] // No skills selected = no tools
+                } else {
+                    all_skills.values().flat_map(|s| s.mcp_tools.clone()).collect()
+                };
                 crate::sandbox::container::AgentEnvironment {
                     image: "mcclawd-runner:latest".to_string(),
                     network: config.sandbox.network.clone(),
                     gateway_url: crate::sandbox::container::container_gateway_url(
                         &config.mcp.agentgateway_url,
                     ),
-                    allowed_tools: vec!["*".to_string()],
+                    allowed_tools: if fallback_tools.is_empty() { vec!["*".to_string()] } else { fallback_tools },
                     skill_context: String::new(),
                 }
             }
         }
     } else {
+        // No McpPorter — derive allowed_tools from filtered skills' mcp_tools
+        let fallback_tools: Vec<String> = if task_skills.is_empty() {
+            vec![] // No skills selected = no tools
+        } else {
+            // Load skills from disk and collect their mcp_tools
+            let skills_dir = &config.skills.managed_dir;
+            let mut tools = Vec::new();
+            if skills_dir.exists() {
+                if let Ok(entries) = std::fs::read_dir(skills_dir) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if task_skills.iter().any(|s| s == &name) {
+                            let skill_md = entry.path().join("SKILL.md");
+                            if let Ok(content) = std::fs::read_to_string(&skill_md) {
+                                if let Ok(skill) = mcclawd_core::skill_parser::parse_skill_md(&content) {
+                                    tools.extend(skill.mcp_tools);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            tools
+        };
         crate::sandbox::container::AgentEnvironment {
             image: "mcclawd-runner:latest".to_string(),
             network: config.sandbox.network.clone(),
             gateway_url: crate::sandbox::container::container_gateway_url(
                 &config.mcp.agentgateway_url,
             ),
-            allowed_tools: vec!["*".to_string()],
+            allowed_tools: if fallback_tools.is_empty() { vec!["*".to_string()] } else { fallback_tools },
             skill_context: String::new(),
         }
     };

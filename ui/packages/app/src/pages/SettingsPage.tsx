@@ -84,6 +84,7 @@ export function SettingsPage() {
           type="text"
           fieldKey="default_workspace"
         />
+        <ToolProfileSelector value={config?.agent.default_tool_profile} />
         <Field label="Data Directory" value={config?.data_dir} />
         <Field label="AgentGateway URL" value={config?.mcp.agentgateway_url} />
       </div>
@@ -219,6 +220,48 @@ function ModelSelector({
 // ---------------------------------------------------------------------------
 // Existing field components
 // ---------------------------------------------------------------------------
+
+const TOOL_PROFILES = [
+  { value: "Minimal", label: "Minimal - memory tools only" },
+  { value: "Coding", label: "Coding - filesystem, git, shell" },
+  { value: "Research", label: "Research - web, fetch, browser" },
+  { value: "Full", label: "Full - all available tools" },
+];
+
+function ToolProfileSelector({ value }: { value?: string }) {
+  const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
+  const queryClient = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: (profile: string) => api.config.update({ default_tool_profile: profile }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["config"] });
+      setToast({ msg: "Saved", ok: true });
+      setTimeout(() => setToast(null), 2000);
+    },
+    onError: () => setToast({ msg: "Failed to save", ok: false }),
+  });
+
+  return (
+    <div className="p-4 rounded-xl bg-card border border-border">
+      <label className="text-xs text-muted-foreground">Default Tool Profile</label>
+      <select
+        value={value || "Coding"}
+        onChange={(e) => mutation.mutate(e.target.value)}
+        className="w-full text-sm font-mono mt-1 bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+        aria-label="Default Tool Profile"
+      >
+        {TOOL_PROFILES.map((p) => (
+          <option key={p.value} value={p.value}>{p.label}</option>
+        ))}
+      </select>
+      {toast && (
+        <p className={`text-xs mt-1 ${toast.ok ? "text-emerald-500" : "text-destructive"}`}>
+          {toast.msg}
+        </p>
+      )}
+    </div>
+  );
+}
 
 function Field({ label, value }: { label: string; value?: string }) {
   return (

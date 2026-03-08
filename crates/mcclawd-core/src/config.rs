@@ -41,6 +41,9 @@ pub struct AgentConfig {
     #[serde(default = "default_workspace")]
     pub default_workspace: String,
 
+    /// Default tool profile for new tasks.
+    #[serde(default)]
+    pub default_tool_profile: ToolProfile,
 }
 
 impl Default for AgentConfig {
@@ -49,6 +52,79 @@ impl Default for AgentConfig {
             max_turns: default_max_turns(),
             model: default_model(),
             default_workspace: default_workspace(),
+            default_tool_profile: ToolProfile::default(),
+        }
+    }
+}
+
+/// Tool access profile — determines which MCP tool prefixes are allowed by default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ToolProfile {
+    /// Only memory.store / memory.recall — no MCP tools.
+    Minimal,
+    /// Coding tools: filesystem, code-analysis, git.
+    #[default]
+    Coding,
+    /// Research tools: web-search, fetch, knowledge-base.
+    Research,
+    /// All available tools — no restrictions.
+    Full,
+}
+
+impl ToolProfile {
+    /// Return the set of allowed tool-name prefixes for this profile.
+    pub fn allowed_prefixes(&self) -> Vec<&'static str> {
+        match self {
+            ToolProfile::Minimal => vec!["memory."],
+            ToolProfile::Coding => vec![
+                "memory.",
+                "filesystem",
+                "code_analysis",
+                "git",
+                "shell",
+            ],
+            ToolProfile::Research => vec![
+                "memory.",
+                "web_search",
+                "fetch",
+                "knowledge",
+                "browser",
+            ],
+            ToolProfile::Full => vec![], // empty = allow everything
+        }
+    }
+
+    /// Check whether a tool name is permitted under this profile + allow/deny overrides.
+    pub fn is_tool_allowed(
+        &self,
+        tool_name: &str,
+        tools_allow: &[String],
+        tools_deny: &[String],
+    ) -> bool {
+        // Explicit deny always wins
+        if tools_deny.iter().any(|d| tool_name.starts_with(d.as_str())) {
+            return false;
+        }
+        // Explicit allow overrides profile restrictions
+        if tools_allow.iter().any(|a| tool_name.starts_with(a.as_str())) {
+            return true;
+        }
+        // Full profile allows everything
+        let prefixes = self.allowed_prefixes();
+        if prefixes.is_empty() {
+            return true;
+        }
+        prefixes.iter().any(|p| tool_name.starts_with(p))
+    }
+}
+
+impl std::fmt::Display for ToolProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ToolProfile::Minimal => write!(f, "minimal"),
+            ToolProfile::Coding => write!(f, "coding"),
+            ToolProfile::Research => write!(f, "research"),
+            ToolProfile::Full => write!(f, "full"),
         }
     }
 }
