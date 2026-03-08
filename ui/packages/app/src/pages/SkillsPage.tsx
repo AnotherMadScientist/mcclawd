@@ -965,6 +965,7 @@ export function SkillsPage() {
   const [syncProgress, setSyncProgress] = useState<number | null>(null);
   const [scanResults, setScanResults] = useState<Record<string, ScanResult>>({});
   const [scanningSkill, setScanningSkill] = useState<string | null>(null);
+  const [displayCount, setDisplayCount] = useState(48);
   const scanLoadedRef = useRef(false);
 
   const autoRefreshed = useRef(false);
@@ -994,6 +995,10 @@ export function SkillsPage() {
     const timer = setTimeout(() => setDebouncedQuery(searchQuery), 400);
     return () => clearTimeout(timer);
   }, [searchQuery]);
+
+  useEffect(() => {
+    setDisplayCount(48);
+  }, [debouncedQuery]);
 
   // ---- Queries ----
 
@@ -1200,25 +1205,40 @@ export function SkillsPage() {
           )}
 
           {!catalogLoading && !catalogError && skills.length > 0 && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2.5">
-              {skills.map((skill: ClawHubSkillMeta) => (
-                <BrowseCard
-                  key={skill.name}
-                  skill={skill}
-                  isInstalled={installedNames.has(skill.name)}
-                  isSelected={selectedSkill === skill.name}
-                  onClick={() => setSelectedSkill(skill.name)}
-                  onInstall={() => {
-                    setInstallingSkill(skill.name);
-                    quickInstall.mutate({ name: skill.name, version: skill.version });
-                  }}
-                  installPending={installingSkill === skill.name}
-                  scanResult={scanResults[skill.name]}
-                  onScan={() => handleCardScan(skill.name)}
-                  scanPending={scanningSkill === skill.name}
-                />
-              ))}
-            </div>
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2.5">
+                {skills.slice(0, displayCount).map((skill: ClawHubSkillMeta) => (
+                  <BrowseCard
+                    key={skill.name}
+                    skill={skill}
+                    isInstalled={installedNames.has(skill.name)}
+                    isSelected={selectedSkill === skill.name}
+                    onClick={() => setSelectedSkill(skill.name)}
+                    onInstall={() => {
+                      setInstallingSkill(skill.name);
+                      quickInstall.mutate({ name: skill.name, version: skill.version });
+                    }}
+                    installPending={installingSkill === skill.name}
+                    scanResult={scanResults[skill.name]}
+                    onScan={() => handleCardScan(skill.name)}
+                    scanPending={scanningSkill === skill.name}
+                  />
+                ))}
+              </div>
+              {displayCount < skills.length && (
+                <div className="flex flex-col items-center gap-1.5 py-4">
+                  <p className="text-xs text-muted-foreground">
+                    {displayCount.toLocaleString()} of {skills.length.toLocaleString()}
+                  </p>
+                  <button
+                    onClick={() => setDisplayCount((n) => n + 48)}
+                    className="px-4 py-1.5 rounded-lg bg-muted text-xs font-medium hover:bg-muted/80 transition-colors"
+                  >
+                    Load more
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </div>
 
