@@ -5,7 +5,9 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
+use super::pipeline::SecurityContext;
 use super::SecurityHook;
 
 /// Action being audited.
@@ -25,6 +27,49 @@ pub struct AuditEvent {
     pub result_size: usize,
     pub duration_ms: Option<u64>,
     pub dlp_flags: Vec<String>,
+    // Enriched fields — populated from SecurityContext when available.
+    pub task_id: Option<String>,
+    pub event_type: String,
+    pub threat_level: String,
+    pub action_taken: String,
+    pub direction: String,
+}
+
+impl AuditEvent {
+    fn new_pre(tool_name: &str, args: &serde_json::Value) -> Self {
+        Self {
+            timestamp: Utc::now(),
+            tool_name: tool_name.to_string(),
+            action: AuditAction::PreCall,
+            args_summary: args.to_string(),
+            result_size: 0,
+            duration_ms: None,
+            dlp_flags: vec![],
+            task_id: None,
+            event_type: "audit".to_string(),
+            threat_level: "safe".to_string(),
+            action_taken: "allowed".to_string(),
+            direction: "inbound".to_string(),
+        }
+    }
+
+    fn new_post(tool_name: &str, result: &serde_json::Value) -> Self {
+        let result_str = result.to_string();
+        Self {
+            timestamp: Utc::now(),
+            tool_name: tool_name.to_string(),
+            action: AuditAction::PostCall,
+            args_summary: String::new(),
+            result_size: result_str.len(),
+            duration_ms: None,
+            dlp_flags: vec![],
+            task_id: None,
+            event_type: "audit".to_string(),
+            threat_level: "safe".to_string(),
+            action_taken: "allowed".to_string(),
+            direction: "outbound".to_string(),
+        }
+    }
 }
 
 /// Trait for audit event sinks — where events are recorded.
@@ -44,6 +89,8 @@ impl AuditSink for TracingAuditSink {
             result_size = event.result_size,
             duration_ms = ?event.duration_ms,
             dlp_flags = ?event.dlp_flags,
+            task_id = ?event.task_id,
+            threat_level = %event.threat_level,
             "audit_event"
         );
     }
@@ -78,18 +125,53 @@ impl AuditSink for FileAuditSink {
 /// Structured audit hook that records events through a pluggable sink.
 pub struct AuditHook {
     sink: Arc<dyn AuditSink>,
+    /// Shared pipeline context — read to enrich events with task_id + findings.
+    context: Option<Arc<RwLock<SecurityContext>>>,
 }
 
 impl AuditHook {
-    /// Create an AuditHook with a custom sink.
+    /// Create an AuditHook with a custom sink (no context).
     pub fn new(sink: Arc<dyn AuditSink>) -> Self {
-        Self { sink }
+        Self { sink, context: None }
+    }
+
+    /// Attach the shared pipeline context to enrich persisted events.
+    pub fn with_context(mut self, context: Arc<RwLock<SecurityContext>>) -> Self {
+        self.context = Some(context);
+        self
     }
 
     /// Create an AuditHook with the default TracingAuditSink.
     pub fn with_tracing() -> Self {
         Self {
             sink: Arc::new(TracingAuditSink),
+            context: None,
+        }
+    }
+
+    /// Read the shared context and enrich the event.
+    async fn enrich(&self, event: &mut AuditEvent) {
+        if let Some(ctx) = &self.context {
+            let ctx = ctx.read().await;
+            event.task_id = ctx.task_id.clone();
+            event.threat_level = ctx.threat_level.clone();
+            event.dlp_flags = ctx
+                .findings
+                .iter()
+                .map(|f| f.pattern_name.clone())
+                .collect();
+            // Determine event_type from findings
+            if ctx.findings.iter().any(|f| f.finding_type == "secret_detected") {
+                event.event_type = "secret_detected".to_string();
+            } else if !ctx.findings.is_empty() {
+                event.event_type = "dlp_match".to_string();
+            }
+            // Determine action_taken
+            if ctx.was_blocked {
+                event.action_taken = "blocked".to_string();
+            } else if !ctx.findings.is_empty() {
+                event.action_taken = "warned".to_string();
+            }
         }
     }
 }
@@ -101,15 +183,8 @@ impl SecurityHook for AuditHook {
         tool_name: &str,
         args: &serde_json::Value,
     ) -> crate::Result<()> {
-        let event = AuditEvent {
-            timestamp: Utc::now(),
-            tool_name: tool_name.to_string(),
-            action: AuditAction::PreCall,
-            args_summary: args.to_string(),
-            result_size: 0,
-            duration_ms: None,
-            dlp_flags: vec![],
-        };
+        let mut event = AuditEvent::new_pre(tool_name, args);
+        self.enrich(&mut event).await;
         self.sink.record(&event);
         Ok(())
     }
@@ -119,31 +194,29 @@ impl SecurityHook for AuditHook {
         tool_name: &str,
         result: &serde_json::Value,
     ) -> crate::Result<()> {
-        let result_str = result.to_string();
-        let event = AuditEvent {
-            timestamp: Utc::now(),
-            tool_name: tool_name.to_string(),
-            action: AuditAction::PostCall,
-            args_summary: String::new(),
-            result_size: result_str.len(),
-            duration_ms: None,
-            dlp_flags: vec![],
-        };
+        let mut event = AuditEvent::new_post(tool_name, result);
+        self.enrich(&mut event).await;
         self.sink.record(&event);
         Ok(())
     }
 }
 
-/// PostgreSQL-backed audit sink -- writes security events to the database.
-/// Requires a sqlx::PgPool. Events are written synchronously (per-event).
-/// For production, consider adding batch insert with a background flush task.
+/// PostgreSQL-backed audit sink — writes security events + DLP findings to the database.
 pub struct PgAuditSink {
     pool: sqlx::PgPool,
+    /// Shared pipeline context — read inside the spawned task to persist findings.
+    context: Option<Arc<RwLock<SecurityContext>>>,
 }
 
 impl PgAuditSink {
     pub fn new(pool: sqlx::PgPool) -> Self {
-        Self { pool }
+        Self { pool, context: None }
+    }
+
+    /// Attach the shared pipeline context so findings get persisted alongside the event.
+    pub fn with_context(mut self, context: Arc<RwLock<SecurityContext>>) -> Self {
+        self.context = Some(context);
+        self
     }
 }
 
@@ -151,29 +224,102 @@ impl AuditSink for PgAuditSink {
     fn record(&self, event: &AuditEvent) {
         let pool = self.pool.clone();
         let event = event.clone();
-        // Spawn async write -- AuditSink::record is sync, so we fire-and-forget
+        let context = self.context.clone();
+
+        // Spawn async write — AuditSink::record is sync, so we fire-and-forget.
         tokio::spawn(async move {
+            // Snapshot findings from context so we can persist them.
+            let (task_id, findings, threat_level, action_taken) = if let Some(ctx) = context {
+                let ctx = ctx.read().await;
+                let findings = ctx.findings.clone();
+                let threat_level = ctx.threat_level.clone();
+                let action_taken = if ctx.was_blocked {
+                    "blocked".to_string()
+                } else if !findings.is_empty() {
+                    "warned".to_string()
+                } else {
+                    "allowed".to_string()
+                };
+                (ctx.task_id.clone(), findings, threat_level, action_taken)
+            } else {
+                (
+                    event.task_id.clone(),
+                    vec![],
+                    event.threat_level.clone(),
+                    event.action_taken.clone(),
+                )
+            };
+
+            let direction = match event.action {
+                AuditAction::PreCall => "inbound",
+                AuditAction::PostCall => "outbound",
+            };
+
             let details = serde_json::json!({
                 "args_summary": event.args_summary,
                 "result_size": event.result_size,
                 "duration_ms": event.duration_ms,
                 "dlp_flags": event.dlp_flags,
             });
-            let action_str = match event.action {
-                AuditAction::PreCall => "pre_call",
-                AuditAction::PostCall => "post_call",
+
+            // Determine event_type: prefer specific types over generic "audit".
+            let event_type = if findings.iter().any(|f| f.finding_type == "secret_detected") {
+                "secret_detected"
+            } else if findings.iter().any(|f| f.finding_type == "dlp_match") {
+                "dlp_match"
+            } else {
+                "audit"
             };
-            if let Err(e) = sqlx::query(
-                "INSERT INTO security_events (event_type, tool_name, direction, details, action_taken)
-                 VALUES ('audit', $1, $2, $3, 'allowed')",
+
+            let threat_level_opt = if threat_level == "safe" {
+                None
+            } else {
+                Some(threat_level.as_str())
+            };
+
+            let security_event_id: Option<i64> = match sqlx::query_scalar::<_, i64>(
+                "INSERT INTO security_events \
+                 (task_id, user_id, event_type, tool_name, direction, threat_level, details, action_taken) \
+                 VALUES ($1, 'admin', $2, $3, $4, $5, $6, $7) \
+                 RETURNING id",
             )
+            .bind(task_id.as_deref())
+            .bind(event_type)
             .bind(&event.tool_name)
-            .bind(action_str)
+            .bind(direction)
+            .bind(threat_level_opt)
             .bind(&details)
-            .execute(&pool)
+            .bind(&action_taken)
+            .fetch_one(&pool)
             .await
             {
-                tracing::warn!(error = %e, "Failed to write audit event to postgres");
+                Ok(id) => Some(id),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to write audit event to postgres");
+                    None
+                }
+            };
+
+            // Insert per-finding rows if we have a valid security_event_id.
+            if let Some(event_id) = security_event_id {
+                for finding in &findings {
+                    if let Err(e) = sqlx::query(
+                        "INSERT INTO dlp_findings \
+                         (security_event_id, finding_type, tag, pattern_name, confidence, redacted_preview) \
+                         VALUES ($1, $2, $3, $4, $5, $6)",
+                    )
+                    .bind(event_id)
+                    .bind(&finding.finding_type)
+                    .bind(&finding.tag)
+                    .bind(&finding.pattern_name)
+                    .bind(finding.confidence as f32)
+                    .bind(finding.redacted_preview.as_deref())
+                    .execute(&pool)
+                    .await
+                    {
+                        tracing::warn!(error = %e, "Failed to write DLP finding to postgres");
+                    }
+                }
             }
         });
     }
@@ -263,5 +409,34 @@ mod tests {
             let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
             assert!(parsed.get("tool_name").is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn audit_hook_enriches_from_context() {
+        let ctx = Arc::new(RwLock::new(SecurityContext::new()));
+        {
+            let mut ctx = ctx.write().await;
+            ctx.task_id = Some("task-xyz".to_string());
+            ctx.threat_level = "suspicious".to_string();
+            ctx.findings.push(super::super::pipeline::PendingFinding {
+                finding_type: "dlp_match".to_string(),
+                tag: "dlp:credit_card_number".to_string(),
+                pattern_name: "Credit Card Number".to_string(),
+                confidence: 1.0,
+                redacted_preview: None,
+            });
+        }
+
+        let sink = Arc::new(CollectorSink::new());
+        let hook = AuditHook::new(sink.clone()).with_context(ctx);
+        hook.before_tool_call("send_payment", &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events[0].task_id, Some("task-xyz".to_string()));
+        assert_eq!(events[0].threat_level, "suspicious");
+        assert_eq!(events[0].event_type, "dlp_match");
+        assert_eq!(events[0].dlp_flags, vec!["Credit Card Number"]);
     }
 }

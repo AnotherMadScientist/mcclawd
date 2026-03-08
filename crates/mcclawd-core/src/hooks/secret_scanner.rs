@@ -4,7 +4,10 @@
 //! by calculating Shannon entropy of string tokens extracted from JSON.
 
 use async_trait::async_trait;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
+use super::pipeline::{PendingFinding, SecurityContext};
 use super::SecurityHook;
 use crate::McclawdError;
 
@@ -28,16 +31,24 @@ impl Default for SecretScannerConfig {
 /// Entropy-based secret scanning hook.
 pub struct SecretScannerHook {
     config: SecretScannerConfig,
+    /// Shared pipeline context — push findings here so AuditHook can persist them.
+    context: Option<Arc<RwLock<SecurityContext>>>,
 }
 
 impl SecretScannerHook {
     pub fn new(config: SecretScannerConfig) -> Self {
-        Self { config }
+        Self { config, context: None }
     }
 
     /// Create with default configuration.
     pub fn with_defaults() -> Self {
         Self::new(SecretScannerConfig::default())
+    }
+
+    /// Attach the shared pipeline context so findings get persisted.
+    pub fn with_context(mut self, context: Arc<RwLock<SecurityContext>>) -> Self {
+        self.context = Some(context);
+        self
     }
 
     /// Scan JSON value for high-entropy string tokens.
@@ -77,6 +88,23 @@ impl SecretScannerHook {
             _ => {}
         }
     }
+
+    /// Push entropy findings into the shared context.
+    async fn push_findings(&self, flagged: &[(String, f64)]) {
+        if let Some(ctx) = &self.context {
+            let mut ctx = ctx.write().await;
+            for (preview, entropy) in flagged {
+                ctx.findings.push(PendingFinding {
+                    finding_type: "secret_detected".to_string(),
+                    tag: "entropy:high".to_string(),
+                    pattern_name: "Shannon Entropy".to_string(),
+                    confidence: (*entropy / 8.0).min(1.0), // normalise to [0,1]
+                    redacted_preview: Some(preview.clone()),
+                });
+            }
+            ctx.elevate_threat("suspicious");
+        }
+    }
 }
 
 /// Calculate Shannon entropy of a string (bits per character).
@@ -114,6 +142,7 @@ impl SecurityHook for SecretScannerHook {
                     "Secret scanner: high-entropy token in args"
                 );
             }
+            self.push_findings(&flagged).await;
             return Err(McclawdError::Tool(format!(
                 "Secret scanner: {} high-entropy token(s) detected in tool '{}' args",
                 flagged.len(),
@@ -138,6 +167,7 @@ impl SecurityHook for SecretScannerHook {
                     "Secret scanner: high-entropy token in result"
                 );
             }
+            self.push_findings(&flagged).await;
             // After-call: warn but don't block (data already returned)
         }
         Ok(())
@@ -217,5 +247,20 @@ mod tests {
         });
         let res = hook.after_tool_call("test", &result).await;
         assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn findings_pushed_to_context() {
+        let ctx = Arc::new(RwLock::new(SecurityContext::new()));
+        let hook = SecretScannerHook::with_defaults().with_context(ctx.clone());
+        let args = serde_json::json!({
+            "token": "aB3kM9pQ7rS2tU5vW8xY0zAb1Cd2Ef3Gh"
+        });
+        // Returns error (blocked), but findings should be persisted
+        let _ = hook.before_tool_call("test", &args).await;
+        let ctx = ctx.read().await;
+        assert!(!ctx.findings.is_empty());
+        assert_eq!(ctx.findings[0].finding_type, "secret_detected");
+        assert_eq!(ctx.threat_level, "suspicious");
     }
 }

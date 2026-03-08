@@ -716,7 +716,8 @@ pub async fn delete_container(
         )
     })?;
 
-    // Find associated task_id from container labels before removing
+    // Find associated task_id from container labels before removing.
+    // Fall back to persistent_containers DB table if container is already gone.
     let task_id = docker
         .inspect_container(&container_id, None)
         .await
@@ -726,7 +727,27 @@ pub async fn delete_container(
                 .as_ref()
                 .and_then(|c| c.labels.as_ref())
                 .and_then(|l| l.get("mcclawd.task_id").cloned())
+        })
+        .or_else(|| {
+            // Container might already be removed — look up task_id from DB
+            None // filled async below
         });
+    let task_id = match task_id {
+        Some(tid) => Some(tid),
+        None => {
+            // Fallback: look up task_id from persistent_containers DB by container_id
+            state
+                .pg_store
+                .load_persistent_containers()
+                .await
+                .ok()
+                .and_then(|rows| {
+                    rows.into_iter()
+                        .find(|(cid, _, _, _)| cid == &container_id)
+                        .map(|(_, tid, _, _)| tid)
+                })
+        }
+    };
 
     // Stop the container (ignore errors if already stopped)
     let _ = docker
@@ -755,23 +776,45 @@ pub async fn delete_container(
         {
             let mut mgr = state.tasks.write().await;
             if let Some(t) = mgr.get_task(&task_id_typed) {
-                if matches!(t.status, mcclawd_tasks::manager::TaskStatus::Running) {
+                if matches!(
+                    t.status,
+                    mcclawd_tasks::manager::TaskStatus::Running
+                        | mcclawd_tasks::manager::TaskStatus::Building
+                ) {
                     mgr.fail_task(&task_id_typed, "Container removed".to_string());
                 }
             }
             mgr.delete_task(&task_id_typed);
         }
 
-        // Clean up broadcast channel + chat history
+        // Clean up broadcast channel + chat history + event cache
         state.task_streams.write().await.remove(&task_id_typed);
         state.task_chat_history.write().await.remove(&task_id_typed);
         state.task_events.write().await.remove(&task_id_typed);
 
-        // Delete task from postgres
-        state.pg_delete_task(&task_id_typed).await;
+        // Update PG task status to Failed before deleting (ensures no stale Running rows)
+        state
+            .pg_update_status(&task_id_typed, "Failed", Some("Container removed"))
+            .await;
 
-        // Delete persistent container record
-        let _ = state.pg_store.delete_persistent_container(&container_id).await;
+        // Delete task from postgres (synchronous — must complete before response)
+        state.pg_delete_task_sync(&task_id_typed).await;
+
+        // Delete persistent container records — by container_id AND by task_id for safety
+        let _ = state
+            .pg_store
+            .delete_persistent_container(&container_id)
+            .await;
+        let _ = state
+            .pg_store
+            .delete_persistent_containers_by_task(tid)
+            .await;
+    } else {
+        // No task_id label found — still clean up the persistent_container record by container_id
+        let _ = state
+            .pg_store
+            .delete_persistent_container(&container_id)
+            .await;
     }
 
     Ok(Json(serde_json::json!({

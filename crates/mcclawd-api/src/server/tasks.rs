@@ -81,6 +81,10 @@ pub async fn list_tasks(State(state): State<AppState>) -> Json<Vec<TaskResponse>
     // DB is source of truth
     if let Ok(rows) = state.pg_store.list_tasks().await {
         for (id, prompt, status, error_message, tags) in rows {
+            // Never expose the system agent as a user-visible task
+            if id == "__system__" || id == "system-agent" {
+                continue;
+            }
             seen_ids.insert(id.clone());
             let task_status = match status.as_str() {
                 "Running" => TaskStatus::Running,
@@ -99,6 +103,9 @@ pub async fn list_tasks(State(state): State<AppState>) -> Json<Vec<TaskResponse>
     // Merge in-memory tasks not yet in DB (recently created, race window)
     let mgr = state.tasks.read().await;
     for t in mgr.all_tasks() {
+        if t.id.0 == "__system__" || t.id.0 == "system-agent" {
+            continue;
+        }
         if !seen_ids.contains(&t.id.0) {
             tasks.push(TaskResponse::from(t));
         }
@@ -857,6 +864,9 @@ async fn run_agent_host(
                         accumulated_text.push_str(&text.text);
                     }
                     StreamedAssistantContent::ToolCall { tool_call, .. } => {
+                        // Associate this tool call with the current task so DLP/audit
+                        // events land in security_events with the correct task_id.
+                        state.security_pipeline.set_task_context(&task_id.0).await;
                         // Run security pipeline before tool execution
                         let args_json = serde_json::to_value(&tool_call.function.arguments)
                             .unwrap_or_default();
@@ -1193,26 +1203,27 @@ pub async fn delete_all_tasks(
     for id in &to_delete {
         // Individual pg delete only when no tag filter (tag filter handled in bulk above)
         if query.tag.is_none() {
-            state.pg_delete_task(id).await;
+            state.pg_delete_task_sync(id).await;
         }
         state.task_streams.write().await.remove(id);
         state.task_chat_history.write().await.remove(id);
         state.task_events.write().await.remove(id);
 
-        // Shutdown and cleanup persistent container if one exists (BUG-030)
+        // Shutdown and cleanup persistent container synchronously (BUG-030)
         let handle = state.task_containers.write().await.remove(id);
         if let Some(handle) = handle {
             let _ = handle.shutdown().await;
             let cid = handle.container_id.clone();
-            let store = state.pg_store.clone();
-            tokio::spawn(async move {
-                if let Err(e) = store.delete_persistent_container(&cid).await {
-                    tracing::warn!("Failed to delete container record: {e}");
-                }
-                if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
-                    let _ = orch.cleanup_container(&cid).await;
-                }
-            });
+            if let Err(e) = state.pg_store.delete_persistent_container(&cid).await {
+                tracing::warn!("Failed to delete container record: {e}");
+            }
+            let _ = state
+                .pg_store
+                .delete_persistent_containers_by_task(&id.0)
+                .await;
+            if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
+                let _ = orch.cleanup_container(&cid).await;
+            }
         }
     }
 
@@ -1233,40 +1244,42 @@ pub async fn delete_task(
         None => return StatusCode::NOT_FOUND,
     };
 
-    if matches!(task.status, TaskStatus::Running) {
+    if matches!(task.status, TaskStatus::Running | TaskStatus::Building) {
         mgr.fail_task(&task_id, "Cancelled by user".to_string());
     }
 
     mgr.delete_task(&task_id);
     drop(mgr);
 
-    // Also delete from postgres (cascades to events + chat history)
-    state.pg_delete_task(&task_id).await;
-
-    // Shutdown and cleanup persistent container if one exists
+    // Shutdown and cleanup persistent container synchronously
     {
         let mut containers = state.task_containers.write().await;
         if let Some(handle) = containers.remove(&task_id) {
             let _ = handle.shutdown().await;
-            // Cleanup container + delete DB record in background
             let cid = handle.container_id.clone();
-            let store = state.pg_store.clone();
-            tokio::spawn(async move {
-                if let Err(e) = store.delete_persistent_container(&cid).await {
-                    tracing::warn!("Failed to delete container record: {e}");
-                }
-                if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
-                    let _ = orch.cleanup_container(&cid).await;
-                }
-            });
+            // Delete persistent container record from DB (synchronous — no tokio::spawn)
+            if let Err(e) = state.pg_store.delete_persistent_container(&cid).await {
+                tracing::warn!("Failed to delete container record: {e}");
+            }
+            // Also delete by task_id for safety
+            let _ = state
+                .pg_store
+                .delete_persistent_containers_by_task(&task_id.0)
+                .await;
+            // Remove Docker container
+            if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
+                let _ = orch.cleanup_container(&cid).await;
+            }
         }
     }
 
-    // Clean up broadcast channel
-    state.task_streams.write().await.remove(&task_id);
+    // Delete from postgres synchronously (cascades to events + chat history)
+    state.pg_delete_task_sync(&task_id).await;
 
-    // Clean up chat history
+    // Clean up broadcast channel + chat history + event cache
+    state.task_streams.write().await.remove(&task_id);
     state.task_chat_history.write().await.remove(&task_id);
+    state.task_events.write().await.remove(&task_id);
 
     StatusCode::NO_CONTENT
 }

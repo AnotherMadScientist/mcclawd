@@ -259,16 +259,29 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
     let mut state = AppState::new(config, supervisor, pg_store.clone())?;
 
     // Build security hook pipeline (DLP → secret scanner → sidecar → audit)
+    // All hooks share a single SecurityContext so findings from DLP/secret-scanner
+    // are visible to AuditHook when it persists the security_event + dlp_findings rows.
     {
         let sidecar_url = std::env::var("SECURITY_SIDECAR_URL")
             .unwrap_or_else(|_| "http://localhost:8082".to_string());
-        let pipeline = HookPipeline::new()
-            .add(Arc::new(DlpHook::with_defaults()))
-            .add(Arc::new(SecretScannerHook::with_defaults()))
+        let pipeline = HookPipeline::new();
+        // Clone the shared context reference before consuming `pipeline` via builder.
+        let shared_ctx = pipeline.context.clone();
+        let pipeline = pipeline
+            .add(Arc::new(
+                DlpHook::with_defaults().with_context(shared_ctx.clone()),
+            ))
+            .add(Arc::new(
+                SecretScannerHook::with_defaults().with_context(shared_ctx.clone()),
+            ))
             .add(Arc::new(SecuritySidecarHook::new(&sidecar_url)))
-            .add(Arc::new(AuditHook::new(Arc::new(PgAuditSink::new(
-                pg_store.pool().clone(),
-            )))));
+            .add(Arc::new(
+                AuditHook::new(Arc::new(
+                    PgAuditSink::new(pg_store.pool().clone())
+                        .with_context(shared_ctx.clone()),
+                ))
+                .with_context(shared_ctx),
+            ));
         let hook_count = pipeline.len();
         state.security_pipeline = Arc::new(pipeline);
         tracing::info!(hooks = hook_count, sidecar_url = %sidecar_url, "Security pipeline initialized");
@@ -474,14 +487,23 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
         tracing::info!("Container↔task reconciliation started in background");
     }
 
-    // Spawn periodic GC: every 60s, cross-reference Docker containers with tasks
-    // and clean up orphans that appear during runtime (e.g., from crashed task creation).
+    // Spawn periodic GC: every 30s, cross-reference Docker containers with tasks (DB-primary)
+    // and clean up orphans. Safety net for the Docker event listener.
     {
         let gc_state = state.clone();
         tokio::spawn(async move {
             container_gc_loop(gc_state).await;
         });
-        tracing::info!("Container GC loop started (60s interval)");
+        tracing::info!("Container GC loop started (30s interval)");
+    }
+
+    // Spawn Docker event listener for real-time container death detection.
+    {
+        let event_state = state.clone();
+        tokio::spawn(async move {
+            docker_event_listener(event_state).await;
+        });
+        tracing::info!("Docker event listener started");
     }
 
     // Auto-build runner image in background if Docker is available and image doesn't exist.
@@ -504,6 +526,16 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
 
             let task_id = TaskId(SYSTEM_AGENT_TASK_ID.to_string());
             sys_state.create_task_stream(&task_id).await;
+
+            // Ensure the __system__ task exists in PG so FK constraints on
+            // task_events / task_chat_history don't fail.
+            if let Err(e) = sys_state
+                .pg_store
+                .save_task(SYSTEM_AGENT_TASK_ID, "System agent", "Running", None, "system", &[])
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to upsert __system__ task row");
+            }
 
             // Wait for image (up to 10 min for first build)
             let ready = runner_build::wait_for_image_ready(
@@ -784,9 +816,10 @@ async fn reconcile_containers_and_tasks(state: AppState, pg_store: PgTaskStore) 
     );
 }
 
-/// Periodic garbage collection: every 60s, scan for orphan containers.
+/// Periodic garbage collection: every 30s, scan for orphan containers.
+/// Acts as a safety net — Docker event listener handles real-time detection.
 async fn container_gc_loop(state: AppState) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
     interval.tick().await; // skip first immediate tick (startup reconciliation handles it)
 
     loop {
@@ -816,11 +849,10 @@ async fn container_gc_loop(state: AppState) {
             continue;
         }
 
-        // Cross-reference with task_containers + system_agent handles
-        let task_container_ids: std::collections::HashSet<String> = {
-            let tc = state.task_containers.read().await;
-            tc.values().map(|h| h.container_id.clone()).collect()
-        };
+        // Phase A: Container → DB check (use DB as source of truth, not in-memory)
+        let db_containers = state.pg_store.load_persistent_containers().await.unwrap_or_default();
+        let known_container_ids: std::collections::HashSet<String> =
+            db_containers.iter().map(|(cid, _, _, _)| cid.clone()).collect();
         let system_cid = state
             .system_agent
             .read()
@@ -835,8 +867,8 @@ async fn container_gc_loop(state: AppState) {
                 continue;
             }
 
-            // Skip if it's a known container
-            if task_container_ids.contains(cid)
+            // Skip if it's a known container in DB or system agent
+            if known_container_ids.contains(cid)
                 || system_cid.as_deref() == Some(cid)
             {
                 continue;
@@ -855,6 +887,19 @@ async fn container_gc_loop(state: AppState) {
                     state = %state_str,
                     "GC: removing orphan container"
                 );
+
+                // Look up task_id from container labels before removing
+                let orphan_task_id = docker
+                    .inspect_container(cid, None)
+                    .await
+                    .ok()
+                    .and_then(|info| {
+                        info.config
+                            .as_ref()
+                            .and_then(|c| c.labels.as_ref())
+                            .and_then(|l| l.get("mcclawd.task_id").cloned())
+                    });
+
                 let _ = docker
                     .remove_container(
                         cid,
@@ -865,7 +910,80 @@ async fn container_gc_loop(state: AppState) {
                     )
                     .await;
                 let _ = state.pg_store.delete_persistent_container(cid).await;
+
+                // Cascade: also delete the associated task from PG + memory
+                if let Some(tid) = orphan_task_id {
+                    if tid != "system-agent" && tid != "__system__" {
+                        let task_id_typed = TaskId(tid.clone());
+                        state.pg_delete_task_sync(&task_id_typed).await;
+                        let _ = state.pg_store.delete_persistent_containers_by_task(&tid).await;
+                        state.task_containers.write().await.remove(&task_id_typed);
+                        state.task_streams.write().await.remove(&task_id_typed);
+                        state.task_chat_history.write().await.remove(&task_id_typed);
+                        state.task_events.write().await.remove(&task_id_typed);
+                        let mut mgr = state.tasks.write().await;
+                        mgr.delete_task(&task_id_typed);
+                    }
+                }
                 gc_count += 1;
+            }
+        }
+
+        // Phase B: Task → Container check (reverse direction)
+        // Find tasks marked Running/Building in DB that have no live Docker container
+        let live_docker_ids: std::collections::HashSet<String> = containers
+            .iter()
+            .filter_map(|c| c.id.clone())
+            .collect();
+
+        if let Ok(rows) = state.pg_store.list_tasks().await {
+            for (task_id, _, status, _, _) in &rows {
+                // Skip system agent
+                if task_id == "system-agent" || task_id == "__system__" {
+                    continue;
+                }
+
+                // Check if this task has a live container
+                let has_container = db_containers.iter().any(|(cid, tid, _, _)| {
+                    tid == task_id && live_docker_ids.contains(cid)
+                });
+                // Check if this task has any persistent_container record at all
+                let has_db_container = db_containers.iter().any(|(_, tid, _, _)| tid == task_id);
+
+                if status == "Running" || status == "Building" {
+                    // Running/Building tasks with no live container → fail + delete
+                    if !has_container {
+                        tracing::info!(task_id, "GC: task has no live container — deleting");
+                        let tid = TaskId(task_id.clone());
+                        state.pg_delete_task_sync(&tid).await;
+                        let _ = state
+                            .pg_store
+                            .delete_persistent_containers_by_task(task_id)
+                            .await;
+                        state.task_containers.write().await.remove(&tid);
+                        state.task_streams.write().await.remove(&tid);
+                        state.task_chat_history.write().await.remove(&tid);
+                        state.task_events.write().await.remove(&tid);
+                        let mut mgr = state.tasks.write().await;
+                        mgr.delete_task(&tid);
+                        drop(mgr);
+                        gc_count += 1;
+                    }
+                } else if status == "Failed" {
+                    // Failed tasks with no container record at all → fully orphaned, delete
+                    if !has_db_container && !has_container {
+                        tracing::info!(task_id, "GC: failed task with no container — deleting");
+                        let tid = TaskId(task_id.clone());
+                        state.pg_delete_task_sync(&tid).await;
+                        state.task_streams.write().await.remove(&tid);
+                        state.task_chat_history.write().await.remove(&tid);
+                        state.task_events.write().await.remove(&tid);
+                        let mut mgr = state.tasks.write().await;
+                        mgr.delete_task(&tid);
+                        drop(mgr);
+                        gc_count += 1;
+                    }
+                }
             }
         }
 
@@ -873,6 +991,89 @@ async fn container_gc_loop(state: AppState) {
             tracing::info!(removed = gc_count, "Container GC cycle complete");
         }
     }
+}
+
+/// Listen to Docker events for real-time container death detection.
+/// When a container with `mcclawd.task_id` label dies/stops/is destroyed,
+/// cascade-fail the associated task immediately instead of waiting for the GC loop.
+async fn docker_event_listener(state: AppState) {
+    use bollard::system::EventsOptions;
+    use futures::StreamExt;
+
+    let docker = match bollard::Docker::connect_with_local_defaults() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(error = %e, "Docker event listener: cannot connect — disabled");
+            return;
+        }
+    };
+
+    let mut filters = std::collections::HashMap::new();
+    filters.insert("type".to_string(), vec!["container".to_string()]);
+    filters.insert(
+        "event".to_string(),
+        vec!["die".to_string(), "stop".to_string(), "destroy".to_string()],
+    );
+    filters.insert(
+        "label".to_string(),
+        vec!["mcclawd.task_id".to_string()],
+    );
+
+    let mut stream = docker.events(Some(EventsOptions {
+        filters,
+        ..Default::default()
+    }));
+
+    while let Some(Ok(event)) = stream.next().await {
+        let actor = match &event.actor {
+            Some(a) => a,
+            None => continue,
+        };
+        let task_id_str = actor
+            .attributes
+            .as_ref()
+            .and_then(|a| a.get("mcclawd.task_id").cloned());
+        let container_id = actor.id.clone().unwrap_or_default();
+
+        if let Some(tid) = task_id_str {
+            // Skip system agent — it has its own lifecycle
+            if tid == "system-agent" || tid == "__system__" {
+                continue;
+            }
+
+            tracing::info!(
+                task_id = %tid,
+                container_id = %container_id,
+                event = ?event.action,
+                "Docker event: container stopped/died"
+            );
+
+            let task_id_typed = TaskId(tid.clone());
+
+            // Cascade: remove handle, fail task, clean DB
+            state.task_containers.write().await.remove(&task_id_typed);
+
+            state
+                .pg_update_status(&task_id_typed, "Failed", Some("Container stopped"))
+                .await;
+            let _ = state
+                .pg_store
+                .delete_persistent_containers_by_task(&tid)
+                .await;
+
+            let mut mgr = state.tasks.write().await;
+            if let Some(t) = mgr.get_task(&task_id_typed) {
+                if matches!(
+                    t.status,
+                    TaskStatus::Running | TaskStatus::Building
+                ) {
+                    mgr.fail_task(&task_id_typed, "Container stopped".to_string());
+                }
+            }
+        }
+    }
+
+    tracing::warn!("Docker event listener stream ended — no more real-time detection");
 }
 
 /// Reconnect to persistent containers that survived a server restart.

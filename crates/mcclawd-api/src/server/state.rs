@@ -309,7 +309,7 @@ impl AppState {
         });
     }
 
-    /// Delete task from postgres.
+    /// Delete task from postgres (fire-and-forget, spawned in background).
     pub async fn pg_delete_task(&self, task_id: &TaskId) {
         let store = self.pg_store.clone();
         let tid = task_id.0.clone();
@@ -318,6 +318,15 @@ impl AppState {
                 tracing::warn!(task_id = %tid, error = %e, "Failed to delete task from postgres");
             }
         });
+    }
+
+    /// Delete task from postgres synchronously (awaits completion).
+    /// Use this in cascade-delete paths where the caller needs to guarantee
+    /// the row is gone before returning (e.g. delete_task, delete_container handlers).
+    pub async fn pg_delete_task_sync(&self, task_id: &TaskId) {
+        if let Err(e) = self.pg_store.delete_task(&task_id.0).await {
+            tracing::warn!(task_id = %task_id.0, error = %e, "Failed to delete task from postgres");
+        }
     }
 
     /// Build a ProviderPoolConfig from the current McclawdConfig.

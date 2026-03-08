@@ -2,8 +2,56 @@
 
 use async_trait::async_trait;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use super::SecurityHook;
+
+/// A finding collected during a scan pass — written to the DB by AuditHook.
+#[derive(Debug, Clone)]
+pub struct PendingFinding {
+    pub finding_type: String,
+    pub tag: String,
+    pub pattern_name: String,
+    pub confidence: f64,
+    pub redacted_preview: Option<String>,
+}
+
+/// Shared mutable context threaded through the pipeline for one tool call.
+/// Hooks push findings here; AuditHook reads them to persist everything.
+#[derive(Debug, Default)]
+pub struct SecurityContext {
+    pub task_id: Option<String>,
+    pub user_id: String,
+    /// Accumulated findings from DlpHook, SecretScannerHook, SecuritySidecarHook.
+    pub findings: Vec<PendingFinding>,
+    /// Highest threat level seen ("safe", "suspicious", "dangerous", "critical").
+    pub threat_level: String,
+    /// Whether any hook blocked the call.
+    pub was_blocked: bool,
+}
+
+impl SecurityContext {
+    pub fn new() -> Self {
+        Self {
+            user_id: "admin".to_string(),
+            threat_level: "safe".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Elevate threat level if the new level is higher.
+    pub fn elevate_threat(&mut self, level: &str) {
+        let rank = |l: &str| match l {
+            "critical" => 3,
+            "dangerous" => 2,
+            "suspicious" => 1,
+            _ => 0,
+        };
+        if rank(level) > rank(&self.threat_level) {
+            self.threat_level = level.to_string();
+        }
+    }
+}
 
 /// Chains multiple security hooks into a single SecurityHook.
 ///
@@ -11,11 +59,16 @@ use super::SecurityHook;
 /// - `after_tool_call`: runs all hooks; collects all results (doesn't stop on error).
 pub struct HookPipeline {
     hooks: Vec<Arc<dyn SecurityHook>>,
+    /// Shared context — set before each tool call, read by AuditHook.
+    pub context: Arc<RwLock<SecurityContext>>,
 }
 
 impl HookPipeline {
     pub fn new() -> Self {
-        Self { hooks: Vec::new() }
+        Self {
+            hooks: Vec::new(),
+            context: Arc::new(RwLock::new(SecurityContext::new())),
+        }
     }
 
     pub fn add(mut self, hook: Arc<dyn SecurityHook>) -> Self {
@@ -29,6 +82,16 @@ impl HookPipeline {
 
     pub fn is_empty(&self) -> bool {
         self.hooks.is_empty()
+    }
+
+    /// Call before each tool invocation to associate events with the current task.
+    pub async fn set_task_context(&self, task_id: &str) {
+        let mut ctx = self.context.write().await;
+        ctx.task_id = Some(task_id.to_string());
+        // Clear findings from the previous call.
+        ctx.findings.clear();
+        ctx.threat_level = "safe".to_string();
+        ctx.was_blocked = false;
     }
 
     /// Instantiate user-defined hooks from config and append them after existing hooks.
@@ -61,7 +124,11 @@ impl SecurityHook for HookPipeline {
     ) -> crate::Result<()> {
         // First error stops the chain
         for hook in &self.hooks {
-            hook.before_tool_call(tool_name, args).await?;
+            if let Err(e) = hook.before_tool_call(tool_name, args).await {
+                // Mark blocked in context before propagating
+                self.context.write().await.was_blocked = true;
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -198,6 +265,33 @@ mod tests {
         assert!(res.is_err());
         // Second hook should not have been called
         assert_eq!(counter.before_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn set_task_context_updates_task_id() {
+        let pipeline = HookPipeline::new();
+        pipeline.set_task_context("task-abc-123").await;
+        let ctx = pipeline.context.read().await;
+        assert_eq!(ctx.task_id.as_deref(), Some("task-abc-123"));
+    }
+
+    #[tokio::test]
+    async fn set_task_context_clears_findings() {
+        let pipeline = HookPipeline::new();
+        {
+            let mut ctx = pipeline.context.write().await;
+            ctx.findings.push(PendingFinding {
+                finding_type: "dlp_match".to_string(),
+                tag: "test".to_string(),
+                pattern_name: "Test Pattern".to_string(),
+                confidence: 1.0,
+                redacted_preview: None,
+            });
+        }
+        pipeline.set_task_context("task-new").await;
+        let ctx = pipeline.context.read().await;
+        assert!(ctx.findings.is_empty());
+        assert_eq!(ctx.threat_level, "safe");
     }
 
     #[tokio::test]

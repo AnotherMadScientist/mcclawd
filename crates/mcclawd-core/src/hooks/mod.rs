@@ -17,7 +17,7 @@ use async_trait::async_trait;
 // Re-export everything for backward compatibility
 pub use audit::{AuditAction, AuditEvent, AuditHook, AuditSink, FileAuditSink, PgAuditSink, TracingAuditSink};
 pub use dlp::{DlpAction, DlpConfig, DlpHook, DlpPattern};
-pub use pipeline::HookPipeline;
+pub use pipeline::{HookPipeline, PendingFinding, SecurityContext};
 pub use secret_scanner::{SecretScannerConfig, SecretScannerHook};
 pub use security_event::{DlpFinding, ScanDirection, SecurityAction, SecurityEvent, SecurityEventType, ThreatLevel};
 pub use security_sidecar::SecuritySidecarHook;
