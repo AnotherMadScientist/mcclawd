@@ -145,6 +145,9 @@ impl AgentGuardHook {
                     pattern_name: d.pattern.clone(),
                     confidence: d.confidence,
                     redacted_preview: None,
+                    source_text: None,
+                    match_offset: None,
+                    match_length: None,
                 });
             }
             ctx.elevate_threat(threat_level);

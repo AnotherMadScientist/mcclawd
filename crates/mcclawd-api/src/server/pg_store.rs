@@ -1066,6 +1066,21 @@ impl PgTaskStore {
         Ok(())
     }
 
+    /// Look up container IDs associated with a task (for cleanup when no in-memory handle exists).
+    pub async fn get_container_ids_by_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<String>, McclawdError> {
+        let rows = sqlx::query_as::<_, (String,)>(
+            "SELECT container_id FROM persistent_containers WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(pg_err)?;
+        Ok(rows.into_iter().map(|(cid,)| cid).collect())
+    }
+
     /// Remove all security events (and cascaded dlp_findings) for a task.
     /// dlp_findings rows are auto-deleted via ON DELETE CASCADE on security_event_id FK.
     pub async fn delete_security_events_by_task(
@@ -1155,11 +1170,14 @@ impl PgTaskStore {
         confidence: Option<f32>,
         data_hash: Option<&str>,
         redacted_preview: Option<&str>,
+        source_text: Option<&str>,
+        match_offset: Option<i32>,
+        match_length: Option<i32>,
     ) -> anyhow::Result<i64> {
         let row = sqlx::query_scalar::<_, i64>(
-            "INSERT INTO dlp_findings (security_event_id, finding_type, tag, pattern_name, confidence, data_hash, redacted_preview)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             RETURNING id"
+            "INSERT INTO dlp_findings (security_event_id, finding_type, tag, pattern_name, confidence, data_hash, redacted_preview, source_text, match_offset, match_length)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             RETURNING id",
         )
         .bind(security_event_id)
         .bind(finding_type)
@@ -1168,6 +1186,9 @@ impl PgTaskStore {
         .bind(confidence)
         .bind(data_hash)
         .bind(redacted_preview)
+        .bind(source_text)
+        .bind(match_offset)
+        .bind(match_length)
         .fetch_one(&self.pool)
         .await?;
         Ok(row)
@@ -1191,7 +1212,8 @@ impl PgTaskStore {
                     SELECT json_agg(json_build_object(
                         'id', f.id, 'finding_type', f.finding_type,
                         'tag', f.tag, 'pattern_name', f.pattern_name,
-                        'confidence', f.confidence, 'redacted_preview', f.redacted_preview
+                        'confidence', f.confidence, 'redacted_preview', f.redacted_preview,
+                        'source_text', f.source_text, 'match_offset', f.match_offset, 'match_length', f.match_length
                     ))
                     FROM dlp_findings f WHERE f.security_event_id = e.id
                 ), '[]'::json)
@@ -1242,7 +1264,8 @@ impl PgTaskStore {
                                 SELECT json_agg(json_build_object(
                                     'id', f.id, 'finding_type', f.finding_type,
                                     'tag', f.tag, 'pattern_name', f.pattern_name,
-                                    'confidence', f.confidence, 'redacted_preview', f.redacted_preview
+                                    'confidence', f.confidence, 'redacted_preview', f.redacted_preview,
+                                    'source_text', f.source_text, 'match_offset', f.match_offset, 'match_length', f.match_length
                                 )) FROM dlp_findings f WHERE f.security_event_id = e3.id
                             ), '[]'::json)
                         ) as ev

@@ -73,7 +73,17 @@ class HealthResponse(BaseModel):
 
 # ─── Initialize detectors ────────────────────────────────────────────
 from presidio_analyzer import AnalyzerEngine
-presidio_analyzer = AnalyzerEngine()
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+# Explicitly use en_core_web_sm (the model installed in the Docker image).
+# Without this, presidio defaults to en_core_web_lg which is 400MB and
+# fails with "No space left on device" in our read-only slim container.
+nlp_config = {
+    "nlp_engine_name": "spacy",
+    "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+}
+nlp_engine = NlpEngineProvider(nlp_configuration=nlp_config).create_engine()
+presidio_analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
 
 from detect_secrets.core.scan import scan_line
 from detect_secrets.settings import default_settings

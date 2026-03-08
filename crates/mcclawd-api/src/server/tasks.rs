@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{Multipart, Path, State},
+    extract::{FromRequest, Multipart, Path, State},
     http::{header, StatusCode},
     response::Response,
     Json,
@@ -1399,7 +1399,7 @@ pub async fn delete_all_tasks(
         state.task_chat_history.write().await.remove(id);
         state.task_events.write().await.remove(id);
 
-        // Shutdown and cleanup persistent container synchronously (BUG-030)
+        // Shutdown and cleanup persistent container synchronously (BUG-030 fix)
         let handle = state.task_containers.write().await.remove(id);
         if let Some(handle) = handle {
             let _ = handle.shutdown().await;
@@ -1407,14 +1407,23 @@ pub async fn delete_all_tasks(
             if let Err(e) = state.pg_store.delete_persistent_container(&cid).await {
                 tracing::warn!("Failed to delete container record: {e}");
             }
-            let _ = state
-                .pg_store
-                .delete_persistent_containers_by_task(&id.0)
-                .await;
             if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
                 let _ = orch.cleanup_container(&cid).await;
             }
+        } else {
+            // No in-memory handle — check DB for orphaned containers
+            if let Ok(container_ids) = state.pg_store.get_container_ids_by_task(&id.0).await {
+                for cid in &container_ids {
+                    tracing::info!(task_id = %id.0, container_id = %cid,
+                        "Cleaning up orphaned container from DB (bulk delete)");
+                    if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
+                        let _ = orch.cleanup_container(cid).await;
+                    }
+                }
+            }
         }
+        // Always clean persistent_containers rows by task_id
+        let _ = state.pg_store.delete_persistent_containers_by_task(&id.0).await;
     }
 
     Json(serde_json::json!({ "deleted": count }))
@@ -1441,26 +1450,43 @@ pub async fn delete_task(
     mgr.delete_task(&task_id);
     drop(mgr);
 
-    // Shutdown and cleanup persistent container synchronously
+    // Shutdown and cleanup persistent container synchronously (BUG-030 fix)
     {
         let mut containers = state.task_containers.write().await;
-        if let Some(handle) = containers.remove(&task_id) {
+        let in_memory_handle = containers.remove(&task_id);
+
+        if let Some(handle) = in_memory_handle {
+            // In-memory handle exists — shutdown gracefully and cleanup Docker container
             let _ = handle.shutdown().await;
             let cid = handle.container_id.clone();
-            // Delete persistent container record from DB (synchronous — no tokio::spawn)
             if let Err(e) = state.pg_store.delete_persistent_container(&cid).await {
                 tracing::warn!("Failed to delete container record: {e}");
             }
-            // Also delete by task_id for safety
-            let _ = state
-                .pg_store
-                .delete_persistent_containers_by_task(&task_id.0)
-                .await;
-            // Remove Docker container
             if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
                 let _ = orch.cleanup_container(&cid).await;
             }
+        } else {
+            // No in-memory handle (e.g. server restarted) — check DB for orphaned containers
+            if let Ok(container_ids) = state
+                .pg_store
+                .get_container_ids_by_task(&task_id.0)
+                .await
+            {
+                for cid in &container_ids {
+                    tracing::info!(task_id = %task_id.0, container_id = %cid,
+                        "Cleaning up orphaned container from DB (no in-memory handle)");
+                    if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
+                        let _ = orch.cleanup_container(cid).await;
+                    }
+                }
+            }
         }
+
+        // Always delete persistent_containers rows by task_id (covers both paths)
+        let _ = state
+            .pg_store
+            .delete_persistent_containers_by_task(&task_id.0)
+            .await;
     }
 
     // Delete from postgres synchronously (cascades to events + chat history)
@@ -1494,17 +1520,53 @@ async fn attachments_dir(state: &AppState, task_id: &str) -> PathBuf {
 pub async fn upload_attachments(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    mut multipart: Multipart,
-) -> Result<Json<Vec<AttachmentMeta>>, StatusCode> {
+    request: axum::extract::Request,
+) -> Result<Json<Vec<AttachmentMeta>>, (StatusCode, String)> {
+    // Extract multipart manually so we can log the exact rejection reason (BUG-031 fix).
+    // The bare `Multipart` extractor returns 400 with no diagnostic info on failure.
+    let content_type = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let mut multipart =
+        Multipart::from_request(request, &state)
+            .await
+            .map_err(|rejection| {
+                tracing::error!(
+                    task_id = %id,
+                    content_type = %content_type,
+                    rejection = %rejection,
+                    "Multipart extraction failed — check Content-Type header"
+                );
+                (
+                    rejection.status(),
+                    format!(
+                        "Multipart parse error: {rejection}. Content-Type was: {content_type}"
+                    ),
+                )
+            })?;
+
     let dir = attachments_dir(&state, &id).await;
     tokio::fs::create_dir_all(&dir).await.map_err(|e| {
         tracing::error!(error = %e, "Failed to create attachments dir");
-        StatusCode::INTERNAL_SERVER_ERROR
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to create attachments dir: {e}"),
+        )
     })?;
 
     let mut results = Vec::new();
 
-    while let Ok(Some(field)) = multipart.next_field().await {
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        tracing::error!(error = %e, task_id = %id, "Multipart next_field error");
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Multipart field error: {e}"),
+        )
+    })? {
         let original_name = field.file_name().unwrap_or("unnamed").to_string();
         let safe_name = sanitize_filename(&original_name);
         if safe_name.is_empty() {
@@ -1518,13 +1580,19 @@ pub async fn upload_attachments(
 
         let data = field.bytes().await.map_err(|e| {
             tracing::error!(error = %e, "Failed to read multipart field");
-            StatusCode::BAD_REQUEST
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to read field bytes: {e}"),
+            )
         })?;
 
         let file_path = dir.join(&safe_name);
         tokio::fs::write(&file_path, &data).await.map_err(|e| {
             tracing::error!(error = %e, "Failed to write attachment");
-            StatusCode::INTERNAL_SERVER_ERROR
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to write attachment: {e}"),
+            )
         })?;
 
         results.push(AttachmentMeta {

@@ -304,6 +304,9 @@ export interface DlpFindingRow {
   pattern_name: string | null;
   confidence: number | null;
   redacted_preview: string | null;
+  source_text?: string | null;
+  match_offset?: number | null;
+  match_length?: number | null;
 }
 
 export interface SecuritySummary {
@@ -319,6 +322,7 @@ export interface SecurityStatus {
   pipeline_hooks: number;
   pipeline_active: boolean;
   sidecar_healthy: boolean;
+  sidecar_status: "healthy" | "unhealthy" | "not_configured";
   sidecar_url: string;
   dlp_pattern_count: number;
 }

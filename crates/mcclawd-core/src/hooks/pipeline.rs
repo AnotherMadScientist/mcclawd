@@ -14,6 +14,12 @@ pub struct PendingFinding {
     pub pattern_name: String,
     pub confidence: f64,
     pub redacted_preview: Option<String>,
+    /// Excerpt of the source text surrounding the match (up to ~200 chars before/after).
+    pub source_text: Option<String>,
+    /// Character offset of the match start within `source_text`.
+    pub match_offset: Option<i32>,
+    /// Length of the matched text within `source_text`.
+    pub match_length: Option<i32>,
 }
 
 /// Shared mutable context threaded through the pipeline for one tool call.
@@ -293,6 +299,9 @@ mod tests {
                 pattern_name: "Test Pattern".to_string(),
                 confidence: 1.0,
                 redacted_preview: None,
+                source_text: None,
+                match_offset: None,
+                match_length: None,
             });
         }
         pipeline.set_task_context("task-new").await;

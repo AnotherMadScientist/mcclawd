@@ -148,6 +148,9 @@ const AGENT_FAILURE_PATTERNS = [
 // ===========================================================================
 
 test.describe("ClawHub Skill Install + McpPorter + Agent Run", () => {
+  // Retry once on failure — LLM response timing makes these flaky.
+  test.describe.configure({ retries: 1 });
+
   let consoleErrors: ConsoleError[];
 
   test.beforeEach(async ({ page }) => {

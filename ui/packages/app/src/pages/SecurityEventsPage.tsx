@@ -10,6 +10,8 @@ import {
   ChevronRight,
   FileSearch,
   AlertTriangle,
+  X,
+  Eye,
 } from "lucide-react";
 import { api } from "../api/client";
 import type { DlpFindingRow, SecurityEvent, TaskSecurityGroup } from "../api/types";
@@ -123,44 +125,161 @@ function ActionBadge({ action }: { action: string }) {
   );
 }
 
-function FindingsList({ findings }: { findings: DlpFindingRow[] }) {
-  if (!findings || findings.length === 0) return null;
+/** Renders highlighted source text: text before match, highlighted match, text after match. */
+function HighlightedSource({ source_text, match_offset, match_length }: {
+  source_text: string;
+  match_offset: number;
+  match_length: number;
+}) {
+  const before = source_text.slice(0, match_offset);
+  const matched = source_text.slice(match_offset, match_offset + match_length);
+  const after = source_text.slice(match_offset + match_length);
   return (
-    <div className="mt-2 space-y-2">
-      {findings.map((f, i) => (
-        <div key={i} className="bg-zinc-800/60 border border-zinc-700/60 rounded-lg p-3">
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-2 min-w-0">
-              <AlertTriangle className="w-4 h-4 text-yellow-400 flex-shrink-0" />
-              <span className="text-sm font-medium text-yellow-300">{f.tag}</span>
-              {f.finding_type && (
-                <span className="text-xs px-2 py-0.5 rounded bg-zinc-700/60 text-zinc-300 border border-zinc-600">
-                  {f.finding_type.replace(/_/g, " ")}
-                </span>
-              )}
-            </div>
-            <div className="flex items-center gap-3 flex-shrink-0">
-              {f.pattern_name && <span className="text-xs text-zinc-500">{f.pattern_name}</span>}
-              {f.confidence != null && (
-                <div className="flex items-center gap-1">
-                  <div className="w-16 h-1.5 bg-zinc-700 rounded-full overflow-hidden">
-                    <div
-                      className={`h-full rounded-full ${f.confidence >= 0.8 ? "bg-red-400" : f.confidence >= 0.5 ? "bg-yellow-400" : "bg-zinc-400"}`}
-                      style={{ width: `${Math.round(f.confidence * 100)}%` }}
-                    />
-                  </div>
-                  <span className="text-xs text-zinc-500">{Math.round(f.confidence * 100)}%</span>
-                </div>
-              )}
-            </div>
+    <span>
+      {before}
+      <mark className="bg-yellow-500/40 text-yellow-200 px-0.5 rounded">{matched}</mark>
+      {after}
+    </span>
+  );
+}
+
+/** Modal showing the full source context of a DLP finding with highlighted match. */
+function FindingContextModal({ finding, onClose }: { finding: DlpFindingRow; onClose: () => void }) {
+  const hasContext = finding.source_text && finding.match_offset != null && finding.match_length != null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div
+        className="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
+          <div className="flex items-center gap-2 min-w-0">
+            <Eye className="w-5 h-5 text-yellow-400 flex-shrink-0" />
+            <span className="text-sm font-semibold text-zinc-100">Finding Context</span>
+            {finding.pattern_name && (
+              <span className="text-xs px-2 py-0.5 rounded bg-zinc-700/60 text-zinc-300 border border-zinc-600">
+                {finding.pattern_name}
+              </span>
+            )}
           </div>
-          {f.redacted_preview && (
-            <div className="mt-2 px-3 py-2 bg-zinc-900/80 rounded border border-zinc-700/40 font-mono text-xs text-zinc-400 break-all">
-              {f.redacted_preview}
+          <button type="button" onClick={onClose} className="text-zinc-400 hover:text-zinc-100 transition-colors">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Metadata */}
+        <div className="px-5 py-3 border-b border-zinc-800 flex items-center gap-4 flex-wrap text-xs">
+          <div className="flex items-center gap-1.5">
+            <span className="text-zinc-500">Type:</span>
+            <span className="text-zinc-300">{finding.finding_type.replace(/_/g, " ")}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-zinc-500">Location:</span>
+            <span className="text-zinc-300">{finding.tag}</span>
+          </div>
+          {finding.confidence != null && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-zinc-500">Confidence:</span>
+              <span className={`font-medium ${finding.confidence >= 0.8 ? "text-red-400" : finding.confidence >= 0.5 ? "text-yellow-400" : "text-zinc-300"}`}>
+                {Math.round(finding.confidence * 100)}%
+              </span>
             </div>
           )}
         </div>
-      ))}
+
+        {/* Source text with highlight */}
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          {hasContext ? (
+            <div>
+              <div className="text-xs text-zinc-500 mb-2">Source context (match highlighted):</div>
+              <pre className="bg-zinc-950 border border-zinc-800 rounded-lg p-4 font-mono text-sm text-zinc-300 whitespace-pre-wrap break-all leading-relaxed">
+                <HighlightedSource
+                  source_text={finding.source_text!}
+                  match_offset={finding.match_offset!}
+                  match_length={finding.match_length!}
+                />
+              </pre>
+            </div>
+          ) : finding.redacted_preview ? (
+            <div>
+              <div className="text-xs text-zinc-500 mb-2">Redacted preview:</div>
+              <pre className="bg-zinc-950 border border-zinc-800 rounded-lg p-4 font-mono text-sm text-zinc-400 whitespace-pre-wrap break-all">
+                {finding.redacted_preview}
+              </pre>
+            </div>
+          ) : (
+            <div className="text-center text-zinc-500 text-sm py-8">
+              No source context available for this finding.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FindingsList({ findings }: { findings: DlpFindingRow[] }) {
+  const [selectedFinding, setSelectedFinding] = useState<DlpFindingRow | null>(null);
+
+  if (!findings || findings.length === 0) return null;
+  return (
+    <div className="mt-2 space-y-2">
+      {findings.map((f, i) => {
+        const hasContext = !!(f.source_text && f.match_offset != null && f.match_length != null);
+        return (
+          <div
+            key={i}
+            className={`bg-zinc-800/60 border border-zinc-700/60 rounded-lg p-3 ${hasContext || f.redacted_preview ? "cursor-pointer hover:border-yellow-700/60 hover:bg-zinc-800/80 transition-colors" : ""}`}
+            onClick={() => (hasContext || f.redacted_preview) && setSelectedFinding(f)}
+            role={hasContext || f.redacted_preview ? "button" : undefined}
+            tabIndex={hasContext || f.redacted_preview ? 0 : undefined}
+            onKeyDown={(e) => {
+              if ((e.key === "Enter" || e.key === " ") && (hasContext || f.redacted_preview)) {
+                e.preventDefault();
+                setSelectedFinding(f);
+              }
+            }}
+          >
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-2 min-w-0">
+                <AlertTriangle className="w-4 h-4 text-yellow-400 flex-shrink-0" />
+                <span className="text-sm font-medium text-yellow-300">{f.tag}</span>
+                {f.finding_type && (
+                  <span className="text-xs px-2 py-0.5 rounded bg-zinc-700/60 text-zinc-300 border border-zinc-600">
+                    {f.finding_type.replace(/_/g, " ")}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-3 flex-shrink-0">
+                {f.pattern_name && <span className="text-xs text-zinc-500">{f.pattern_name}</span>}
+                {f.confidence != null && (
+                  <div className="flex items-center gap-1">
+                    <div className="w-16 h-1.5 bg-zinc-700 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full ${f.confidence >= 0.8 ? "bg-red-400" : f.confidence >= 0.5 ? "bg-yellow-400" : "bg-zinc-400"}`}
+                        style={{ width: `${Math.round(f.confidence * 100)}%` }}
+                      />
+                    </div>
+                    <span className="text-xs text-zinc-500">{Math.round(f.confidence * 100)}%</span>
+                  </div>
+                )}
+                {(hasContext || f.redacted_preview) && (
+                  <Eye className="w-3.5 h-3.5 text-zinc-500" />
+                )}
+              </div>
+            </div>
+            {f.redacted_preview && (
+              <div className="mt-2 px-3 py-2 bg-zinc-900/80 rounded border border-zinc-700/40 font-mono text-xs text-zinc-400 break-all">
+                {f.redacted_preview}
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {selectedFinding && (
+        <FindingContextModal finding={selectedFinding} onClose={() => setSelectedFinding(null)} />
+      )}
     </div>
   );
 }

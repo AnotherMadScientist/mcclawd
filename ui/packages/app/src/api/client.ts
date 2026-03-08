@@ -105,6 +105,7 @@ export const api = {
         body: JSON.stringify({ message, truncate_history_to: truncateHistoryTo ?? null }),
       }),
     uploadAttachments: async (taskId: string, files: File[]) => {
+      if (!files.length) return [] as AttachmentMeta[];
       const formData = new FormData();
       for (const file of files) {
         formData.append("files", file);
@@ -118,7 +119,14 @@ export const api = {
         headers,
         body: formData,
       });
-      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        console.error(
+          `[uploadAttachments] ${res.status} ${res.statusText}`,
+          { taskId, fileCount: files.length, body },
+        );
+        throw new Error(`Upload failed: ${res.status} — ${body || res.statusText}`);
+      }
       return res.json() as Promise<AttachmentMeta[]>;
     },
     listAttachments: (taskId: string) =>

@@ -118,19 +118,25 @@ export function NewTaskPage() {
         selectedToolProfile || undefined,
       );
       if (hasFiles) {
-        // Retry upload + sendMessage up to 3 times (handles transient 503 from server restarts)
+        // Upload attachments with retry (handles transient 503 from server restarts)
         let lastErr: unknown;
+        let uploaded = false;
         for (let attempt = 0; attempt < 3; attempt++) {
           try {
-            await api.tasks.uploadAttachments(task.id, files.map((f) => f.file));
-            await api.tasks.sendMessage(task.id, prompt);
-            return task;
+            const fileObjs = files.map((f) => f.file);
+            console.log(`[NewTask] Upload attempt ${attempt + 1}/3: ${fileObjs.length} files to task ${task.id}`);
+            await api.tasks.uploadAttachments(task.id, fileObjs);
+            uploaded = true;
+            break;
           } catch (err) {
+            console.warn(`[NewTask] Upload attempt ${attempt + 1} failed:`, err);
             lastErr = err;
             if (attempt < 2) await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
           }
         }
-        throw lastErr;
+        if (!uploaded) throw lastErr;
+        // Attachments landed — now trigger the agent
+        await api.tasks.sendMessage(task.id, prompt);
       }
       return task;
     },

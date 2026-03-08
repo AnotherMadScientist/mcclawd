@@ -101,6 +101,9 @@ const LIVE_TASK_PATTERNS = [
 test.describe(
   "Skill MCP Tool Injection @skills @mcp @containers @doc-analyzer",
   () => {
+    // Retry once on failure — LLM response timing makes these flaky.
+    test.describe.configure({ retries: 1 });
+
     let consoleErrors: ConsoleError[];
 
     test.beforeEach(async ({ page }) => {

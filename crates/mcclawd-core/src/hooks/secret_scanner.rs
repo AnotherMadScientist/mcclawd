@@ -100,6 +100,9 @@ impl SecretScannerHook {
                     pattern_name: "Shannon Entropy".to_string(),
                     confidence: (*entropy / 8.0).min(1.0), // normalise to [0,1]
                     redacted_preview: Some(preview.clone()),
+                    source_text: None,
+                    match_offset: None,
+                    match_length: None,
                 });
             }
             ctx.elevate_threat("suspicious");

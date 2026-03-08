@@ -305,8 +305,8 @@ impl AuditSink for PgAuditSink {
                 for finding in &findings {
                     if let Err(e) = sqlx::query(
                         "INSERT INTO dlp_findings \
-                         (security_event_id, finding_type, tag, pattern_name, confidence, redacted_preview) \
-                         VALUES ($1, $2, $3, $4, $5, $6)",
+                         (security_event_id, finding_type, tag, pattern_name, confidence, redacted_preview, source_text, match_offset, match_length) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                     )
                     .bind(event_id)
                     .bind(&finding.finding_type)
@@ -314,6 +314,9 @@ impl AuditSink for PgAuditSink {
                     .bind(&finding.pattern_name)
                     .bind(finding.confidence as f32)
                     .bind(finding.redacted_preview.as_deref())
+                    .bind(finding.source_text.as_deref())
+                    .bind(finding.match_offset)
+                    .bind(finding.match_length)
                     .execute(&pool)
                     .await
                     {
@@ -424,6 +427,9 @@ mod tests {
                 pattern_name: "Credit Card Number".to_string(),
                 confidence: 1.0,
                 redacted_preview: None,
+                source_text: None,
+                match_offset: None,
+                match_length: None,
             });
         }
 

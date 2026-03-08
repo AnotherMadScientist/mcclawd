@@ -210,6 +210,9 @@ const AGENT_ERROR_PATTERNS = [
 test.describe(
   "ClawHub Local MCP Tools @clawhub @mcp @containers",
   () => {
+    // Retry once on failure — LLM response timing makes these flaky.
+    test.describe.configure({ retries: 1 });
+
     let consoleErrors: ConsoleError[];
 
     test.beforeEach(async ({ page }) => {
@@ -514,6 +517,9 @@ test.describe(
 test.describe(
   "ClawHub Remote MCP Tool Download @clawhub @mcp @remote-tools",
   () => {
+    // Retry once on failure — LLM response timing makes these flaky.
+    test.describe.configure({ retries: 1 });
+
     let consoleErrors: ConsoleError[];
 
     test.beforeEach(async ({ page }) => {

@@ -59,16 +59,17 @@ services:
       - "127.0.0.1:8082:8082"
     read_only: true
     tmpfs:
-      - /tmp:size=64M
+      - /tmp:size=128M
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8082/health')"]
       interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
     networks:
       - mcclawd-net

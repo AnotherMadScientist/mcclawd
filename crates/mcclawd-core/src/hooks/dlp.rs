@@ -886,49 +886,71 @@ impl DlpHook {
         self
     }
 
-    /// Scan text against all configured patterns. Returns matched (name, action) pairs.
-    fn scan<'a>(&'a self, text: &str) -> Vec<(String, &'a DlpAction)> {
+    /// Scan text against all configured patterns.
+    /// Returns matched (name, action, match_start, match_end) tuples.
+    fn scan<'a>(&'a self, text: &str) -> Vec<(String, &'a DlpAction, usize, usize)> {
         self.config
             .patterns
             .iter()
             .filter_map(|p| {
-                if p.regex.is_match(text) {
-                    Some((p.name.clone(), &p.action))
-                } else {
-                    None
-                }
+                p.regex.find(text).map(|m| {
+                    (p.name.clone(), &p.action, m.start(), m.end())
+                })
             })
             .collect()
+    }
+
+    /// Extract a source excerpt (~200 chars before/after the match) and compute
+    /// the offset of the match within that excerpt.
+    fn extract_source_context(
+        text: &str,
+        match_start: usize,
+        match_end: usize,
+    ) -> (String, i32, i32) {
+        let context_radius = 200;
+        let excerpt_start = match_start.saturating_sub(context_radius);
+        // Clamp excerpt_end to text length
+        let excerpt_end = std::cmp::min(match_end.saturating_add(context_radius), text.len());
+        let excerpt = &text[excerpt_start..excerpt_end];
+        let offset_in_excerpt = (match_start - excerpt_start) as i32;
+        let match_len = (match_end - match_start) as i32;
+        (excerpt.to_string(), offset_in_excerpt, match_len)
     }
 
     /// Process scan results: push findings to shared context, log, return error for Block actions.
     async fn process_matches(
         &self,
-        matches: &[(String, &DlpAction)],
+        matches: &[(String, &DlpAction, usize, usize)],
         context_label: &str,
+        source_text: &str,
     ) -> crate::Result<()> {
         let mut blocked_by: Option<String> = None;
 
         // Push all findings into shared context if available.
         if let Some(ctx) = &self.context {
             let mut guard = ctx.write().await;
-            for (name, action) in matches {
+            for (name, action, match_start, match_end) in matches {
                 let confidence = match action {
                     DlpAction::Block => 1.0,
                     DlpAction::Warn => 0.7,
                     DlpAction::Redact => 0.5,
                 };
+                let (excerpt, offset, length) =
+                    Self::extract_source_context(source_text, *match_start, *match_end);
                 guard.findings.push(PendingFinding {
                     finding_type: "dlp_match".to_string(),
                     tag: context_label.to_string(),
                     pattern_name: name.clone(),
                     confidence,
                     redacted_preview: None,
+                    source_text: Some(excerpt),
+                    match_offset: Some(offset),
+                    match_length: Some(length),
                 });
             }
         }
 
-        for (name, action) in matches {
+        for (name, action, _, _) in matches {
             match action {
                 DlpAction::Block => {
                     tracing::error!(
@@ -987,7 +1009,8 @@ impl SecurityHook for DlpHook {
         let matches = self.scan(&text);
         if !matches.is_empty() {
             let context_label = format!("tool '{}' args", tool_name);
-            self.process_matches(&matches, &context_label).await?;
+            self.process_matches(&matches, &context_label, &text)
+                .await?;
         }
         Ok(())
     }
@@ -1001,7 +1024,8 @@ impl SecurityHook for DlpHook {
         let matches = self.scan(&text);
         if !matches.is_empty() {
             let context_label = format!("tool '{}' result", tool_name);
-            self.process_matches(&matches, &context_label).await?;
+            self.process_matches(&matches, &context_label, &text)
+                .await?;
         }
         Ok(())
     }

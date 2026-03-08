@@ -125,7 +125,7 @@ pub async fn get_status(
     let pipeline_active = pipeline_hooks > 0;
 
     // Check sidecar health (2s timeout, fail gracefully).
-    let sidecar_healthy = check_sidecar_health().await;
+    let sidecar_status = check_sidecar_health().await;
 
     let dlp_pattern_count = mcclawd_core::hooks::DlpHook::with_defaults().pattern_count();
 
@@ -134,7 +134,8 @@ pub async fn get_status(
         Json(serde_json::json!({
             "pipeline_hooks": pipeline_hooks,
             "pipeline_active": pipeline_active,
-            "sidecar_healthy": sidecar_healthy,
+            "sidecar_healthy": sidecar_status == "healthy",
+            "sidecar_status": sidecar_status,
             "sidecar_url": "http://localhost:8082",
             "dlp_pattern_count": dlp_pattern_count,
         })),
@@ -142,18 +143,19 @@ pub async fn get_status(
 }
 
 /// Check security sidecar health with a 2-second timeout.
-async fn check_sidecar_health() -> bool {
+/// Returns a status string: "healthy", "unhealthy", or "not_configured".
+async fn check_sidecar_health() -> &'static str {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .unwrap_or_default();
 
-    client
-        .get("http://localhost:8082/health")
-        .send()
-        .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
+    match client.get("http://localhost:8082/health").send().await {
+        Ok(r) if r.status().is_success() => "healthy",
+        Ok(_) => "unhealthy",
+        // Connection refused / timeout → sidecar not running
+        Err(_) => "not_configured",
+    }
 }
 
 /// GET /api/security/policies — list all DLP policies.

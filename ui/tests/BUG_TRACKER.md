@@ -6,8 +6,8 @@
 
 | Severity | Open | Fixed | Won't Fix |
 |----------|------|-------|-----------|
-| Critical | 1 | 4 | 0 |
-| Major | 3 | 29 | 0 |
+| Critical | 0 | 5 | 0 |
+| Major | 1 | 31 | 0 |
 | Minor | 0 | 8 | 0 |
 
 ## Bugs
@@ -613,39 +613,38 @@
 
 ### BUG-030: Container orphaned when task is deleted
 - **Severity:** Major
-- **Status:** Open
+- **Status:** fixed
+- **Fixed:** 2026-03-08
 - **Found:** 2026-03-07
 - **Description:** Deleting a task via `DELETE /api/tasks/{id}` does NOT stop/remove the associated Docker container. The container keeps running, consuming resources. The `delete_task()` handler should also clean up the container (stop + remove via `SandboxOrchestrator::cleanup_container()`) and remove it from `task_containers` map.
-- **Steps to Reproduce:**
-  1. Create a task that runs in a container
-  2. Delete the task via UI or API
-  3. Run `docker ps` — container is still running
+- **Fix:** Both `delete_task()` and `delete_all_tasks()` now clean up Docker containers on delete. When an in-memory `PersistentHandle` exists, it is shut down and the container is removed. When no in-memory handle exists (e.g. after server restart), a new `get_container_ids_by_task()` DB lookup finds orphaned container IDs and cleans them up via `SandboxOrchestrator::cleanup_container()`. The `persistent_containers` DB rows are always deleted by task_id.
 - **Files:**
-  - `crates/mcclawd-api/src/server/tasks.rs` — `delete_task()` handler
-  - `crates/mcclawd-api/src/sandbox/container.rs` — `cleanup_container()`
-  - `crates/mcclawd-api/src/server/state.rs` — `task_containers` map
+  - `crates/mcclawd-api/src/server/tasks.rs` — `delete_task()` and `delete_all_tasks()` handlers
+  - `crates/mcclawd-api/src/server/pg_store.rs` — new `get_container_ids_by_task()` method
 - **Suggested test file:** docker-isolation.spec.ts
 
 ### BUG-031: Doc upload on new task returns 400 Bad Request — task never runs
 - **Severity:** Critical
-- **Status:** Open
+- **Status:** fixed
+- **Fixed:** 2026-03-08
 - **Found:** 2026-03-07
 - **Description:** Creating a new task with a document attachment fails. `POST /api/tasks/{id}/attachments` returns 400 Bad Request repeatedly. The task is created (delay_start=true) but the attachment upload never succeeds, so the task never starts. Multiple retries all fail with 400. Occasionally a 503 is returned too. The WebSocket also disconnects early ("closed before connection established").
 - **Error:** `POST /api/tasks/{id}/attachments 400 (Bad Request)` — seen at `client.ts:109`, called from `NewTaskPage.tsx:122`
-- **Steps to Reproduce:**
-  1. Go to /tasks/new
-  2. Attach any file (txt, pdf, etc.)
-  3. Type a prompt and click "Run Task"
-  4. Observe 400 errors in console — task stays stuck
-- **Root Cause Investigation:**
-  - Check `upload_attachments()` in tasks.rs — what returns 400?
-  - Likely multipart parsing issue or missing content-type boundary
-  - The `delay_start: true` path creates the task first, then uploads — check if task ID is valid at upload time
-  - React-query retry logic fires repeatedly, causing multiple 400s
+- **Root Cause:** Build was broken due to missing fields (`source_text`, `match_offset`, `match_length`) on `PendingFinding` struct in 3 call sites (agent_guard.rs, secret_scanner.rs) and missing 3rd arg to `process_matches()` in dlp.rs. Stale binary was running. The bare `Multipart` extractor returned opaque 400 with no diagnostic info. Fixed compilation errors, rewrote upload handler to use manual `Multipart::from_request()` with full error logging (Content-Type, rejection reason), improved frontend error reporting, and separated upload retry from sendMessage.
+- **Fix:**
+  - `agent_guard.rs`: Added missing `source_text`, `match_offset`, `match_length` fields to PendingFinding
+  - `secret_scanner.rs`: Added missing `source_text`, `match_offset`, `match_length` fields to PendingFinding
+  - `dlp.rs`: Added missing `source_text` arg to `process_matches()` calls in before/after_tool_call
+  - `tasks.rs`: Replaced bare `Multipart` extractor with `Multipart::from_request()` + detailed error logging
+  - `client.ts`: Added response body parsing to upload errors + early return for empty files
+  - `NewTaskPage.tsx`: Separated upload retry from sendMessage, added per-attempt logging
 - **Files:**
+  - `crates/mcclawd-core/src/hooks/agent_guard.rs`
+  - `crates/mcclawd-core/src/hooks/secret_scanner.rs`
+  - `crates/mcclawd-core/src/hooks/dlp.rs`
   - `crates/mcclawd-api/src/server/tasks.rs` — `upload_attachments()` handler
-  - `ui/packages/app/src/pages/NewTaskPage.tsx:122` — upload mutation
-  - `ui/packages/app/src/api/client.ts:109` — `uploadAttachments()` fetch call
+  - `ui/packages/app/src/api/client.ts` — `uploadAttachments()` fetch call
+  - `ui/packages/app/src/pages/NewTaskPage.tsx` — upload mutation
 - **Suggested test file:** doc-upload-analyze.spec.ts
 
 ### BUG-032: Hold-to-talk not working with ElevenLabs mic
@@ -846,7 +845,8 @@
 
 ### BUG-044: Finding context missing — can't click finding to see source with highlight
 - **Severity:** Major
-- **Status:** Open
+- **Status:** fixed
+- **Fixed:** 2026-03-08
 - **Found:** 2026-03-08
 - **Page:** /config/security (Audit Log findings)
 - **Description:** User wants to click on a DLP finding to see the source document/prompt/JSON with the match highlighted so they can see the context. Currently findings show only tag, pattern name, confidence, and redacted preview — no source context. Requires: (1) DB columns for source_text, match_offset, match_length on dlp_findings, (2) DlpHook captures source excerpt around match, (3) Frontend modal showing source with highlighted match.
@@ -859,14 +859,17 @@
 
 ### BUG-045: Security sidecar shows unhealthy on :8082
 - **Severity:** Major
-- **Status:** Open
+- **Status:** fixed
+- **Fixed:** 2026-03-08
 - **Found:** 2026-03-08
 - **Page:** /config/security (status bar)
 - **Description:** The security sidecar health check (`GET http://localhost:8082/health`) always fails. The sidecar container restarts but health check never passes. Need to investigate docker logs and entrypoint.py. The sidecar may not be running or its health endpoint may be misconfigured.
+- **Root cause:** `presidio-analyzer` defaults to `en_core_web_lg` spacy model (400MB) which fails to download at runtime with "No space left on device" in the read-only slim container. The container crash-loops and never serves `/health`.
+- **Fix:** Explicitly configure presidio to use `en_core_web_sm` (12MB) via `NlpEngineProvider` in `entrypoint.py`. Updated Dockerfile with build-time model validation. Switched docker-compose healthcheck from `curl` to `python urllib` (always available). Increased tmpfs to 128M, added `start_period: 30s` and `retries: 5`.
 - **Files:**
-  - `docker/agentguard/entrypoint.py` — health endpoint
-  - `docker-compose.yml` — sidecar service config
-  - `crates/mcclawd-api/src/server/security.rs` — `check_sidecar_health()`
+  - `docker/security-sidecar/entrypoint.py` — presidio NLP engine config
+  - `docker/security-sidecar/Dockerfile` — spacy model validation at build time
+  - `docker-compose.yml` — healthcheck, tmpfs, start_period
 
 ### BUG-046: Findings layout cramped — should use full width with data type and location
 - **Severity:** Major
