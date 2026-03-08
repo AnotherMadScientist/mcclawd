@@ -51,10 +51,19 @@ struct SnykIssue {
     description: String,
 }
 
-/// Scan a skill directory using snyk-agent-scan.
+/// Scan a skill directory using the security sidecar, snyk-agent-scan, or local analysis.
 ///
-/// If the scanner is not installed, returns `ScanStatus::NotScanned`.
+/// Priority: sidecar → snyk-agent-scan → basic_scan.
 pub async fn scan_skill(skill_path: &Path) -> anyhow::Result<ScanResult> {
+    // Try sidecar first (if running)
+    let skill_md = skill_path.join("SKILL.md");
+    if let Ok(content) = tokio::fs::read_to_string(&skill_md).await {
+        match scan_via_sidecar(&content, skill_path).await {
+            Ok(result) => return Ok(result),
+            Err(e) => tracing::debug!("Sidecar unavailable ({e}), trying snyk-agent-scan"),
+        }
+    }
+
     // Check if uvx is available
     let uvx_check = Command::new("which").arg("uvx").output().await;
     if uvx_check.is_err() || !uvx_check.unwrap().status.success() {
@@ -135,9 +144,64 @@ pub async fn scan_skill(skill_path: &Path) -> anyhow::Result<ScanResult> {
     Ok(ScanResult { status, issues })
 }
 
+/// Call the security sidecar's /scan/skill endpoint.
+async fn scan_via_sidecar(content: &str, skill_path: &Path) -> anyhow::Result<ScanResult> {
+    let skill_name = skill_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let sidecar_url = std::env::var("MCCLAWD_SIDECAR_URL")
+        .unwrap_or_else(|_| "http://localhost:8082".to_string());
+
+    let resp = client
+        .post(format!("{sidecar_url}/scan/skill"))
+        .json(&serde_json::json!({
+            "content": content,
+            "skill_name": skill_name,
+        }))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("Sidecar returned {}", resp.status());
+    }
+
+    let body: serde_json::Value = resp.json().await?;
+
+    // Map sidecar response to ScanResult
+    let status = match body["status"].as_str().unwrap_or("not_scanned") {
+        "clean" => ScanStatus::Pass,
+        "warning" => ScanStatus::Warning,
+        "critical" => ScanStatus::Critical,
+        _ => ScanStatus::NotScanned,
+    };
+
+    let issues = body["issues"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|i| {
+                    Some(ScanIssue {
+                        code: i["code"].as_str()?.to_string(),
+                        severity: i["severity"].as_str()?.to_string(),
+                        description: i["description"].as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(ScanResult { status, issues })
+}
+
 /// Basic static analysis fallback when uvx/snyk-agent-scan is not available.
 /// Reads SKILL.md and checks for common security-sensitive patterns.
-async fn basic_scan(skill_path: &Path) -> anyhow::Result<ScanResult> {
+pub async fn basic_scan(skill_path: &Path) -> anyhow::Result<ScanResult> {
     let skill_md = skill_path.join("SKILL.md");
     let content = match tokio::fs::read_to_string(&skill_md).await {
         Ok(c) => c.to_lowercase(),

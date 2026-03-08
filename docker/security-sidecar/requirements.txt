@@ -7,3 +7,4 @@ invariant-ai>=0.5
 pydantic>=2.0
 pyyaml>=6.0
 spacy>=3.7
+vt-py>=0.18

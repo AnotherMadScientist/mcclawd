@@ -302,6 +302,112 @@ async def health():
     )
 
 
+# ─── Skill scan models & endpoint ─────────────────────────────────
+class SkillScanIssue(BaseModel):
+    code: str
+    severity: str  # "critical", "high", "medium", "low", "info"
+    description: str
+
+
+class SkillScanRequest(BaseModel):
+    content: str  # Full SKILL.md text
+    skill_name: str = "unknown"
+
+
+class SkillScanResponse(BaseModel):
+    status: str  # "clean", "warning", "critical", "not_scanned"
+    issues: list[SkillScanIssue] = []
+    vt_verdict: Optional[str] = None  # "benign", "suspicious", "malicious", None
+    vt_code_insight: Optional[str] = None
+
+
+# Skill-specific dangerous patterns
+SKILL_PATTERNS = [
+    ("shell_exec", "subprocess.run or os.system call", r"(subprocess\.|os\.system|os\.popen|exec\(|eval\()"),
+    ("network_access", "Network access attempt", r"(requests\.|urllib\.|httpx\.|aiohttp\.|curl |wget )"),
+    ("file_write", "File write operation", r"(open\(.+['\"]w|write\(|shutil\.|os\.remove|os\.unlink)"),
+    ("env_access", "Environment variable access", r"(os\.environ|os\.getenv|env\[)"),
+]
+compiled_skill_patterns = [
+    (re.compile(p, re.IGNORECASE), code, desc)
+    for code, desc, p in SKILL_PATTERNS
+]
+
+
+@app.post("/scan/skill", response_model=SkillScanResponse)
+async def scan_skill(req: SkillScanRequest):
+    issues: list[SkillScanIssue] = []
+
+    # 1. Reuse existing detectors on the skill content
+    local_detections = scan_injection(req.content) + scan_secrets_extra(req.content)
+    for d in local_detections:
+        issues.append(SkillScanIssue(
+            code=d.tag,
+            severity="high" if d.confidence > 0.8 else "medium",
+            description=f"{d.detector}: {d.pattern_name}",
+        ))
+
+    # 2. Skill-specific pattern checks
+    for regex, code, desc in compiled_skill_patterns:
+        if regex.search(req.content):
+            issues.append(SkillScanIssue(code=code, severity="medium", description=desc))
+
+    # 3. VirusTotal analysis (optional — requires VIRUSTOTAL_API_KEY)
+    vt_verdict: Optional[str] = None
+    vt_code_insight: Optional[str] = None
+    vt_api_key = os.environ.get("VIRUSTOTAL_API_KEY")
+
+    if vt_api_key:
+        try:
+            import vt
+            content_hash = hashlib.sha256(req.content.encode()).hexdigest()
+
+            async with vt.Client(vt_api_key) as client:
+                try:
+                    file_report = await client.get_object_async(f"/files/{content_hash}")
+                    stats = file_report.last_analysis_stats
+                    if stats.get("malicious", 0) > 0:
+                        vt_verdict = "malicious"
+                    elif stats.get("suspicious", 0) > 0:
+                        vt_verdict = "suspicious"
+                    else:
+                        vt_verdict = "benign"
+
+                    # Get Code Insight if available
+                    if hasattr(file_report, "crowdsourced_ai_results"):
+                        for result in file_report.crowdsourced_ai_results:
+                            if result.get("source") == "Code Insight":
+                                vt_code_insight = result.get("analysis", "")
+                                break
+                except vt.error.APIError as e:
+                    if e.code == "NotFoundError":
+                        vt_verdict = None  # Not yet analyzed — skip
+                    else:
+                        raise
+        except ImportError:
+            pass  # vt-py not installed
+        except Exception as e:
+            import logging
+            logging.warning(f"VT scan failed for {req.skill_name}: {e}")
+
+    # 4. Determine overall status
+    if vt_verdict == "malicious" or any(i.severity == "critical" for i in issues):
+        status = "critical"
+    elif vt_verdict == "suspicious" or any(i.severity == "high" for i in issues):
+        status = "warning"
+    elif issues:
+        status = "warning"
+    else:
+        status = "clean"
+
+    return SkillScanResponse(
+        status=status,
+        issues=issues,
+        vt_verdict=vt_verdict,
+        vt_code_insight=vt_code_insight,
+    )
+
+
 @app.get("/detectors")
 async def list_detectors():
     return {
