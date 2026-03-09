@@ -397,7 +397,7 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
     match pg_store.list_tasks().await {
         Ok(rows) => {
             let mut mgr = state.tasks.write().await;
-            for (id, prompt, status, error_message, tags) in rows {
+            for (id, prompt, status, error_message, tags, selected_skills, allowed_tools, tool_profile) in rows {
                 let task_status = match status.as_str() {
                     "Running" | "Building" => {
                         mcclawd_tasks::manager::TaskStatus::Failed(
@@ -411,6 +411,9 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
                     prompt,
                     task_status,
                     tags,
+                    selected_skills,
+                    allowed_tools,
+                    tool_profile,
                 );
             }
             let count = mgr.all_tasks().len();
@@ -705,7 +708,7 @@ async fn reconcile_containers_and_tasks(state: AppState, pg_store: PgTaskStore) 
 
     // 2. Load active tasks from postgres
     let active_task_ids: std::collections::HashSet<String> = match pg_store.list_tasks().await {
-        Ok(rows) => rows.into_iter().map(|(id, _, _, _, _)| id).collect(),
+        Ok(rows) => rows.into_iter().map(|(id, _, _, _, _, _, _, _)| id).collect(),
         Err(e) => {
             tracing::warn!(error = %e, "Failed to load tasks for reconciliation");
             return;
@@ -1071,7 +1074,7 @@ async fn container_gc_loop(state: AppState) {
             .collect();
 
         if let Ok(rows) = state.pg_store.list_tasks().await {
-            for (task_id, _, status, _, _) in &rows {
+            for (task_id, _, status, _, _, _, _, _) in &rows {
                 // Skip system agent
                 if task_id == "system-agent" || task_id == "__system__" {
                     continue;
