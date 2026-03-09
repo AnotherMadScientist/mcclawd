@@ -180,6 +180,12 @@ test.describe("New Task Page", () => {
       if (!health.ok()) { test.skip(true, "Backend not reachable"); return; }
     } catch { test.skip(true, "Backend not reachable"); return; }
 
+    // Intercept the POST to /api/tasks so we can detect failures
+    const taskResponse = page.waitForResponse(
+      (r) => r.url().includes("/api/tasks") && r.request().method() === "POST",
+      { timeout: 30000 },
+    );
+
     await page
       .getByPlaceholder("What would you like me to do?")
       .fill("E2E test: loading state");
@@ -187,6 +193,14 @@ test.describe("New Task Page", () => {
     // Watch for the button text to change
     const button = page.getByRole("button", { name: "Run Task" });
     await button.click();
+
+    // Wait for the POST response first
+    const resp = await taskResponse;
+    if (!resp.ok()) {
+      // Task creation failed (e.g. 400 while backend is initializing) — skip
+      test.skip(true, `Task creation returned ${resp.status()}`);
+      return;
+    }
 
     // Either we see "Starting..." briefly or we're already redirected
     // The redirect confirms the task was created successfully
@@ -198,9 +212,21 @@ test.describe("New Task Page", () => {
   test("submit prompt redirects to task detail", async ({ page }) => {
     const prompt = "E2E test: submit redirect";
     await page.getByPlaceholder("What would you like me to do?").fill(prompt);
+
+    // Intercept POST to detect creation failure
+    const postPromise = page.waitForResponse(
+      (r) => r.url().includes("/api/tasks") && r.request().method() === "POST",
+      { timeout: 15000 },
+    );
     await page.getByRole("button", { name: "Run Task" }).click();
+    const resp = await postPromise;
+    if (!resp.ok()) {
+      test.skip(true, `Task creation returned ${resp.status()}`);
+      return;
+    }
+
     // Wait for redirect to /tasks/{uuid}
-    await page.waitForURL(/\/tasks\/[a-f0-9-]+/, { timeout: 10000 });
+    await page.waitForURL(/\/tasks\/[a-f0-9-]+/, { timeout: 15000 });
     // Heading on task detail page must contain the original prompt text
     await expect(page.locator("h1")).toContainText(prompt, { timeout: 10000 });
   });

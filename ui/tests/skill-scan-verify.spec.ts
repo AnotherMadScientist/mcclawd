@@ -373,17 +373,20 @@ test.describe("Skill Scan Preview & SecurityBadge @skills @scan", () => {
   // 8. Scan result states have correct visual indicators
   // ---------------------------------------------------------------------------
   test("scan result states reflected in badge icon types", async ({ page }) => {
-    test.setTimeout(20_000);
+    // Use a generous timeout — preview-scan may download from ClawHub on cache miss
+    test.setTimeout(45_000);
 
     await page.goto("/config/skills");
     await page.waitForLoadState("domcontentloaded");
 
     const token = await getToken(page);
 
+    const validStatuses = ["Pass", "Warning", "Critical", "NotScanned"];
+
     // Test that the preview-scan API can return each status type
     // by checking against both installed and non-existent skills.
 
-    // Non-existent skill → NotScanned
+    // 1. Non-existent skill should return 200 with status "NotScanned"
     const notScannedResp = await page.request.post(
       "/api/skills/definitely-not-a-real-skill-xyz/preview-scan",
       {
@@ -397,39 +400,57 @@ test.describe("Skill Scan Preview & SecurityBadge @skills @scan", () => {
     const notScannedBody = await notScannedResp.json();
     expect(notScannedBody.status).toBe("NotScanned");
 
-    // Get installed skills and verify scan produces a valid status
+    // 2. Installed skills should produce a valid status via preview-scan
     const listResp = await page.request.get("/api/skills", {
       headers: { Authorization: `Bearer ${token}` },
     });
 
-    if (listResp.ok()) {
-      const installed = await listResp.json();
-      const skills = Array.isArray(installed)
-        ? installed
-        : Object.values(installed);
-
-      if (skills.length > 0) {
-        const skill = skills[0] as { name: string };
-        const fullScanResp = await page.request.get(
-          `/api/skills/${skill.name}/scan`,
-          {
-            headers: { Authorization: `Bearer ${token}` },
-          },
-        );
-
-        if (fullScanResp.ok()) {
-          const body = await fullScanResp.json();
-          const validStatuses = ["Pass", "Warning", "Critical", "NotScanned"];
-          expect(validStatuses).toContain(body.status);
-
-          // If Pass → ShieldCheck, Warning → Shield, Critical → ShieldAlert
-          // Just verify the status is valid; visual class checking requires
-          // matching rendered DOM which changes with Tailwind purging.
-          console.info(
-            `Installed skill '${skill.name}' scan status: ${body.status}`,
-          );
-        }
-      }
+    // /api/skills may fail if managed_dir is missing — acceptable in CI
+    if (!listResp.ok()) {
+      console.info(
+        `Skipping installed skill scan — /api/skills returned ${listResp.status()}`,
+      );
+      return;
     }
+
+    const installed = await listResp.json();
+    const skills = Array.isArray(installed)
+      ? installed
+      : Object.values(installed);
+
+    if (skills.length === 0) {
+      console.info("No installed skills — only NotScanned verified");
+      return;
+    }
+
+    // Use preview-scan (fast, no VT) instead of full scan to avoid ClawHub timeouts
+    const skill = skills[0] as { name: string };
+    const scanResp = await page.request.post(
+      `/api/skills/${skill.name}/preview-scan`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+
+    // preview-scan always returns 200 (NotScanned on failure)
+    expect(
+      scanResp.status(),
+      `preview-scan for '${skill.name}' returned ${scanResp.status()}`,
+    ).toBe(200);
+    const body = await scanResp.json();
+    expect(
+      validStatuses,
+      `Unexpected status '${body.status}' for skill '${skill.name}'`,
+    ).toContain(body.status);
+
+    // If Pass -> ShieldCheck, Warning -> Shield, Critical -> ShieldAlert
+    // Just verify the status is valid; visual class checking requires
+    // matching rendered DOM which changes with Tailwind purging.
+    console.info(
+      `Installed skill '${skill.name}' scan status: ${body.status}`,
+    );
   });
 });

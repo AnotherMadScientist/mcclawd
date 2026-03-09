@@ -91,12 +91,18 @@ test.describe("Workspace Page", () => {
   });
 
   test("switching tabs loads different file content", async ({ page }) => {
-    // Save unique content to SOUL.md
+    // Save unique content to SOUL.md and wait for the API response
     const textarea = page.locator("textarea");
     const soulContent = `# Soul ${Date.now()}`;
     await textarea.fill(soulContent);
+    const savePromise = page.waitForResponse(
+      (res) =>
+        res.url().includes("/api/workspace") &&
+        res.request().method() !== "GET",
+      { timeout: 10000 },
+    );
     await page.getByRole("button", { name: "Save" }).click();
-    await page.waitForTimeout(300);
+    await savePromise;
 
     // Switch to AGENTS.md
     await page.getByRole("button", { name: "AGENTS.md" }).click();
