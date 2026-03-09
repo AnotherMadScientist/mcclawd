@@ -269,10 +269,6 @@ export const api = {
     clearHistory: () =>
       apiFetch<void>("/api/system-agent/history", { method: "DELETE" }),
   },
-  elevenlabs: {
-    signedUrl: () =>
-      apiFetch<{ ok: boolean; signed_url?: string; error?: string }>("/api/elevenlabs/signed-url"),
-  },
   docker: {
     buildStatus: () => apiFetch<DockerBuildStatus>("/api/docker/build-status"),
     triggerBuild: () => apiFetch<{ status: string }>("/api/docker/build", { method: "POST" }),
