@@ -23,6 +23,15 @@ pub struct TaskRecord {
     pub status: TaskStatus,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Skills selected for this task (e.g. ["filesystem", "web-search"]).
+    #[serde(default)]
+    pub selected_skills: Vec<String>,
+    /// Tool names explicitly allowed for this task.
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    /// Tool profile used for this task (e.g. "Coding", "Research").
+    #[serde(default)]
+    pub tool_profile: Option<String>,
 }
 
 /// Task manager with history.
@@ -48,6 +57,9 @@ impl TaskManager {
             prompt,
             status: TaskStatus::Running,
             tags,
+            selected_skills: Vec::new(),
+            allowed_tools: Vec::new(),
+            tool_profile: None,
         });
         id
     }
@@ -63,6 +75,9 @@ impl TaskManager {
             prompt,
             status: TaskStatus::Pending,
             tags,
+            selected_skills: Vec::new(),
+            allowed_tools: Vec::new(),
+            tool_profile: None,
         });
         id
     }
@@ -145,15 +160,40 @@ impl TaskManager {
         if self.tasks.iter().any(|t| t.id == id) {
             return;
         }
-        self.tasks.push(TaskRecord { id, prompt, status, tags: Vec::new() });
+        self.tasks.push(TaskRecord {
+            id,
+            prompt,
+            status,
+            tags: Vec::new(),
+            selected_skills: Vec::new(),
+            allowed_tools: Vec::new(),
+            tool_profile: None,
+        });
     }
 
-    /// Hydrate a task from DB with full metadata including tags.
-    pub fn hydrate_task(&mut self, id: TaskId, prompt: String, status: TaskStatus, tags: Vec<String>) {
+    /// Hydrate a task from DB with full metadata including tags, skills, and tools.
+    pub fn hydrate_task(
+        &mut self,
+        id: TaskId,
+        prompt: String,
+        status: TaskStatus,
+        tags: Vec<String>,
+        selected_skills: Vec<String>,
+        allowed_tools: Vec<String>,
+        tool_profile: Option<String>,
+    ) {
         if self.tasks.iter().any(|t| t.id == id) {
             return;
         }
-        self.tasks.push(TaskRecord { id, prompt, status, tags });
+        self.tasks.push(TaskRecord {
+            id,
+            prompt,
+            status,
+            tags,
+            selected_skills,
+            allowed_tools,
+            tool_profile,
+        });
     }
 }
 

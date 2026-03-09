@@ -73,6 +73,15 @@ pub struct TaskResponse {
     pub status: TaskStatus,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Skills selected for this task.
+    #[serde(default)]
+    pub selected_skills: Vec<String>,
+    /// Tool names explicitly allowed for this task.
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    /// Tool profile used (e.g. "Coding", "Research", "Full", "Minimal").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_profile: Option<String>,
 }
 
 impl From<&TaskRecord> for TaskResponse {
@@ -82,6 +91,9 @@ impl From<&TaskRecord> for TaskResponse {
             prompt: r.prompt.clone(),
             status: r.status.clone(),
             tags: r.tags.clone(),
+            selected_skills: r.selected_skills.clone(),
+            allowed_tools: r.allowed_tools.clone(),
+            tool_profile: r.tool_profile.clone(),
         }
     }
 }
@@ -93,7 +105,7 @@ pub async fn list_tasks(State(state): State<AppState>) -> Json<Vec<TaskResponse>
 
     // DB is source of truth
     if let Ok(rows) = state.pg_store.list_tasks().await {
-        for (id, prompt, status, error_message, tags) in rows {
+        for (id, prompt, status, error_message, tags, selected_skills, allowed_tools, tool_profile) in rows {
             // Never expose the system agent as a user-visible task
             if id == "__system__" || id == "system-agent" {
                 continue;
@@ -109,7 +121,15 @@ pub async fn list_tasks(State(state): State<AppState>) -> Json<Vec<TaskResponse>
                 ),
                 _ => TaskStatus::Failed(format!("Unknown status: {status}")),
             };
-            tasks.push(TaskResponse { id, prompt, status: task_status, tags });
+            tasks.push(TaskResponse {
+                id: id.clone(),
+                prompt,
+                status: task_status,
+                tags,
+                selected_skills,
+                allowed_tools,
+                tool_profile,
+            });
         }
     }
 
@@ -152,6 +172,9 @@ pub async fn create_task(
                 prompt,
                 status: TaskStatus::Failed(format!("Blocked: {reason}")),
                 tags: Vec::new(),
+                selected_skills: Vec::new(),
+                allowed_tools: Vec::new(),
+                tool_profile: None,
             }),
         );
     }
@@ -188,6 +211,9 @@ pub async fn create_task(
                         prompt,
                         status: TaskStatus::Failed("Task creation failed".to_string()),
                         tags: Vec::new(),
+                        selected_skills: Vec::new(),
+                        allowed_tools: Vec::new(),
+                        tool_profile: None,
                     }),
                 );
             }
@@ -521,6 +547,64 @@ async fn run_agent_sandboxed(
             skill_context: String::new(),
         }
     };
+
+    // Audit: log tool access decision as a security event (best-effort, don't fail task creation)
+    {
+        let tool_audit = serde_json::json!({
+            "selected_skills": task_skills,
+            "allowed_tools": &agent_env.allowed_tools,
+            "skill_count": task_skills.len(),
+            "tool_count": agent_env.allowed_tools.len(),
+        });
+        let msg = format!(
+            "Task granted {} tools from {} skills",
+            agent_env.allowed_tools.len(),
+            task_skills.len(),
+        );
+        if let Err(e) = state
+            .pg_store
+            .insert_security_event(
+                Some(&task_id.0),
+                "system",
+                None,  // agent_id
+                None,  // trace_id
+                None,  // span_id
+                "tool_access_granted",
+                None,  // tool_name
+                None,  // direction
+                Some("info"),  // threat_level
+                &tool_audit,
+                &msg,
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task_id.0,
+                error = %e,
+                "Failed to audit tool access decision"
+            );
+        }
+    }
+
+    // Persist resolved tools to DB (audit trail + restart/retry recovery).
+    {
+        let store = state.pg_store.clone();
+        let tid = task_id.0.clone();
+        let skills = task_skills.to_vec();
+        let tools = agent_env.allowed_tools.clone();
+        tokio::spawn(async move {
+            if let Err(e) = store
+                .update_task_tools(&tid, &skills, &tools, None)
+                .await
+            {
+                tracing::warn!(
+                    task_id = %tid,
+                    error = %e,
+                    "Failed to persist task tools to postgres"
+                );
+            }
+        });
+    }
 
     // Check for task attachments directory
     let att_dir = config
@@ -1186,13 +1270,13 @@ pub async fn get_task(
     }
 
     // Fall back to Postgres (handles cargo-watch restarts where hydration raced)
-    if let Ok(Some((_, prompt, status, error_message, _tags))) =
+    if let Ok(Some((_, prompt, status, error_message, tags, selected_skills, allowed_tools, tool_profile))) =
         state.pg_store.get_task(&id).await
     {
         let task_status =
             crate::commands::serve::row_to_status(&status, error_message.as_deref());
         let mut mgr = state.tasks.write().await;
-        mgr.restore_task(task_id.clone(), prompt, task_status);
+        mgr.hydrate_task(task_id.clone(), prompt, task_status, tags, selected_skills, allowed_tools, tool_profile);
         if let Some(task) = mgr.get_task(&task_id) {
             return Ok(Json(TaskResponse::from(task)));
         }

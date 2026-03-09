@@ -3,6 +3,9 @@ export interface Task {
   prompt: string;
   status: "Running" | "Completed" | { Failed: string };
   tags?: string[];
+  selected_skills?: string[];
+  allowed_tools?: string[];
+  tool_profile?: string;
 }
 
 export interface WorkspaceFile {

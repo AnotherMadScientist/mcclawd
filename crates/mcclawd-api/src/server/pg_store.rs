@@ -126,6 +126,45 @@ impl PgTaskStore {
         Ok(())
     }
 
+    /// Persist the resolved tool configuration for a task.
+    /// Called after skill resolution + tool filtering so the DB has a full audit trail
+    /// and can recover the tool set on container restart/retry.
+    pub async fn update_task_tools(
+        &self,
+        id: &str,
+        selected_skills: &[String],
+        allowed_tools: &[String],
+        tool_profile: Option<&str>,
+    ) -> Result<(), McclawdError> {
+        sqlx::query(
+            "UPDATE tasks SET selected_skills = $2, allowed_tools = $3, tool_profile = $4, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(id)
+        .bind(selected_skills)
+        .bind(allowed_tools)
+        .bind(tool_profile)
+        .execute(&self.pool)
+        .await
+        .map_err(pg_err)?;
+        Ok(())
+    }
+
+    /// Read persisted tool configuration for a task (for container restart/retry).
+    /// Returns (selected_skills, allowed_tools, tool_profile) or None if task not found.
+    pub async fn get_task_tools(
+        &self,
+        id: &str,
+    ) -> Result<Option<(Vec<String>, Vec<String>, Option<String>)>, McclawdError> {
+        let row = sqlx::query_as::<_, (Vec<String>, Vec<String>, Option<String>)>(
+            "SELECT COALESCE(selected_skills, '{}'), COALESCE(allowed_tools, '{}'), tool_profile FROM tasks WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(pg_err)?;
+        Ok(row)
+    }
+
     /// Delete a task and ALL related entities in a single transaction.
     /// Cascade order: dlp_findings (via FK CASCADE) → security_events → persistent_containers → task row.
     /// This is the single source of truth for task deletion — all callers should use this.
@@ -195,13 +234,13 @@ impl PgTaskStore {
     }
 
     /// Get a single task by ID (for lazy hydration on cache miss).
-    /// Returns (id, prompt, status, error_message, tags) or None.
+    /// Returns (id, prompt, status, error_message, tags, selected_skills, allowed_tools, tool_profile) or None.
     pub async fn get_task(
         &self,
         id: &str,
-    ) -> Result<Option<(String, String, String, Option<String>, Vec<String>)>, McclawdError> {
-        let row = sqlx::query_as::<_, (String, String, String, Option<String>, Vec<String>)>(
-            "SELECT id, prompt, status, error_message, COALESCE(tags, '{}') FROM tasks WHERE id = $1",
+    ) -> Result<Option<(String, String, String, Option<String>, Vec<String>, Vec<String>, Vec<String>, Option<String>)>, McclawdError> {
+        let row = sqlx::query_as::<_, (String, String, String, Option<String>, Vec<String>, Vec<String>, Vec<String>, Option<String>)>(
+            "SELECT id, prompt, status, error_message, COALESCE(tags, '{}'), COALESCE(selected_skills, '{}'), COALESCE(allowed_tools, '{}'), tool_profile FROM tasks WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -211,12 +250,12 @@ impl PgTaskStore {
     }
 
     /// Load all tasks from the database (for startup hydration).
-    /// Returns (id, prompt, status, error_message, tags).
+    /// Returns (id, prompt, status, error_message, tags, selected_skills, allowed_tools, tool_profile).
     pub async fn list_tasks(
         &self,
-    ) -> Result<Vec<(String, String, String, Option<String>, Vec<String>)>, McclawdError> {
-        let rows = sqlx::query_as::<_, (String, String, String, Option<String>, Vec<String>)>(
-            "SELECT id, prompt, status, error_message, COALESCE(tags, '{}') FROM tasks ORDER BY created_at ASC",
+    ) -> Result<Vec<(String, String, String, Option<String>, Vec<String>, Vec<String>, Vec<String>, Option<String>)>, McclawdError> {
+        let rows = sqlx::query_as::<_, (String, String, String, Option<String>, Vec<String>, Vec<String>, Vec<String>, Option<String>)>(
+            "SELECT id, prompt, status, error_message, COALESCE(tags, '{}'), COALESCE(selected_skills, '{}'), COALESCE(allowed_tools, '{}'), tool_profile FROM tasks ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
         .await
@@ -229,9 +268,9 @@ impl PgTaskStore {
         &self,
         user_id: &str,
         tag: &str,
-    ) -> Result<Vec<(String, String, String, Option<String>, Vec<String>)>, McclawdError> {
-        let rows = sqlx::query_as::<_, (String, String, String, Option<String>, Vec<String>)>(
-            "SELECT id, prompt, status, error_message, COALESCE(tags, '{}') FROM tasks WHERE user_id = $1 AND $2 = ANY(tags) ORDER BY created_at ASC",
+    ) -> Result<Vec<(String, String, String, Option<String>, Vec<String>, Vec<String>, Vec<String>, Option<String>)>, McclawdError> {
+        let rows = sqlx::query_as::<_, (String, String, String, Option<String>, Vec<String>, Vec<String>, Vec<String>, Option<String>)>(
+            "SELECT id, prompt, status, error_message, COALESCE(tags, '{}'), COALESCE(selected_skills, '{}'), COALESCE(allowed_tools, '{}'), tool_profile FROM tasks WHERE user_id = $1 AND $2 = ANY(tags) ORDER BY created_at ASC",
         )
         .bind(user_id)
         .bind(tag)

@@ -160,6 +160,29 @@ export function TaskDetailPage() {
                 "Connecting..."
               )}
             </p>
+            {/* Skills, tool profile, and allowed tools info */}
+            {(task?.selected_skills?.length || task?.tool_profile || task?.allowed_tools?.length) && (
+              <div className="flex flex-wrap items-center gap-2 mt-1">
+                {task?.tool_profile && (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-violet-500/15 text-violet-400 border border-violet-500/20">
+                    {task.tool_profile}
+                  </span>
+                )}
+                {task?.selected_skills?.map((skill) => (
+                  <span
+                    key={skill}
+                    className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-500/15 text-blue-400 border border-blue-500/20"
+                  >
+                    {skill}
+                  </span>
+                ))}
+                {(task?.allowed_tools?.length ?? 0) > 0 && (
+                  <span className="text-xs text-muted-foreground">
+                    {task!.allowed_tools!.length} tool{task!.allowed_tools!.length !== 1 ? "s" : ""} allowed
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
