@@ -157,7 +157,7 @@ test.describe("Task Detail Page", () => {
     await expect(
       page.getByText(
         /Connected|Connecting|Starting agent|Building agent|Error|Waiting for agent|Complete|ANTHROPIC_API_KEY/
-      )
+      ).first()
     ).toBeVisible({ timeout: 15000 });
   });
 

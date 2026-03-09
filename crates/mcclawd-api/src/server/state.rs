@@ -336,14 +336,12 @@ impl AppState {
     /// Delete task from postgres synchronously (awaits completion).
     /// Use this in cascade-delete paths where the caller needs to guarantee
     /// the row is gone before returning (e.g. delete_task, delete_container handlers).
-    /// Also cascades to security_events (and dlp_findings via FK cascade).
+    /// The underlying `pg_store.delete_task()` handles the full cascade atomically
+    /// in a single transaction: security_events + dlp_findings (FK CASCADE) +
+    /// persistent_containers + task row.
     pub async fn pg_delete_task_sync(&self, task_id: &TaskId) {
-        // Delete security events first (dlp_findings cascade via FK)
-        if let Err(e) = self.pg_store.delete_security_events_by_task(&task_id.0).await {
-            tracing::warn!(task_id = %task_id.0, error = %e, "Failed to delete security events for task");
-        }
         if let Err(e) = self.pg_store.delete_task(&task_id.0).await {
-            tracing::warn!(task_id = %task_id.0, error = %e, "Failed to delete task from postgres");
+            tracing::warn!(task_id = %task_id.0, error = %e, "Failed to cascade-delete task from postgres");
         }
     }
 

@@ -736,12 +736,32 @@ async fn reconcile_containers_and_tasks(state: AppState, pg_store: PgTaskStore) 
             continue;
         }
 
-        // Extract task_id from container name (mcclawd-persistent-{task_id_prefix})
-        // or from DB records
-        let container_task_id = db_containers
+        // Extract task_id from DB records first
+        let mut container_task_id = db_containers
             .iter()
             .find(|(db_cid, _, _, _)| db_cid == cid || cid.starts_with(db_cid.as_str()))
             .map(|(_, tid, _, _)| tid.clone());
+
+        // If not found in DB, try Docker labels (covers containers not in persistent_containers)
+        if container_task_id.is_none() {
+            container_task_id = docker
+                .inspect_container(cid, None)
+                .await
+                .ok()
+                .and_then(|info| {
+                    info.config
+                        .as_ref()
+                        .and_then(|c| c.labels.as_ref())
+                        .and_then(|l| l.get("mcclawd.task_id").cloned())
+                });
+        }
+
+        // Skip system agent containers
+        if container_task_id.as_deref() == Some("system-agent")
+            || container_task_id.as_deref() == Some("__system__")
+        {
+            continue;
+        }
 
         let has_active_task = container_task_id
             .as_ref()
@@ -918,14 +938,14 @@ async fn container_gc_loop(state: AppState) {
                 continue;
             }
 
-            // Check if exited — only remove exited orphans during GC
-            // (running containers might be mid-startup)
+            // Check container state to decide cleanup strategy
             let state_str = container
                 .state
                 .as_deref()
                 .unwrap_or("unknown")
                 .to_lowercase();
             if state_str == "exited" || state_str == "dead" {
+                // Exited/dead orphans: remove immediately
                 tracing::info!(
                     container_id = %cid,
                     state = %state_str,
@@ -959,8 +979,8 @@ async fn container_gc_loop(state: AppState) {
                 if let Some(tid) = orphan_task_id {
                     if tid != "system-agent" && tid != "__system__" {
                         let task_id_typed = TaskId(tid.clone());
+                        // pg_delete_task_sync handles full cascade (security_events + persistent_containers + task row)
                         state.pg_delete_task_sync(&task_id_typed).await;
-                        let _ = state.pg_store.delete_persistent_containers_by_task(&tid).await;
                         state.task_containers.write().await.remove(&task_id_typed);
                         state.task_streams.write().await.remove(&task_id_typed);
                         state.task_chat_history.write().await.remove(&task_id_typed);
@@ -970,6 +990,76 @@ async fn container_gc_loop(state: AppState) {
                     }
                 }
                 gc_count += 1;
+            } else if state_str == "running" {
+                // Running orphans: only remove if container has been running >120s
+                // without a matching DB record (grace period avoids killing mid-startup containers)
+                let created = container.created.unwrap_or(0);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let age_secs = now - created;
+
+                if age_secs > 120 {
+                    // Inspect BEFORE stopping to get task_id label
+                    let orphan_task_id = docker
+                        .inspect_container(cid, None)
+                        .await
+                        .ok()
+                        .and_then(|info| {
+                            info.config
+                                .as_ref()
+                                .and_then(|c| c.labels.as_ref())
+                                .and_then(|l| l.get("mcclawd.task_id").cloned())
+                        });
+
+                    tracing::warn!(
+                        container_id = %cid,
+                        task_id = ?orphan_task_id,
+                        age_secs = age_secs,
+                        "GC: stopping orphaned running container (no DB record, age > 120s)"
+                    );
+
+                    let _ = docker
+                        .stop_container(
+                            cid,
+                            Some(bollard::container::StopContainerOptions { t: 5 }),
+                        )
+                        .await;
+                    let _ = docker
+                        .remove_container(
+                            cid,
+                            Some(bollard::container::RemoveContainerOptions {
+                                force: true,
+                                ..Default::default()
+                            }),
+                        )
+                        .await;
+                    let _ = state.pg_store.delete_persistent_container(cid).await;
+
+                    // Cascade: also delete the associated task from PG + memory
+                    if let Some(tid) = orphan_task_id {
+                        if tid != "system-agent" && tid != "__system__" {
+                            let task_id_typed = TaskId(tid.clone());
+                            state.pg_delete_task_sync(&task_id_typed).await;
+                            let _ = state
+                                .pg_store
+                                .delete_persistent_containers_by_task(&tid)
+                                .await;
+                            state.task_containers.write().await.remove(&task_id_typed);
+                            state.task_streams.write().await.remove(&task_id_typed);
+                            state
+                                .task_chat_history
+                                .write()
+                                .await
+                                .remove(&task_id_typed);
+                            state.task_events.write().await.remove(&task_id_typed);
+                            let mut mgr = state.tasks.write().await;
+                            mgr.delete_task(&task_id_typed);
+                        }
+                    }
+                    gc_count += 1;
+                }
             }
         }
 
@@ -1038,6 +1128,29 @@ async fn container_gc_loop(state: AppState) {
                         drop(mgr);
                         gc_count += 1;
                     }
+                }
+            }
+        }
+
+        // Phase C: Clean up orphaned persistent_containers DB records
+        // (container_ids in DB that don't exist in Docker anymore)
+        if let Ok(db_rows) = state.pg_store.load_persistent_containers().await {
+            for (db_cid, db_task_id, _, _) in &db_rows {
+                if db_task_id == "system-agent" || db_task_id == "__system__" {
+                    continue;
+                }
+                // Check if this container actually exists in Docker
+                let exists_in_docker = containers.iter().any(|c| {
+                    c.id.as_deref() == Some(db_cid.as_str())
+                });
+                if !exists_in_docker {
+                    tracing::info!(
+                        container_id = %db_cid,
+                        task_id = %db_task_id,
+                        "GC: removing orphaned persistent_containers DB record (container not in Docker)"
+                    );
+                    let _ = state.pg_store.delete_persistent_container(db_cid).await;
+                    gc_count += 1;
                 }
             }
         }

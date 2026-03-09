@@ -126,29 +126,34 @@ impl PgTaskStore {
         Ok(())
     }
 
-    /// Delete a task (cascades to events + chat history via FK).
-    /// Also cleans up security data (dlp_findings → security_events) before deleting the task row.
+    /// Delete a task and ALL related entities in a single transaction.
+    /// Cascade order: dlp_findings (via FK CASCADE) → security_events → persistent_containers → task row.
+    /// This is the single source of truth for task deletion — all callers should use this.
     pub async fn delete_task(&self, id: &str) -> Result<(), McclawdError> {
-        // Delete DLP findings for this task's security events
-        sqlx::query("DELETE FROM dlp_findings WHERE security_event_id IN (SELECT id FROM security_events WHERE task_id = $1)")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(pg_err)?;
+        let mut tx = self.pool.begin().await.map_err(pg_err)?;
 
-        // Delete security events for this task
+        // 1. Delete security_events (dlp_findings auto-cascade via FK ON DELETE CASCADE)
         sqlx::query("DELETE FROM security_events WHERE task_id = $1")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(pg_err)?;
 
-        // Delete the task row itself
-        sqlx::query("DELETE FROM tasks WHERE id = $1")
+        // 2. Delete persistent container records for this task
+        sqlx::query("DELETE FROM persistent_containers WHERE task_id = $1")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(pg_err)?;
+
+        // 3. Delete the task row itself (events + chat_history cascade via FK)
+        sqlx::query("DELETE FROM tasks WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(pg_err)?;
+
+        tx.commit().await.map_err(pg_err)?;
         Ok(())
     }
 

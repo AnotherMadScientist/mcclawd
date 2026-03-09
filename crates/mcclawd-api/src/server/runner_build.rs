@@ -803,18 +803,8 @@ pub async fn delete_container(
             .pg_update_status(&task_id_typed, "Failed", Some("Container removed"))
             .await;
 
-        // Delete task from postgres (synchronous — must complete before response)
+        // Cascade-delete from postgres atomically (task + security_events + dlp_findings + persistent_containers)
         state.pg_delete_task_sync(&task_id_typed).await;
-
-        // Delete persistent container records — by container_id AND by task_id for safety
-        let _ = state
-            .pg_store
-            .delete_persistent_container(&container_id)
-            .await;
-        let _ = state
-            .pg_store
-            .delete_persistent_containers_by_task(tid)
-            .await;
     } else {
         // No task_id label found — still clean up the persistent_container record by container_id
         let _ = state

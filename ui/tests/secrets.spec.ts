@@ -3,17 +3,45 @@ import { login, collectConsoleErrors, unexpectedErrors, type ConsoleError } from
 
 test.describe("Secrets Page", () => {
   let consoleErrors: ConsoleError[];
+  let createdSecrets: string[] = [];
 
   test.beforeEach(async ({ page }) => {
+    createdSecrets = [];
     consoleErrors = collectConsoleErrors(page);
     await login(page);
     await page.goto("/config/secrets");
     await expect(page.getByRole("heading", { name: "Secrets" })).toBeVisible();
   });
 
-  test.afterEach(async () => {
+  test.afterEach(async ({ page }) => {
+    // Clean up test-created secrets via API
+    const fs = await import("fs");
+    const path = await import("path");
+    let token: string | null = null;
+    try {
+      token = JSON.parse(
+        fs.readFileSync(path.join(__dirname, ".auth-token.json"), "utf-8"),
+      ).token;
+    } catch {
+      /* no token file */
+    }
+
+    if (token) {
+      for (const name of createdSecrets) {
+        await page.request
+          .delete(`http://localhost:9090/api/secrets/${name}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          })
+          .catch(() => {});
+      }
+    }
+
+    // Console error check
     const unexpected = unexpectedErrors(consoleErrors);
-    expect(unexpected, `Unexpected console errors: ${JSON.stringify(unexpected)}`).toHaveLength(0);
+    expect(
+      unexpected,
+      `Unexpected console errors: ${JSON.stringify(unexpected)}`,
+    ).toHaveLength(0);
   });
 
   test("shows Secrets heading and description", async ({ page }) => {
@@ -42,6 +70,7 @@ test.describe("Secrets Page", () => {
 
   test("can create a new secret", async ({ page }) => {
     const secretName = `TEST_CREATE_${Date.now()}`;
+    createdSecrets.push(secretName);
 
     await page.getByPlaceholder(/Secret name/).fill(secretName);
     await page.getByPlaceholder("Value").fill("test-value");
@@ -53,6 +82,7 @@ test.describe("Secrets Page", () => {
 
   test("can delete a secret", async ({ page }) => {
     const secretName = `TEST_DEL_${Date.now()}`;
+    createdSecrets.push(secretName);
 
     // Create it
     await page.getByPlaceholder(/Secret name/).fill(secretName);
@@ -71,6 +101,7 @@ test.describe("Secrets Page", () => {
 
   test("can show and hide a secret value", async ({ page }) => {
     const secretName = `TEST_REVEAL_${Date.now()}`;
+    createdSecrets.push(secretName);
 
     // Create a secret with a known value
     await page.getByPlaceholder(/Secret name/).fill(secretName);
@@ -98,6 +129,7 @@ test.describe("Secrets Page", () => {
 
   test("can edit a secret value", async ({ page }) => {
     const secretName = `TEST_EDIT_${Date.now()}`;
+    createdSecrets.push(secretName);
 
     // Create a secret
     await page.getByPlaceholder(/Secret name/).fill(secretName);
@@ -135,6 +167,7 @@ test.describe("Secrets Page", () => {
 
   test("can cancel editing a secret", async ({ page }) => {
     const secretName = `TEST_CANCEL_${Date.now()}`;
+    createdSecrets.push(secretName);
 
     // Create a secret
     await page.getByPlaceholder(/Secret name/).fill(secretName);
@@ -168,6 +201,8 @@ test.describe("Secrets Page", () => {
   test("creating multiple secrets shows all in list", async ({ page }) => {
     const s1 = `MULTI_1_${Date.now()}`;
     const s2 = `MULTI_2_${Date.now()}`;
+    createdSecrets.push(s1);
+    createdSecrets.push(s2);
 
     await page.getByPlaceholder(/Secret name/).fill(s1);
     await page.getByPlaceholder("Value").fill("v1");
@@ -225,6 +260,7 @@ test.describe("Secrets Page", () => {
 
   test("secret created via API is visible in list", async ({ page }) => {
     const name = `API_TEST_${Date.now()}`;
+    createdSecrets.push(name);
     // Create via API directly
     const fs = await import("fs");
     const path = await import("path");
@@ -274,6 +310,7 @@ test.describe("Secrets Page", () => {
 
   test("reveal toggle shows and hides value", async ({ page }) => {
     const secretName = `TEST_REVEAL_TOGGLE_${Date.now()}`;
+    createdSecrets.push(secretName);
     await page.getByPlaceholder(/Secret name/).fill(secretName);
     await page.getByPlaceholder("Value").fill("reveal-test-val");
     await page.locator("button[aria-label='Add secret']").click();
@@ -295,6 +332,7 @@ test.describe("Secrets Page", () => {
 
   test("edit secret updates value", async ({ page }) => {
     const secretName = `TEST_EDIT_UPDATE_${Date.now()}`;
+    createdSecrets.push(secretName);
     await page.getByPlaceholder(/Secret name/).fill(secretName);
     await page.getByPlaceholder("Value").fill("before-edit");
     await page.locator("button[aria-label='Add secret']").click();
@@ -319,6 +357,7 @@ test.describe("Secrets Page", () => {
 
   test("delete secret removes from list", async ({ page }) => {
     const secretName = `DELETE_ME_${Date.now()}`;
+    createdSecrets.push(secretName);
     await page.getByPlaceholder(/Secret name/).fill(secretName);
     await page.getByPlaceholder("Value").fill("to-be-deleted");
     await page.locator("button[aria-label='Add secret']").click();
@@ -334,6 +373,7 @@ test.describe("Secrets Page", () => {
   test("special characters in secret name", async ({ page }) => {
     // Some backends may reject special chars — document either outcome
     const specialName = `TEST_SPECIAL_${Date.now()}`;
+    createdSecrets.push(specialName);
 
     await page.getByPlaceholder(/Secret name/).fill(specialName);
     await page.getByPlaceholder("Value").fill("test-val");
@@ -359,6 +399,7 @@ test.describe("Secrets Page", () => {
       `TEST_SCROLL_2_${ts}`,
       `TEST_SCROLL_3_${ts}`,
     ];
+    for (const name of names) createdSecrets.push(name);
 
     for (const name of names) {
       await page.getByPlaceholder(/Secret name/).fill(name);

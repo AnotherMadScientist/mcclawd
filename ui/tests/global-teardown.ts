@@ -25,9 +25,11 @@ export default async function globalTeardown() {
     if (!listRes.ok) return;
     const secrets: { name: string }[] = await listRes.json();
 
-    // Delete test secrets (TEST_*, MULTI_*, DELETE_ME_*)
-    const testPattern = /^(TEST_|MULTI_|DELETE_ME_)/;
-    const toDelete = secrets.filter((s) => testPattern.test(s.name));
+    // Delete test secrets (TEST_*, MULTI_*, DELETE_ME_*, API_TEST_*, PERSIST_SECRET_*, DELETE_PERSIST_*, E2E_TEST_KEY)
+    const testPattern = /^(TEST_|MULTI_|DELETE_ME_|API_TEST_|PERSIST_SECRET_|DELETE_PERSIST_)/;
+    const toDelete = secrets.filter(
+      (s) => testPattern.test(s.name) || s.name === "E2E_TEST_KEY",
+    );
 
     for (const s of toDelete) {
       await fetch(`${baseURL}/api/secrets/${s.name}`, {

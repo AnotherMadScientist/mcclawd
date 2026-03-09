@@ -1372,46 +1372,23 @@ pub async fn delete_all_tasks(
     }
     drop(mgr);
 
-    // Bulk-delete from Postgres by tag (fire-and-forget) when tag filter is present
-    if let Some(ref tag) = query.tag {
-        // Delete security events for each task before bulk-deleting the tasks
-        for id in &to_delete {
-            if let Err(e) = state.pg_store.delete_security_events_by_task(&id.0).await {
-                tracing::warn!(task_id = %id.0, error = %e, "Failed to delete security events for task");
-            }
-        }
-        let store = state.pg_store.clone();
-        let tag_c = tag.clone();
-        tokio::spawn(async move {
-            if let Err(e) = store.delete_tasks_by_tag("admin", Some(&tag_c)).await {
-                tracing::warn!(error = %e, "Failed to bulk-delete tasks by tag from DB");
-            }
-        });
-    }
-
-    // Clean up associated state for each deleted task
+    // Clean up each deleted task: in-memory state, Docker containers, then atomic DB cascade
     for id in &to_delete {
-        // Individual pg delete only when no tag filter (tag filter handled in bulk above)
-        if query.tag.is_none() {
-            state.pg_delete_task_sync(id).await;
-        }
+        // Clean up in-memory state
         state.task_streams.write().await.remove(id);
         state.task_chat_history.write().await.remove(id);
         state.task_events.write().await.remove(id);
 
-        // Shutdown and cleanup persistent container synchronously (BUG-030 fix)
+        // Shutdown Docker container (Docker API calls — not DB)
         let handle = state.task_containers.write().await.remove(id);
         if let Some(handle) = handle {
             let _ = handle.shutdown().await;
             let cid = handle.container_id.clone();
-            if let Err(e) = state.pg_store.delete_persistent_container(&cid).await {
-                tracing::warn!("Failed to delete container record: {e}");
-            }
             if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
                 let _ = orch.cleanup_container(&cid).await;
             }
         } else {
-            // No in-memory handle — check DB for orphaned containers
+            // No in-memory handle — check DB for orphaned Docker containers
             if let Ok(container_ids) = state.pg_store.get_container_ids_by_task(&id.0).await {
                 for cid in &container_ids {
                     tracing::info!(task_id = %id.0, container_id = %cid,
@@ -1422,8 +1399,9 @@ pub async fn delete_all_tasks(
                 }
             }
         }
-        // Always clean persistent_containers rows by task_id
-        let _ = state.pg_store.delete_persistent_containers_by_task(&id.0).await;
+
+        // Cascade-delete from postgres atomically (task + security_events + dlp_findings + persistent_containers)
+        state.pg_delete_task_sync(id).await;
     }
 
     Json(serde_json::json!({ "deleted": count }))
@@ -1450,7 +1428,7 @@ pub async fn delete_task(
     mgr.delete_task(&task_id);
     drop(mgr);
 
-    // Shutdown and cleanup persistent container synchronously (BUG-030 fix)
+    // Shutdown Docker containers (Docker API calls only — DB cleanup handled by cascade below)
     {
         let mut containers = state.task_containers.write().await;
         let in_memory_handle = containers.remove(&task_id);
@@ -1459,9 +1437,6 @@ pub async fn delete_task(
             // In-memory handle exists — shutdown gracefully and cleanup Docker container
             let _ = handle.shutdown().await;
             let cid = handle.container_id.clone();
-            if let Err(e) = state.pg_store.delete_persistent_container(&cid).await {
-                tracing::warn!("Failed to delete container record: {e}");
-            }
             if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
                 let _ = orch.cleanup_container(&cid).await;
             }
@@ -1481,15 +1456,9 @@ pub async fn delete_task(
                 }
             }
         }
-
-        // Always delete persistent_containers rows by task_id (covers both paths)
-        let _ = state
-            .pg_store
-            .delete_persistent_containers_by_task(&task_id.0)
-            .await;
     }
 
-    // Delete from postgres synchronously (cascades to events + chat history)
+    // Cascade-delete from postgres atomically (task + security_events + dlp_findings + persistent_containers)
     state.pg_delete_task_sync(&task_id).await;
 
     // Clean up broadcast channel + chat history + event cache
