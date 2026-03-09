@@ -393,19 +393,14 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
     }
 
     // Hydrate in-memory TaskManager from postgres on startup.
-    // Running/Building tasks are marked Failed (server restarted — container is gone).
+    // Running/Building tasks keep their status — the reconciliation loop will
+    // attempt to reconnect or restart their containers using persisted config.
+    // Tasks whose containers are truly gone get failed in reconcile_containers_and_tasks().
     match pg_store.list_tasks().await {
         Ok(rows) => {
             let mut mgr = state.tasks.write().await;
-            for (id, prompt, status, error_message, tags, selected_skills, allowed_tools, tool_profile) in rows {
-                let task_status = match status.as_str() {
-                    "Running" | "Building" => {
-                        mcclawd_tasks::manager::TaskStatus::Failed(
-                            "Server restarted".to_string(),
-                        )
-                    }
-                    _ => row_to_status(&status, error_message.as_deref()),
-                };
+            for (id, prompt, status, error_message, tags, selected_skills, allowed_tools, tool_profile, skill_context) in rows {
+                let task_status = row_to_status(&status, error_message.as_deref());
                 mgr.hydrate_task(
                     mcclawd_core::types::TaskId(id),
                     prompt,
@@ -414,6 +409,7 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
                     selected_skills,
                     allowed_tools,
                     tool_profile,
+                    skill_context,
                 );
             }
             let count = mgr.all_tasks().len();
@@ -518,6 +514,64 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
     }
 
     state.config_path = Some(config_path);
+
+    // Hydrate workspace: restore the active profile from DB on startup.
+    // If an active profile was previously persisted, apply its files to disk
+    // so the workspace is consistent with the last user selection.
+    match pg_store.get_config_key("admin", "active_profile").await {
+        Ok(Some(value)) => {
+            let profile_name = value.as_str().unwrap_or("default").to_string();
+            tracing::info!(profile = %profile_name, "Restoring active workspace profile from DB");
+
+            // Load profile files (builtin or custom) and write to disk
+            let config = state.config.read().await;
+            let workspace_dir = config.data_dir.join(&config.agent.default_workspace);
+            drop(config);
+            let _ = tokio::fs::create_dir_all(&workspace_dir).await;
+
+            // Try builtin profiles first
+            let builtin = mcclawd_agent::workspace::builtin_profiles();
+            if let Some(profile) = builtin.into_iter().find(|p| p.name == profile_name) {
+                let files = [
+                    ("SOUL.md", profile.soul),
+                    ("AGENTS.md", profile.agents),
+                    ("USER.md", profile.user),
+                    ("IDENTITY.md", profile.identity),
+                    ("TOOLS.md", profile.tools),
+                    ("HEARTBEAT.md", profile.heartbeat),
+                ];
+                for (filename, content) in &files {
+                    let _ = tokio::fs::write(workspace_dir.join(filename), content).await;
+                }
+                tracing::info!(profile = %profile_name, "Active workspace profile restored (builtin)");
+            } else if let Ok(Some(files)) = pg_store.load_workspace_profile("admin", &profile_name).await {
+                for (filename, content) in &files {
+                    let _ = tokio::fs::write(workspace_dir.join(filename), content).await;
+                }
+                tracing::info!(profile = %profile_name, "Active workspace profile restored (custom)");
+            } else {
+                tracing::debug!(profile = %profile_name, "Active profile not found, using existing workspace files");
+            }
+        }
+        Ok(None) => {
+            // No active profile set yet — seed the default and persist it
+            if let Err(e) = pg_store
+                .save_config(
+                    "admin",
+                    "active_profile",
+                    &serde_json::Value::String("default".to_string()),
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to seed default active_profile in DB");
+            } else {
+                tracing::info!("Seeded active_profile = 'default' in DB");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to read active_profile from DB");
+        }
+    }
 
     // ── Task↔Container 1:1 Enforcement ────────────────────────────────
     // Phase A: Reconcile Docker containers with postgres task records.
@@ -708,7 +762,7 @@ async fn reconcile_containers_and_tasks(state: AppState, pg_store: PgTaskStore) 
 
     // 2. Load active tasks from postgres
     let active_task_ids: std::collections::HashSet<String> = match pg_store.list_tasks().await {
-        Ok(rows) => rows.into_iter().map(|(id, _, _, _, _, _, _, _)| id).collect(),
+        Ok(rows) => rows.into_iter().map(|(id, _, _, _, _, _, _, _, _)| id).collect(),
         Err(e) => {
             tracing::warn!(error = %e, "Failed to load tasks for reconciliation");
             return;
@@ -826,34 +880,11 @@ async fn reconcile_containers_and_tasks(state: AppState, pg_store: PgTaskStore) 
         }
     }
 
-    // ── Direction 4: Active Running/Pending tasks without container handles → mark failed
+    // ── Direction 4: Resilient restart for Running/Building/Pending tasks without containers.
+    // Because we now persist allowed_tools, selected_skills, skill_context, and tool_profile
+    // in the DB, we can reconstruct the full AgentEnvironment without re-resolving skills.
     {
-        let mgr = state.tasks.read().await;
-        let containers = state.task_containers.read().await;
-        let system_agent = state.system_agent.read().await;
-
-        for task in mgr.all_tasks() {
-            // Skip system agent
-            if task.id.0 == "system-agent" || task.id.0 == "__system__" {
-                continue;
-            }
-            // Only check Running tasks — Pending tasks haven't started containers yet
-            if matches!(task.status, TaskStatus::Running) {
-                if !containers.contains_key(&task.id) {
-                    tracing::warn!(
-                        task_id = %task.id.0,
-                        "Running task has no container — marking as failed"
-                    );
-                    tasks_failed += 1;
-                    // We need to drop the read lock to write, so collect and do after
-                }
-            }
-        }
-    }
-
-    // Now fail orphan tasks (needs write lock)
-    if tasks_failed > 0 {
-        let task_ids_to_fail: Vec<TaskId> = {
+        let tasks_to_restart: Vec<(TaskId, String)> = {
             let mgr = state.tasks.read().await;
             let containers = state.task_containers.read().await;
             mgr.all_tasks()
@@ -861,16 +892,108 @@ async fn reconcile_containers_and_tasks(state: AppState, pg_store: PgTaskStore) 
                 .filter(|t| {
                     t.id.0 != "system-agent"
                         && t.id.0 != "__system__"
-                        && matches!(t.status, TaskStatus::Running)
+                        && (matches!(t.status, TaskStatus::Running)
+                            || matches!(t.status, TaskStatus::Building)
+                            || matches!(t.status, TaskStatus::Pending))
                         && !containers.contains_key(&t.id)
                 })
-                .map(|t| t.id.clone())
+                .map(|t| (t.id.clone(), t.prompt.clone()))
                 .collect()
         };
-        let mut mgr = state.tasks.write().await;
-        for tid in &task_ids_to_fail {
+
+        for (tid, _prompt) in &tasks_to_restart {
+            // Try to restart by creating a new container with persisted config
+            match pg_store.get_task_tools(&tid.0).await {
+                Ok(Some((_skills, allowed_tools, tool_profile, skill_context))) => {
+                    // We have persisted config — attempt container restart
+                    let config = state.config.read().await;
+                    let agent_env = crate::sandbox::container::AgentEnvironment {
+                        image: "mcclawd-runner:latest".to_string(),
+                        network: config.sandbox.network.clone(),
+                        gateway_url: crate::sandbox::container::container_gateway_url(
+                            &config.mcp.agentgateway_url,
+                        ),
+                        allowed_tools,
+                        skill_context,
+                    };
+
+                    if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
+                        let sandbox_cfg = SandboxConfig {
+                            workspace_dir: config.workspaces_dir().to_string_lossy().to_string(),
+                            agentgateway_url: config.mcp.agentgateway_url.clone(),
+                            memory_limit: config.sandbox.memory_limit,
+                            cpu_limit: config.sandbox.cpu_limit,
+                            network: config.sandbox.network.clone(),
+                            pids_limit: config.sandbox.pids_limit,
+                            ..Default::default()
+                        };
+                        match orch
+                            .create_persistent_runner_container(
+                                tid,
+                                &agent_env,
+                                &sandbox_cfg.workspace_dir,
+                                &sandbox_cfg,
+                                &std::collections::HashMap::new(),
+                                25, // default max_turns
+                                None, // agent_type
+                                None, // attachments_dir
+                            )
+                            .await
+                        {
+                            Ok(handle) => {
+                                tracing::info!(
+                                    task_id = %tid.0,
+                                    container_id = %handle.container_id,
+                                    tool_profile = ?tool_profile,
+                                    "Restarted container for task after server restart"
+                                );
+                                // Save persistent container record
+                                let _ = pg_store
+                                    .save_persistent_container(
+                                        &handle.container_id,
+                                        &tid.0,
+                                        "task",
+                                        &sandbox_cfg.workspace_dir,
+                                    )
+                                    .await;
+                                // Store handle
+                                let mut containers = state.task_containers.write().await;
+                                containers.insert(tid.clone(), handle);
+                                reconnected += 1;
+                                continue; // success — skip failure path
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    task_id = %tid.0,
+                                    error = %e,
+                                    "Failed to restart container for task — marking as failed"
+                                );
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!(
+                        task_id = %tid.0,
+                        "No persisted tool config for task — cannot restart, marking as failed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %tid.0,
+                        error = %e,
+                        "Failed to load task tools from DB — marking as failed"
+                    );
+                }
+            }
+
+            // If we reach here, restart failed — mark as failed
+            tasks_failed += 1;
+            let mut mgr = state.tasks.write().await;
             mgr.fail_task(tid, "Container lost after server restart".to_string());
-            state.pg_update_status(tid, "Failed", Some("Container lost after server restart")).await;
+            state
+                .pg_update_status(tid, "Failed", Some("Container lost after server restart"))
+                .await;
         }
     }
 
@@ -1074,7 +1197,7 @@ async fn container_gc_loop(state: AppState) {
             .collect();
 
         if let Ok(rows) = state.pg_store.list_tasks().await {
-            for (task_id, _, status, _, _, _, _, _) in &rows {
+            for (task_id, _, status, _, _, _, _, _, _) in &rows {
                 // Skip system agent
                 if task_id == "system-agent" || task_id == "__system__" {
                     continue;

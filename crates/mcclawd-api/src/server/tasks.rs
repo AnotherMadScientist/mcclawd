@@ -105,7 +105,7 @@ pub async fn list_tasks(State(state): State<AppState>) -> Json<Vec<TaskResponse>
 
     // DB is source of truth
     if let Ok(rows) = state.pg_store.list_tasks().await {
-        for (id, prompt, status, error_message, tags, selected_skills, allowed_tools, tool_profile) in rows {
+        for (id, prompt, status, error_message, tags, selected_skills, allowed_tools, tool_profile, _skill_context) in rows {
             // Never expose the system agent as a user-visible task
             if id == "__system__" || id == "system-agent" {
                 continue;
@@ -586,15 +586,16 @@ async fn run_agent_sandboxed(
         }
     }
 
-    // Persist resolved tools to DB (audit trail + restart/retry recovery).
+    // Persist resolved tools + skill context to DB (audit trail + restart/retry recovery).
     {
         let store = state.pg_store.clone();
         let tid = task_id.0.clone();
         let skills = task_skills.to_vec();
         let tools = agent_env.allowed_tools.clone();
+        let ctx = agent_env.skill_context.clone();
         tokio::spawn(async move {
             if let Err(e) = store
-                .update_task_tools(&tid, &skills, &tools, None)
+                .update_task_tools(&tid, &skills, &tools, Some("general"), &ctx)
                 .await
             {
                 tracing::warn!(
@@ -1270,13 +1271,13 @@ pub async fn get_task(
     }
 
     // Fall back to Postgres (handles cargo-watch restarts where hydration raced)
-    if let Ok(Some((_, prompt, status, error_message, tags, selected_skills, allowed_tools, tool_profile))) =
+    if let Ok(Some((_, prompt, status, error_message, tags, selected_skills, allowed_tools, tool_profile, skill_context))) =
         state.pg_store.get_task(&id).await
     {
         let task_status =
             crate::commands::serve::row_to_status(&status, error_message.as_deref());
         let mut mgr = state.tasks.write().await;
-        mgr.hydrate_task(task_id.clone(), prompt, task_status, tags, selected_skills, allowed_tools, tool_profile);
+        mgr.hydrate_task(task_id.clone(), prompt, task_status, tags, selected_skills, allowed_tools, tool_profile, skill_context);
         if let Some(task) = mgr.get_task(&task_id) {
             return Ok(Json(TaskResponse::from(task)));
         }

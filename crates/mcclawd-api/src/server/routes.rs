@@ -93,6 +93,10 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         // Workspace profiles
         .route("/api/workspace/profiles", get(workspace::list_profiles))
         .route(
+            "/api/workspace/profiles/active",
+            get(workspace::get_active_profile),
+        )
+        .route(
             "/api/workspace/profiles/{name}/apply",
             post(workspace::apply_profile),
         )

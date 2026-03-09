@@ -136,6 +136,16 @@ pub async fn put_file(
 
 /// GET /api/workspace/profiles — list available profiles (built-in + custom)
 pub async fn list_profiles(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
+    // Read the active profile from DB (default: "default")
+    let active = match state
+        .pg_store
+        .get_config_key("admin", "active_profile")
+        .await
+    {
+        Ok(Some(v)) => v.as_str().unwrap_or("default").to_string(),
+        _ => "default".to_string(),
+    };
+
     let mut profiles: Vec<serde_json::Value> = builtin_profiles()
         .iter()
         .map(|p| {
@@ -143,6 +153,7 @@ pub async fn list_profiles(State(state): State<AppState>) -> Json<Vec<serde_json
                 "name": p.name,
                 "description": p.description,
                 "builtin": true,
+                "active": p.name == active,
             })
         })
         .collect();
@@ -154,11 +165,25 @@ pub async fn list_profiles(State(state): State<AppState>) -> Json<Vec<serde_json
                 "name": name,
                 "description": desc,
                 "builtin": false,
+                "active": name == active,
             }));
         }
     }
 
     Json(profiles)
+}
+
+/// GET /api/workspace/profiles/active — return the currently active profile name
+pub async fn get_active_profile(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let name = match state
+        .pg_store
+        .get_config_key("admin", "active_profile")
+        .await
+    {
+        Ok(Some(v)) => v.as_str().unwrap_or("default").to_string(),
+        _ => "default".to_string(),
+    };
+    Json(serde_json::json!({"active_profile": name}))
 }
 
 /// POST /api/workspace/profiles/{name}/apply — overwrite workspace with profile content
@@ -197,6 +222,18 @@ pub async fn apply_profile(
         for (filename, content) in &files {
             let _ = tokio::fs::write(workspace_dir.join(filename), content).await;
         }
+        // Persist active profile selection
+        if let Err(e) = state
+            .pg_store
+            .save_config(
+                "admin",
+                "active_profile",
+                &serde_json::Value::String(name.clone()),
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to persist active_profile to DB");
+        }
         return (
             StatusCode::OK,
             Json(serde_json::json!({"applied": name})),
@@ -226,6 +263,18 @@ pub async fn apply_profile(
         let _ = tokio::fs::create_dir_all(&workspace_dir).await;
         for (filename, content) in &files {
             let _ = tokio::fs::write(workspace_dir.join(filename), content).await;
+        }
+        // Persist active profile selection
+        if let Err(e) = state
+            .pg_store
+            .save_config(
+                "admin",
+                "active_profile",
+                &serde_json::Value::String(name.clone()),
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to persist active_profile to DB");
         }
         return (
             StatusCode::OK,

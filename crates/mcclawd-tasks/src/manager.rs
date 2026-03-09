@@ -32,6 +32,9 @@ pub struct TaskRecord {
     /// Tool profile used for this task (e.g. "Coding", "Research").
     #[serde(default)]
     pub tool_profile: Option<String>,
+    /// Combined SKILL.md context for the agent system prompt (persisted for container restart).
+    #[serde(default)]
+    pub skill_context: String,
 }
 
 /// Task manager with history.
@@ -60,6 +63,7 @@ impl TaskManager {
             selected_skills: Vec::new(),
             allowed_tools: Vec::new(),
             tool_profile: None,
+            skill_context: String::new(),
         });
         id
     }
@@ -78,6 +82,7 @@ impl TaskManager {
             selected_skills: Vec::new(),
             allowed_tools: Vec::new(),
             tool_profile: None,
+            skill_context: String::new(),
         });
         id
     }
@@ -168,10 +173,11 @@ impl TaskManager {
             selected_skills: Vec::new(),
             allowed_tools: Vec::new(),
             tool_profile: None,
+            skill_context: String::new(),
         });
     }
 
-    /// Hydrate a task from DB with full metadata including tags, skills, and tools.
+    /// Hydrate a task from DB with full metadata including tags, skills, tools, and skill context.
     pub fn hydrate_task(
         &mut self,
         id: TaskId,
@@ -181,6 +187,7 @@ impl TaskManager {
         selected_skills: Vec<String>,
         allowed_tools: Vec<String>,
         tool_profile: Option<String>,
+        skill_context: String,
     ) {
         if self.tasks.iter().any(|t| t.id == id) {
             return;
@@ -193,6 +200,7 @@ impl TaskManager {
             selected_skills,
             allowed_tools,
             tool_profile,
+            skill_context,
         });
     }
 }
