@@ -1158,6 +1158,50 @@ async fn container_gc_loop(state: AppState) {
         if gc_count > 0 {
             tracing::info!(removed = gc_count, "Container GC cycle complete");
         }
+
+        // Phase D: Periodic Docker prune (every 10th cycle ≈ 5 min)
+        // Cleans up stopped mcclawd containers and dangling images from builds
+        static GC_CYCLE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let cycle = GC_CYCLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if cycle % 10 == 9 {
+            // Prune stopped containers with mcclawd label
+            let mut prune_filters = std::collections::HashMap::new();
+            prune_filters.insert("label".to_string(), vec!["mcclawd.task_id".to_string()]);
+            match docker
+                .prune_containers(Some(bollard::container::PruneContainersOptions {
+                    filters: prune_filters,
+                }))
+                .await
+            {
+                Ok(result) => {
+                    let pruned = result.containers_deleted.as_ref().map_or(0, |v| v.len());
+                    if pruned > 0 {
+                        tracing::info!(pruned, "Docker prune: removed stopped mcclawd containers");
+                    }
+                }
+                Err(e) => tracing::debug!(error = %e, "Docker container prune failed"),
+            }
+
+            // Prune dangling images (from mcclawd builder)
+            let mut img_filters = std::collections::HashMap::new();
+            img_filters.insert("dangling".to_string(), vec!["true".to_string()]);
+            match docker
+                .prune_images(Some(bollard::image::PruneImagesOptions {
+                    filters: img_filters,
+                }))
+                .await
+            {
+                Ok(result) => {
+                    let pruned = result.images_deleted.as_ref().map_or(0, |v| v.len());
+                    if pruned > 0 {
+                        let reclaimed = result.space_reclaimed.unwrap_or(0);
+                        tracing::info!(pruned, reclaimed_mb = reclaimed / 1_048_576,
+                            "Docker prune: removed dangling images");
+                    }
+                }
+                Err(e) => tracing::debug!(error = %e, "Docker image prune failed"),
+            }
+        }
     }
 }
 
