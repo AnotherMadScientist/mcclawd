@@ -56,7 +56,12 @@ export function WorkspacePage() {
     mutationFn: (name: string) => api.workspace.applyProfile(name),
     onSuccess: (_data, name) => {
       setDirty(false);
+      // Invalidate ALL workspace file queries (each tab has ["workspace", filename])
+      // and the profiles list so active badge updates
       queryClient.invalidateQueries({ queryKey: ["workspace"] });
+      queryClient.invalidateQueries({ queryKey: ["workspace-profiles"] });
+      // Force refetch the currently selected file immediately so the textarea updates
+      queryClient.refetchQueries({ queryKey: ["workspace", selected] });
       setToast({ msg: `Profile "${name}" applied`, ok: true });
       setTimeout(() => setToast(null), 2500);
       setConfirmApply(null);

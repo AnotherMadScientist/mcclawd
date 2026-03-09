@@ -567,6 +567,26 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
             } else {
                 tracing::info!("Seeded active_profile = 'default' in DB");
             }
+            // Also write default profile files to disk so workspace is immediately consistent
+            let builtin = mcclawd_agent::workspace::builtin_profiles();
+            if let Some(profile) = builtin.into_iter().find(|p| p.name == "default") {
+                let config = state.config.read().await;
+                let workspace_dir = config.data_dir.join(&config.agent.default_workspace);
+                drop(config);
+                let _ = tokio::fs::create_dir_all(&workspace_dir).await;
+                let files = [
+                    ("SOUL.md", profile.soul),
+                    ("AGENTS.md", profile.agents),
+                    ("USER.md", profile.user),
+                    ("IDENTITY.md", profile.identity),
+                    ("TOOLS.md", profile.tools),
+                    ("HEARTBEAT.md", profile.heartbeat),
+                ];
+                for (filename, content) in &files {
+                    let _ = tokio::fs::write(workspace_dir.join(filename), content).await;
+                }
+                tracing::info!("Default profile files written to disk (first-time setup)");
+            }
         }
         Err(e) => {
             tracing::warn!(error = %e, "Failed to read active_profile from DB");
@@ -1190,7 +1210,10 @@ async fn container_gc_loop(state: AppState) {
         }
 
         // Phase B: Task → Container check (reverse direction)
-        // Find tasks marked Running/Building in DB that have no live Docker container
+        // Find tasks marked Running/Building in DB that have no live Docker container.
+        // IMPORTANT: Reload db_containers after Phase A cleanup to avoid stale data
+        // that could cause tasks to survive a GC cycle when their containers were just removed.
+        let fresh_db_containers = state.pg_store.load_persistent_containers().await.unwrap_or_default();
         let live_docker_ids: std::collections::HashSet<String> = containers
             .iter()
             .filter_map(|c| c.id.clone())
@@ -1203,12 +1226,12 @@ async fn container_gc_loop(state: AppState) {
                     continue;
                 }
 
-                // Check if this task has a live container
-                let has_container = db_containers.iter().any(|(cid, tid, _, _)| {
+                // Check if this task has a live container (using fresh DB data after Phase A cleanup)
+                let has_container = fresh_db_containers.iter().any(|(cid, tid, _, _)| {
                     tid == task_id && live_docker_ids.contains(cid)
                 });
                 // Check if this task has any persistent_container record at all
-                let has_db_container = db_containers.iter().any(|(_, tid, _, _)| tid == task_id);
+                let has_db_container = fresh_db_containers.iter().any(|(_, tid, _, _)| tid == task_id);
 
                 if status == "Running" || status == "Building" {
                     // Running/Building tasks with no live container → fail + delete
@@ -1388,33 +1411,47 @@ async fn docker_event_listener(state: AppState) {
 
             let task_id_typed = TaskId(tid.clone());
 
-            // Cascade: remove handle, fail task, clean DB + memory
-            state.task_containers.write().await.remove(&task_id_typed);
+            // Check current task status BEFORE cascading — only fail tasks that
+            // are still Running/Building. Completed/Failed tasks should not be
+            // overwritten when their container exits naturally.
+            let should_fail = {
+                let mgr = state.tasks.read().await;
+                mgr.get_task(&task_id_typed)
+                    .map(|t| {
+                        matches!(
+                            t.status,
+                            TaskStatus::Running | TaskStatus::Building | TaskStatus::Pending
+                        )
+                    })
+                    .unwrap_or(false)
+            };
 
-            state
-                .pg_update_status_sync(&task_id_typed, "Failed", Some("Container stopped"))
-                .await;
+            // Always clean up the container handle and DB record
+            state.task_containers.write().await.remove(&task_id_typed);
             let _ = state
                 .pg_store
                 .delete_persistent_containers_by_task(&tid)
                 .await;
 
-            {
-                let mut mgr = state.tasks.write().await;
-                if let Some(t) = mgr.get_task(&task_id_typed) {
-                    if matches!(
-                        t.status,
-                        TaskStatus::Running | TaskStatus::Building
-                    ) {
-                        mgr.fail_task(&task_id_typed, "Container stopped".to_string());
-                    }
+            if should_fail {
+                // Task was still active — mark as failed in both DB and memory
+                state
+                    .pg_update_status_sync(&task_id_typed, "Failed", Some("Container stopped"))
+                    .await;
+                {
+                    let mut mgr = state.tasks.write().await;
+                    mgr.fail_task(&task_id_typed, "Container stopped".to_string());
                 }
+                // Clean in-memory caches for failed tasks
+                state.task_streams.write().await.remove(&task_id_typed);
+                state.task_chat_history.write().await.remove(&task_id_typed);
+                state.task_events.write().await.remove(&task_id_typed);
+            } else {
+                tracing::debug!(
+                    task_id = %tid,
+                    "Container stopped but task already completed/failed — skipping status update"
+                );
             }
-
-            // Clean in-memory caches
-            state.task_streams.write().await.remove(&task_id_typed);
-            state.task_chat_history.write().await.remove(&task_id_typed);
-            state.task_events.write().await.remove(&task_id_typed);
         }
     }
 

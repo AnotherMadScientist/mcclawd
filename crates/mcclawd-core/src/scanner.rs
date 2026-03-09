@@ -201,17 +201,41 @@ async fn scan_via_sidecar(content: &str, skill_path: &Path) -> anyhow::Result<Sc
 
 /// Basic static analysis fallback when uvx/snyk-agent-scan is not available.
 /// Reads SKILL.md and checks for common security-sensitive patterns.
+/// Returns `NotScanned` with an explanatory issue if SKILL.md is missing or a stub.
 pub async fn basic_scan(skill_path: &Path) -> anyhow::Result<ScanResult> {
     let skill_md = skill_path.join("SKILL.md");
     let content = match tokio::fs::read_to_string(&skill_md).await {
-        Ok(c) => c.to_lowercase(),
+        Ok(c) => c,
         Err(_) => {
             return Ok(ScanResult {
                 status: ScanStatus::NotScanned,
-                issues: vec![],
+                issues: vec![ScanIssue {
+                    code: "S001".to_string(),
+                    severity: "info".to_string(),
+                    description: "SKILL.md file not found — cannot scan skill content".to_string(),
+                }],
             });
         }
     };
+
+    // Detect stub SKILL.md (< 500 bytes or no `## ` sections).
+    // Stubs are generated during cache-fallback installs and lack real content.
+    if content.len() < 500 || !content.contains("## ") {
+        return Ok(ScanResult {
+            status: ScanStatus::NotScanned,
+            issues: vec![ScanIssue {
+                code: "S002".to_string(),
+                severity: "info".to_string(),
+                description: format!(
+                    "SKILL.md is a stub ({} bytes, no sections) — full content not available for scanning. \
+                     Try re-installing or manually downloading SKILL.md from ClawHub.",
+                    content.len()
+                ),
+            }],
+        });
+    }
+
+    let content = content.to_lowercase();
 
     let mut issues = Vec::new();
 
@@ -327,15 +351,28 @@ mod tests {
         assert_eq!(derive_status(&issues), ScanStatus::Critical);
     }
 
+    /// Helper: build a SKILL.md string that is >500 bytes and has `## ` sections
+    /// so it passes the stub check. `body` is inserted after the boilerplate.
+    fn full_skill_md(body: &str) -> String {
+        // Boilerplate ~200 bytes + padding to exceed 500 bytes threshold
+        let mut s = String::from(
+            "---\nname: test-skill\nversion: 1.0.0\nauthor: test\n---\n# Test Skill\n\n\
+             ## Purpose\nThis is a test skill used for unit testing the scanner module.\n\n\
+             ## Instructions\nFollow these instructions carefully to use this skill.\n\n",
+        );
+        s.push_str(body);
+        // Pad to >500 bytes if needed
+        while s.len() < 510 {
+            s.push_str("This is padding text to ensure the content exceeds the stub threshold.\n");
+        }
+        s
+    }
+
     #[tokio::test]
     async fn test_basic_scan_clean() {
         let dir = std::env::temp_dir().join("mcclawd_test_basic_scan_clean");
         let _ = std::fs::create_dir_all(&dir);
-        std::fs::write(
-            dir.join("SKILL.md"),
-            "---\nname: safe-skill\n---\n# Safe Skill\n\n## Purpose\nDoes safe things.\n",
-        )
-        .unwrap();
+        std::fs::write(dir.join("SKILL.md"), full_skill_md("Does safe things.\n")).unwrap();
         let result = basic_scan(&dir).await.unwrap();
         assert_eq!(result.status, ScanStatus::Pass);
         assert!(result.issues.is_empty());
@@ -348,7 +385,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(
             dir.join("SKILL.md"),
-            "---\nname: risky-skill\n---\n# Risky\n\nRun sudo rm -rf /tmp/stuff\nUse eval( to process\n",
+            full_skill_md("Run sudo rm -rf /tmp/stuff\nUse eval( to process\n"),
         )
         .unwrap();
         let result = basic_scan(&dir).await.unwrap();
@@ -365,6 +402,22 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let result = basic_scan(&dir).await.unwrap();
         assert_eq!(result.status, ScanStatus::NotScanned);
+        assert_eq!(result.issues.len(), 1);
+        assert_eq!(result.issues[0].code, "S001");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_basic_scan_stub_detection() {
+        let dir = std::env::temp_dir().join("mcclawd_test_basic_scan_stub");
+        let _ = std::fs::create_dir_all(&dir);
+        // Write a stub: short content, no `## ` sections
+        std::fs::write(dir.join("SKILL.md"), "---\nname: stub\n---\n# Stub\nShort.\n").unwrap();
+        let result = basic_scan(&dir).await.unwrap();
+        assert_eq!(result.status, ScanStatus::NotScanned);
+        assert_eq!(result.issues.len(), 1);
+        assert_eq!(result.issues[0].code, "S002");
+        assert!(result.issues[0].description.contains("stub"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

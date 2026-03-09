@@ -214,13 +214,27 @@ pub async fn apply_profile(
                     .into_response();
             }
         }
-        // Also write to disk
+        // Also write to disk — report errors instead of silently ignoring them
         let config = state.config.read().await;
         let workspace_dir = config.data_dir.join(&config.agent.default_workspace);
         drop(config);
-        let _ = tokio::fs::create_dir_all(&workspace_dir).await;
+        if let Err(e) = tokio::fs::create_dir_all(&workspace_dir).await {
+            tracing::error!(error = %e, "Failed to create workspace dir for profile apply");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Failed to create workspace dir: {e}")})),
+            )
+                .into_response();
+        }
         for (filename, content) in &files {
-            let _ = tokio::fs::write(workspace_dir.join(filename), content).await;
+            if let Err(e) = tokio::fs::write(workspace_dir.join(filename), content).await {
+                tracing::error!(error = %e, filename, "Failed to write workspace file during profile apply");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("Failed to write {filename}: {e}")})),
+                )
+                    .into_response();
+            }
         }
         // Persist active profile selection
         if let Err(e) = state
@@ -256,13 +270,27 @@ pub async fn apply_profile(
                     .into_response();
             }
         }
-        // Also write to disk
+        // Also write to disk — report errors instead of silently ignoring them
         let config = state.config.read().await;
         let workspace_dir = config.data_dir.join(&config.agent.default_workspace);
         drop(config);
-        let _ = tokio::fs::create_dir_all(&workspace_dir).await;
+        if let Err(e) = tokio::fs::create_dir_all(&workspace_dir).await {
+            tracing::error!(error = %e, "Failed to create workspace dir for profile apply");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Failed to create workspace dir: {e}")})),
+            )
+                .into_response();
+        }
         for (filename, content) in &files {
-            let _ = tokio::fs::write(workspace_dir.join(filename), content).await;
+            if let Err(e) = tokio::fs::write(workspace_dir.join(filename), content).await {
+                tracing::error!(error = %e, filename = %filename, "Failed to write workspace file during profile apply");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("Failed to write {filename}: {e}")})),
+                )
+                    .into_response();
+            }
         }
         // Persist active profile selection
         if let Err(e) = state

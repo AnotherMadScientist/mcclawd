@@ -197,13 +197,29 @@ pub async fn install_skill(
             let scan_cache = state.scan_cache.clone();
             let config = state.config.read().await;
             let skill_dir = config.skills.managed_dir.join(&name);
+            let clawhub_api = config.skills.clawhub_api.clone();
             drop(config);
             tokio::spawn(async move {
                 if let Err(e) = store.save_skill("admin", &name, ver.as_deref(), None).await {
                     tracing::warn!("Failed to persist installed skill to DB: {e}");
                 }
-                // Auto-scan after install and persist result
+                // Check if installed SKILL.md is a stub; upgrade before scanning
                 if skill_dir.exists() {
+                    let skill_md_path = skill_dir.join("SKILL.md");
+                    let is_stub = if skill_md_path.exists() {
+                        let content = tokio::fs::read_to_string(&skill_md_path).await.unwrap_or_default();
+                        content.len() < 500 || !content.contains("## ")
+                    } else {
+                        true
+                    };
+                    if is_stub {
+                        let client = mcclawd_core::clawhub::client::ClawHubClient::new(&clawhub_api);
+                        if let Ok(content) = client.download_skill_md(&name, "latest").await {
+                            let _ = tokio::fs::write(&skill_md_path, &content).await;
+                            tracing::info!("Upgraded stub SKILL.md for '{name}' after install ({} bytes)", content.len());
+                        }
+                    }
+                    // Auto-scan after install (with upgraded content if available)
                     if let Ok(result) = scanner::scan_skill(&skill_dir).await {
                         if let Ok(json_val) = serde_json::to_value(&result) {
                             if let Err(e) = store.save_scan_result("admin", &name, &json_val).await {
@@ -495,11 +511,20 @@ pub async fn scan_skill(
     };
 
     if is_installed_stub && skill_path.exists() {
-        // Try to upgrade the stub with full content from ClawHub
-        let client = mcclawd_core::clawhub::client::ClawHubClient::new(&clawhub_api);
-        if let Ok(content) = client.download_skill_md(&name, "latest").await {
-            let _ = tokio::fs::write(&skill_md_file, &content).await;
-            tracing::info!("Upgraded stub SKILL.md for scan of '{name}' ({} bytes)", content.len());
+        // Try to upgrade the stub with full content from ClawHub before scanning
+        let client = mcclawd_core::clawhub::client::ClawHubClient::new(&clawhub_api.clone());
+        match client.download_skill_md(&name, "latest").await {
+            Ok(content) => {
+                if let Err(e) = tokio::fs::write(&skill_md_file, &content).await {
+                    tracing::warn!("Failed to write upgraded SKILL.md for '{name}': {e}");
+                } else {
+                    tracing::info!("Upgraded stub SKILL.md for scan of '{name}' ({} bytes)", content.len());
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Could not download full SKILL.md for '{name}' from ClawHub: {e}");
+                // Scanner will detect the stub and return NotScanned with explanation
+            }
         }
     }
 
