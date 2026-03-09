@@ -15,7 +15,7 @@
 
 use bollard::image::ListImagesOptions;
 use bollard::Docker;
-use mcclawd_core::config::McclawdConfig;
+use mcclawd_core::config::{McclawdConfig, McpServerConfig};
 use mcclawd_core::skills::LoadedSkill;
 use mcclawd_core::tool_resolver::{ResolvedToolSet, ToolResolver};
 use std::collections::HashMap;
@@ -40,10 +40,13 @@ impl McpPorter {
     /// 1. Ensure Docker network exists
     /// 2. Check image cache → build if miss
     /// 3. Ensure AgentGateway is on network
-    /// 4. Return `AgentEnvironment` with all container config
+    /// 4. Ensure required MCP server containers are running (start on demand)
+    /// 5. Connect MCP containers to network
+    /// 6. Return `AgentEnvironment` with all container config
     pub async fn prepare_environment(
         &self,
         tool_set: &ResolvedToolSet,
+        mcp_servers: &[McpServerConfig],
         config: &McclawdConfig,
     ) -> anyhow::Result<AgentEnvironment> {
         let network = &config.sandbox.network;
@@ -66,15 +69,59 @@ impl McpPorter {
             tracing::warn!("Could not connect AgentGateway to network: {e}");
         }
 
-        // 4. Ensure required MCP server containers are on the network
+        // 4. Ensure required MCP server containers are running and on the network
         for server_name in &tool_set.required_servers {
+            // Look up the McpServerConfig for this required server
+            let server_config = mcp_servers.iter().find(|s| s.name == *server_name);
+            let Some(server_config) = server_config else {
+                tracing::warn!(
+                    server = server_name,
+                    "Required MCP server has no matching config — skipping"
+                );
+                continue;
+            };
+
+            // Check if the container is already running
+            let status = self
+                .lifecycle
+                .server_status(server_name, server_config)
+                .await;
+
+            if !status.running {
+                tracing::info!(
+                    server = server_name,
+                    "MCP server not running — starting on demand"
+                );
+                match self.lifecycle.start_server(server_config).await {
+                    Ok(container_id) => {
+                        tracing::info!(
+                            server = server_name,
+                            container_id = %container_id,
+                            "MCP server started on demand"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            server = server_name,
+                            error = %e,
+                            "Failed to start MCP server on demand"
+                        );
+                        // Continue — the task may still work if other servers are available
+                    }
+                }
+            }
+
+            // Connect the container to the network
             let container_name = format!("mcclawd-mcp-{server_name}");
             if let Err(e) = self
                 .lifecycle
                 .ensure_on_network(&container_name, network)
                 .await
             {
-                tracing::warn!(server = server_name, "Could not connect MCP server to network: {e}");
+                tracing::warn!(
+                    server = server_name,
+                    "Could not connect MCP server to network: {e}"
+                );
             }
         }
 
@@ -207,7 +254,7 @@ impl McpPorter {
 
     /// Prepare a minimal base environment — network + gateway URL only.
     ///
-    /// **No skills, no MCP tool filtering, no custom image builds.**
+    /// **No skills, no MCP tool filtering, no custom image builds, no MCP containers started.**
     /// Used for the system agent which must NEVER have skills or MCP tools injected.
     /// The system agent is a lightweight UI controller (navigate_to, create_task).
     pub async fn prepare_base_environment(
@@ -230,28 +277,32 @@ impl McpPorter {
             image: config.sandbox.base_image.clone(),
             network: network.clone(),
             gateway_url: "http://agentgateway:3000".to_string(),
-            allowed_tools: vec!["*".to_string()],
+            // No MCP tools allowed for the base/system agent environment
+            allowed_tools: vec![],
             skill_context: String::new(),
         })
     }
 
-    /// Prepare a full-skill environment for a task agent.
+    /// Prepare a skill-based environment for a task agent.
     ///
-    /// Resolves ALL installed skills into a single image with proper MCP tool filtering.
+    /// Resolves the provided skills into a single image with proper MCP tool filtering.
+    /// Starts required MCP server containers on demand if they are not already running.
     /// **Only for task agents — NEVER for the system agent.**
     pub async fn prepare_task_environment(
         &self,
         all_skills: &HashMap<String, LoadedSkill>,
-        mcp_servers: &[mcclawd_core::config::McpServerConfig],
+        mcp_servers: &[McpServerConfig],
         config: &McclawdConfig,
     ) -> anyhow::Result<AgentEnvironment> {
         if all_skills.is_empty() {
-            // No skills installed — use base environment with all tools allowed
+            // No skills — use base environment (no MCP tools)
             return self.prepare_base_environment(config).await;
         }
 
         let skill_names: Vec<String> = all_skills.keys().cloned().collect();
-        let tool_set = ToolResolver::resolve(&skill_names, all_skills, mcp_servers, &config.sandbox.base_image)?;
-        self.prepare_environment(&tool_set, config).await
+        let tool_set =
+            ToolResolver::resolve(&skill_names, all_skills, mcp_servers, &config.sandbox.base_image)?;
+        self.prepare_environment(&tool_set, mcp_servers, config)
+            .await
     }
 }

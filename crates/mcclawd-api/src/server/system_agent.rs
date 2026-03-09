@@ -222,7 +222,7 @@ pub async fn ensure_system_agent_container(
                     gateway_url: crate::sandbox::container::container_gateway_url(
                         &config.mcp.agentgateway_url,
                     ),
-                    allowed_tools: vec!["*".to_string()],
+                    allowed_tools: vec![],
                     skill_context: String::new(),
                 }
             }
@@ -234,7 +234,7 @@ pub async fn ensure_system_agent_container(
             gateway_url: crate::sandbox::container::container_gateway_url(
                 &config.mcp.agentgateway_url,
             ),
-            allowed_tools: vec!["*".to_string()],
+            allowed_tools: vec![],
             skill_context: String::new(),
         }
     };

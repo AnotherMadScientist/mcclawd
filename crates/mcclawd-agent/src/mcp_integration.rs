@@ -36,15 +36,22 @@ pub async fn connect_from_env() -> Result<Option<Vec<McpBundle>>> {
         .filter(|s| !s.is_empty())
         .collect();
 
+    // Empty allowed_tools = no MCP tools permitted. Skip connection entirely.
+    if allowed_tools.is_empty() {
+        tracing::info!(
+            "MCCLAWD_ALLOWED_TOOLS is empty — no MCP tools permitted, skipping gateway connection"
+        );
+        return Ok(Some(vec![]));
+    }
+
     let client = McpClient::new(&gateway_url);
     match client.connect().await {
         Ok(conn) => {
             let all_tools = conn.tools().to_vec();
             let peer = conn.peer().clone();
 
-            // Filter tools by allowed prefixes (or allow all if "*" or empty)
-            let allow_all = allowed_tools.is_empty()
-                || allowed_tools.iter().any(|t| t == "*");
+            // Only "*" means allow all tools; empty was already handled above
+            let allow_all = allowed_tools.iter().any(|t| t == "*");
 
             let filtered_tools: Vec<rmcp::model::Tool> = if allow_all {
                 all_tools

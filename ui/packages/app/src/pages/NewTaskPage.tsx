@@ -295,9 +295,24 @@ export function NewTaskPage() {
             {/* Skills multi-select */}
             {installedSkills.length > 0 && (
               <div>
-                <label className="text-xs text-muted-foreground mb-2 block">
-                  Skills (deselect to exclude)
-                </label>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs text-muted-foreground block">
+                    Skills (select to include)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSelectedSkills((prev) =>
+                        prev.length === installedSkills.length
+                          ? []
+                          : installedSkills.map((s) => s.name),
+                      )
+                    }
+                    className="text-xs text-primary hover:underline"
+                  >
+                    {selectedSkills.length === installedSkills.length ? "Clear All" : "Select All"}
+                  </button>
+                </div>
                 <div className="space-y-1 max-h-40 overflow-y-auto">
                   {installedSkills.map((skill) => (
                     <label
@@ -306,26 +321,19 @@ export function NewTaskPage() {
                     >
                       <input
                         type="checkbox"
-                        checked={
-                          selectedSkills.length === 0
-                            ? true
-                            : selectedSkills.includes(skill.name)
-                        }
-                        onChange={() => {
-                          if (selectedSkills.length === 0) {
-                            // Start with all selected, then deselect this one
-                            const all = installedSkills.map((s) => s.name).filter((n) => n !== skill.name);
-                            setSelectedSkills(all);
-                          } else {
-                            toggleSkill(skill.name);
-                          }
-                        }}
+                        checked={selectedSkills.includes(skill.name)}
+                        onChange={() => toggleSkill(skill.name)}
                         className="rounded"
                       />
                       <span className="font-mono">{skill.name}</span>
                     </label>
                   ))}
                 </div>
+                {selectedSkills.length === 0 && (
+                  <p className="text-xs text-muted-foreground/70 mt-1.5 italic">
+                    No skills selected — agent will use basic tools only
+                  </p>
+                )}
               </div>
             )}
           </div>
