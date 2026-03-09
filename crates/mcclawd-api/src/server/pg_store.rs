@@ -1276,6 +1276,8 @@ impl PgTaskStore {
                         ) as ev
                         FROM security_events e3 WHERE e3.task_id = e.task_id
                           AND ($1::timestamptz IS NULL OR e3.created_at >= $1)
+                          AND e3.action_taken != 'allowed'
+                          AND EXISTS (SELECT 1 FROM dlp_findings f2 WHERE f2.security_event_id = e3.id)
                         ORDER BY e3.created_at DESC
                         LIMIT 50
                     ) sub
@@ -1285,6 +1287,8 @@ impl PgTaskStore {
             LEFT JOIN tasks t ON t.id = e.task_id
             WHERE ($1::timestamptz IS NULL OR e.created_at >= $1)
               AND (t.id IS NOT NULL OR e.task_id = '__system__')
+              AND e.action_taken != 'allowed'
+              AND EXISTS (SELECT 1 FROM dlp_findings df JOIN security_events se2 ON se2.id = df.security_event_id WHERE se2.task_id = e.task_id)
             GROUP BY e.task_id, t.prompt, t.status
             ORDER BY MAX(e.created_at) DESC
             LIMIT $2"
@@ -1313,6 +1317,8 @@ impl PgTaskStore {
                           LEFT JOIN tasks tt ON tt.id = se.task_id
                           WHERE se.user_id = $1 AND ($2::timestamptz IS NULL OR se.created_at >= $2)
                             AND (tt.id IS NOT NULL OR se.task_id = '__system__')
+                            AND se.action_taken != 'allowed'
+                            AND EXISTS (SELECT 1 FROM dlp_findings df WHERE df.security_event_id = se.id)
                           GROUP BY se.event_type) sub
                 ), '{}'::json),
                 'by_threat', COALESCE((
@@ -1322,13 +1328,17 @@ impl PgTaskStore {
                           LEFT JOIN tasks tt ON tt.id = se.task_id
                           WHERE se.user_id = $1 AND ($2::timestamptz IS NULL OR se.created_at >= $2)
                             AND (tt.id IS NOT NULL OR se.task_id = '__system__')
+                            AND se.action_taken != 'allowed'
+                            AND EXISTS (SELECT 1 FROM dlp_findings df WHERE df.security_event_id = se.id)
                           GROUP BY se.threat_level) sub
                 ), '{}'::json)
             )
             FROM security_events e
             LEFT JOIN tasks t ON t.id = e.task_id
             WHERE e.user_id = $1 AND ($2::timestamptz IS NULL OR e.created_at >= $2)
-              AND (t.id IS NOT NULL OR e.task_id = '__system__')"
+              AND (t.id IS NOT NULL OR e.task_id = '__system__')
+              AND e.action_taken != 'allowed'
+              AND EXISTS (SELECT 1 FROM dlp_findings df WHERE df.security_event_id = e.id)"
         )
         .bind(user_id)
         .bind(since)
@@ -1352,15 +1362,16 @@ impl PgTaskStore {
         Ok(result.rows_affected())
     }
 
-    /// Remove security events that have no associated DLP findings (noise),
-    /// plus events with NULL task_id.
+    /// Remove security events that are noise: no findings OR action=allowed.
+    /// Only warnings, blocks, and redactions with actual findings are kept.
     pub async fn cleanup_events_without_findings(&self) -> anyhow::Result<u64> {
-        // Delete NULL task_id events
-        sqlx::query("DELETE FROM security_events WHERE task_id IS NULL")
+        // Delete findings attached to allowed events (clean up FK before deleting events)
+        sqlx::query("DELETE FROM dlp_findings WHERE security_event_id IN (SELECT id FROM security_events WHERE action_taken = 'allowed')")
             .execute(&self.pool)
             .await?;
+        // Delete allowed events + events with no findings
         let result = sqlx::query(
-            "DELETE FROM security_events WHERE action_taken = 'allowed' AND id NOT IN (SELECT DISTINCT security_event_id FROM dlp_findings)",
+            "DELETE FROM security_events WHERE action_taken = 'allowed' OR id NOT IN (SELECT DISTINCT security_event_id FROM dlp_findings)",
         )
         .execute(&self.pool)
         .await?;
