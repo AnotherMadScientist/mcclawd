@@ -38,6 +38,8 @@ export function MicButton({
   const interimTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const busyRef = useRef(false);
   const wantStopRef = useRef(false);
+  const pressTimeRef = useRef<number>(0);
+  const toggleModeRef = useRef(false);
 
   const cleanup = useCallback(() => {
     if (interimTimerRef.current) {
@@ -194,11 +196,44 @@ export function MicButton({
   return (
     <button
       type="button"
-      onMouseDown={startRecording}
-      onMouseUp={stopRecording}
-      onMouseLeave={recording ? stopRecording : undefined}
-      onTouchStart={startRecording}
-      onTouchEnd={stopRecording}
+      onMouseDown={() => {
+        if (recording && toggleModeRef.current) {
+          toggleModeRef.current = false;
+          stopRecording();
+          return;
+        }
+        pressTimeRef.current = Date.now();
+        toggleModeRef.current = false;
+        startRecording();
+      }}
+      onMouseUp={() => {
+        const held = Date.now() - pressTimeRef.current;
+        if (held < 300 && recording) {
+          // Short click: toggle mode — don't stop now, let next click stop
+          toggleModeRef.current = true;
+          return;
+        }
+        if (!toggleModeRef.current) stopRecording();
+      }}
+      onMouseLeave={recording && !toggleModeRef.current ? stopRecording : undefined}
+      onTouchStart={() => {
+        if (recording && toggleModeRef.current) {
+          toggleModeRef.current = false;
+          stopRecording();
+          return;
+        }
+        pressTimeRef.current = Date.now();
+        toggleModeRef.current = false;
+        startRecording();
+      }}
+      onTouchEnd={() => {
+        const held = Date.now() - pressTimeRef.current;
+        if (held < 300 && recording) {
+          toggleModeRef.current = true;
+          return;
+        }
+        if (!toggleModeRef.current) stopRecording();
+      }}
       disabled={disabled || transcribing}
       className={`relative flex ${btnSize} items-center justify-center rounded-md border transition-colors ${
         isActive
@@ -210,8 +245,8 @@ export function MicButton({
         transcribing
           ? "Transcribing..."
           : recording
-            ? "Release to stop"
-            : "Hold to record"
+            ? "Click or release to stop"
+            : "Hold to talk, click to toggle"
       }
     >
       <div className={`relative ${iconSize}`}>
@@ -253,7 +288,7 @@ export function MicButton({
       {!isActive && (
         <span
           className="absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full border border-background bg-violet-500"
-          title="ElevenLabs STT"
+          title="Speech-to-Text"
         />
       )}
       {recording && (

@@ -81,16 +81,24 @@ export function SecurityPage() {
             className={`w-2 h-2 rounded-full ${
               status == null
                 ? "bg-zinc-600"
-                : status.sidecar_healthy
+                : status.sidecar_status === "healthy"
                   ? "bg-green-400"
-                  : "bg-red-400"
+                  : status.sidecar_status === "unhealthy"
+                    ? "bg-red-400"
+                    : "bg-zinc-500"
             }`}
           />
           <span className="text-zinc-400">Sidecar:</span>
           <span className="text-zinc-100 font-medium">
-            {status == null ? "\u2014" : status.sidecar_healthy ? "Healthy" : "Down"}
+            {status == null
+              ? "\u2014"
+              : status.sidecar_status === "healthy"
+                ? "Healthy"
+                : status.sidecar_status === "unhealthy"
+                  ? "Unhealthy"
+                  : "Not configured"}
           </span>
-          {status && (
+          {status && status.sidecar_status !== "not_configured" && (
             <span className="text-zinc-500 font-mono text-xs">{status.sidecar_url}</span>
           )}
         </div>

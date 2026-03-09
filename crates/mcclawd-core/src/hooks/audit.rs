@@ -250,6 +250,13 @@ impl AuditSink for PgAuditSink {
                 )
             };
 
+            // Skip noise: no DLP findings + allowed + no task association.
+            // Events WITH a task_id are always logged to provide an audit trail,
+            // even when no DLP findings are present.
+            if findings.is_empty() && action_taken == "allowed" && task_id.is_none() {
+                return;
+            }
+
             let direction = match event.action {
                 AuditAction::PreCall => "inbound",
                 AuditAction::PostCall => "outbound",

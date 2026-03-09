@@ -37,9 +37,12 @@ export function WorkspacePage() {
   const save = useMutation({
     mutationFn: (params: { file: string; content: string }) =>
       api.workspace.update(params.file, params.content),
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
       setDirty(false);
-      queryClient.invalidateQueries({ queryKey: ["workspace", selected] });
+      queryClient.setQueryData(["workspace", variables.file], {
+        name: variables.file,
+        content: variables.content,
+      });
       setToast({ msg: "Saved successfully", ok: true });
       setTimeout(() => setToast(null), 2500);
     },

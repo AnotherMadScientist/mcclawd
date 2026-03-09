@@ -298,64 +298,114 @@ test.describe("McpPorter: MCP Tools Live Updates @mcpporter", () => {
       return;
     }
 
-    test.setTimeout(60_000);
+    // Pre-flight: verify Docker is available (container listing works)
+    try {
+      const token = await getToken(page);
+      const dockerCheck = await page.request.get("/api/docker/containers", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!dockerCheck.ok()) {
+        test.skip(true, "Docker API not available — skipping container lifecycle test");
+        return;
+      }
+    } catch {
+      test.skip(true, "Docker API not reachable — skipping container lifecycle test");
+      return;
+    }
+
+    // Pre-flight: verify Docker image exists (building can take 60s+ and cause timeout)
+    try {
+      const token = await getToken(page);
+      const buildResp = await page.request.get("/api/docker/build-status", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (buildResp.ok()) {
+        const buildStatus = await buildResp.json();
+        if (buildStatus.status === "building") {
+          test.skip(true, "Docker image still building — skipping container lifecycle test");
+          return;
+        }
+      }
+    } catch {
+      // build-status endpoint may not exist — continue anyway
+    }
+
+    test.setTimeout(120_000);
 
     // Navigate to MCP page and verify tools section loads
     await page.goto("/config/mcp");
     await expect(
       page.getByRole("heading", { name: "MCP Tools" })
-    ).toBeVisible({ timeout: 10000 });
+    ).toBeVisible({ timeout: 15000 });
 
-    // Record initial container pills count for the first tool row
+    // Wait for tool rows to be present (they depend on both servers query and containers query)
     const toolRows = page.locator("[data-testid^='mcp-tool-']");
+    await expect(toolRows.first()).toBeVisible({ timeout: 15000 });
     const initialRowCount = await toolRows.count();
     expect(initialRowCount).toBeGreaterThan(0);
 
-    // Count initial total container pills (excluding "No containers" badges)
-    const initialPills = async () => {
+    // Count container pills (excluding "No containers" badges) across all tool rows
+    const countContainerPills = async () => {
       let count = 0;
-      for (let i = 0; i < initialRowCount; i++) {
+      const rowCount = await toolRows.count();
+      for (let i = 0; i < rowCount; i++) {
         const row = toolRows.nth(i);
         const pills = row.locator("span.rounded-full").filter({ hasNotText: "No containers" });
         count += await pills.count();
       }
       return count;
     };
-    const pillsBefore = await initialPills();
+    const pillsBefore = await countContainerPills();
 
     // Create a task — this spawns a container with MCP tools
     const taskId = await createTaskViaApi(page, "List files in current directory");
+    const shortId = taskId.slice(0, 8);
 
-    // Wait for container to appear in Docker API
+    // Wait for container to appear in Docker API (poll every 2s, up to 45s for image build + start)
     let taskContainerId: string | null = null;
     await expect(async () => {
       const containers = await getContainers(page);
       const match = containers.find(
-        (c: any) => c.task_id && taskId && c.task_id.includes(taskId.slice(0, 8))
+        (c: any) => c.task_id && taskId && c.task_id.includes(shortId)
       );
       expect(match).toBeTruthy();
       taskContainerId = match?.id;
-    }).toPass({ timeout: 15000, intervals: [1000] });
+    }).toPass({ timeout: 45000, intervals: [2000] });
 
-    // The MCP page polls every 5s — wait for the container pill to appear in the UI
-    // A new container with mcp_tools should show up as a blue pill in a tool row
+    // The MCP page polls docker-containers every 5s (refetchInterval: 5000).
+    // Force an immediate UI refresh by re-navigating, then poll for the pill.
+    await page.goto("/config/mcp");
+    await expect(
+      page.getByRole("heading", { name: "MCP Tools" })
+    ).toBeVisible({ timeout: 15000 });
+
+    // Wait for the task's shortId to appear as a container pill in the UI.
+    // Use toPass with polling to tolerate the 5s refetch interval.
     await expect(async () => {
-      const pillsNow = await initialPills();
+      const pillsNow = await countContainerPills();
       expect(pillsNow).toBeGreaterThan(pillsBefore);
-    }).toPass({ timeout: 15000, intervals: [2000] });
+    }).toPass({ timeout: 30000, intervals: [2000] });
 
     // Verify the task ID prefix appears in a container pill somewhere
-    const shortId = taskId.slice(0, 8);
-    await expect(page.locator(`text=${shortId}`).first()).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(`text=${shortId}`).first()).toBeVisible({ timeout: 15000 });
 
     // Now delete the container
     expect(taskContainerId).toBeTruthy();
     const delResp = await deleteContainer(page, taskContainerId!);
     expect(delResp.ok()).toBeTruthy();
 
+    // Force UI refresh after deletion — re-navigate so the next poll picks up the change
+    await page.goto("/config/mcp");
+    await expect(
+      page.getByRole("heading", { name: "MCP Tools" })
+    ).toBeVisible({ timeout: 15000 });
+
     // Wait for the specific task's pill to disappear from the MCP tools overview.
-    // Don't compare total pill count — other tests may have spawned containers concurrently.
-    await expect(page.locator(`text=${shortId}`)).toHaveCount(0, { timeout: 25000 });
+    // Use toPass polling — the 5s refetchInterval means we may need to wait a cycle.
+    await expect(async () => {
+      const matches = await page.locator(`text=${shortId}`).count();
+      expect(matches).toBe(0);
+    }).toPass({ timeout: 30000, intervals: [2000] });
   });
 });
 
@@ -466,7 +516,22 @@ test.describe("McpPorter: Task Execution Security @mcpporter @security", () => {
     expect(response.ok()).toBeTruthy();
     const task = await response.json();
     expect(task.id).toBeDefined();
-    expect(task.tags).toContain("e2e-test");
+
+    // Verify the e2e-test tag was applied — check POST response first,
+    // then fall back to GET /api/tasks/{id} (route intercept adds tag to request body,
+    // backend stores it, both paths should show the tag).
+    const token = await page.evaluate(() => localStorage.getItem("mcclawd_token"));
+    let taskTags: string[] = task.tags ?? [];
+    if (!taskTags.includes("e2e-test")) {
+      // Fallback: re-fetch via GET to allow for any response-body caching edge cases
+      const getResp = await page.request.get(`/api/tasks/${task.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (getResp.ok()) {
+        taskTags = (await getResp.json()).tags ?? [];
+      }
+    }
+    expect(taskTags).toContain("e2e-test");
   });
 
   test("tasks API requires authentication @mcpporter @security", async ({

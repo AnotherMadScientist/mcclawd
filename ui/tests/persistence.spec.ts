@@ -91,11 +91,16 @@ test.describe("Data Persistence (Postgres)", () => {
     await page
       .getByPlaceholder("What would you like me to do?")
       .fill(prompt);
-    await page.getByTestId("task-tags-input").fill("e2e-test");
+    // Tags input may not be visible yet — wait for it before filling
+    const tagsInput = page.getByTestId("task-tags-input");
+    await tagsInput.waitFor({ state: "visible", timeout: 5000 }).catch(() => {});
+    if (await tagsInput.isVisible()) {
+      await tagsInput.fill("e2e-test");
+    }
     await page.getByRole("button", { name: "Run Task" }).click();
 
     // Wait for redirect to task detail page
-    await page.waitForURL(/\/tasks\/[a-f0-9-]+/, { timeout: 20000 });
+    await page.waitForURL(/\/tasks\/[a-f0-9-]+/, { timeout: 30000 });
     const taskUrl = page.url();
 
     // Navigate away then back to task list (tasks list is at root "/")

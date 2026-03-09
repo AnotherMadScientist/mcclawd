@@ -44,8 +44,10 @@ pub async fn list_files() -> Json<Vec<WorkspaceFile>> {
 
 /// GET /api/workspace/{file} — read a workspace file
 ///
-/// If the workspace directory or file doesn't exist, auto-scaffolds with rich
-/// OpenClaw-compatible defaults from WorkspaceLoader::scaffold().
+/// If the workspace directory or the *specific requested file* doesn't exist,
+/// auto-scaffolds with rich OpenClaw-compatible defaults from
+/// WorkspaceLoader::scaffold().  Existing non-empty files are **never**
+/// overwritten — scaffold only fills in missing/empty files.
 pub async fn get_file(
     State(state): State<AppState>,
     Path(file): Path<String>,
@@ -59,22 +61,28 @@ pub async fn get_file(
     let workspace_dir = config.data_dir.join(&config.agent.default_workspace);
     let file_path = workspace_dir.join(&file);
 
-    // Try reading the file; if it doesn't exist or is empty, scaffold the workspace
-    let content = match tokio::fs::read_to_string(&file_path).await {
-        Ok(content) if !content.trim().is_empty() => content,
-        _ => {
-            // Auto-scaffold: create workspace with rich defaults
-            let ws_name = config.agent.default_workspace.clone();
-            let loader = WorkspaceLoader::new(config.data_dir.clone());
-            if let Err(e) = loader.scaffold(&ws_name) {
-                tracing::warn!("Failed to scaffold workspace '{}': {e}", ws_name);
-            }
-            // Re-read after scaffold
-            tokio::fs::read_to_string(&file_path)
-                .await
-                .unwrap_or_default()
+    // 1. If the file exists on disk and has content, return it immediately.
+    //    Do NOT scaffold — the user's saved content must be preserved.
+    if let Ok(content) = tokio::fs::read_to_string(&file_path).await {
+        if !content.trim().is_empty() {
+            return Ok(Json(WorkspaceFile {
+                name: file,
+                content: Some(content),
+            }));
         }
-    };
+    }
+
+    // 2. File is missing or empty — scaffold defaults for any missing files,
+    //    then re-read the requested file.
+    let ws_name = config.agent.default_workspace.clone();
+    let loader = WorkspaceLoader::new(config.data_dir.clone());
+    if let Err(e) = loader.scaffold(&ws_name) {
+        tracing::warn!("Failed to scaffold workspace '{}': {e}", ws_name);
+    }
+
+    let content = tokio::fs::read_to_string(&file_path)
+        .await
+        .unwrap_or_default();
 
     Ok(Json(WorkspaceFile {
         name: file,

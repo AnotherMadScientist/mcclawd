@@ -430,6 +430,13 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
         Err(e) => tracing::warn!(error = %e, "Failed to clean up orphaned security events"),
     }
 
+    // Clean up security events without findings (noise from allowed events)
+    match pg_store.cleanup_events_without_findings().await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(deleted = n, "Cleaned up security events without findings"),
+        Err(e) => tracing::warn!(error = %e, "Failed to cleanup events without findings"),
+    }
+
     // Hydrate scan cache from postgres
     match pg_store.load_scan_cache("admin").await {
         Ok(rows) => {

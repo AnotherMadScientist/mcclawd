@@ -1347,6 +1347,21 @@ impl PgTaskStore {
         Ok(result.rows_affected())
     }
 
+    /// Remove security events that have no associated DLP findings (noise),
+    /// plus events with NULL task_id.
+    pub async fn cleanup_events_without_findings(&self) -> anyhow::Result<u64> {
+        // Delete NULL task_id events
+        sqlx::query("DELETE FROM security_events WHERE task_id IS NULL")
+            .execute(&self.pool)
+            .await?;
+        let result = sqlx::query(
+            "DELETE FROM security_events WHERE action_taken = 'allowed' AND id NOT IN (SELECT DISTINCT security_event_id FROM dlp_findings)",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn list_dlp_policies(&self) -> anyhow::Result<Vec<serde_json::Value>> {
         let rows = sqlx::query_scalar::<_, serde_json::Value>(
             "SELECT json_build_object(

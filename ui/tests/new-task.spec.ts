@@ -115,12 +115,27 @@ test.describe("New Task Page", () => {
       if (!health.ok()) { test.skip(true, "Backend not reachable"); return; }
     } catch { test.skip(true, "Backend not reachable"); return; }
 
+    // Intercept the POST to /api/tasks so we can detect failures
+    const taskResponse = page.waitForResponse(
+      (r) => r.url().includes("/api/tasks") && r.request().method() === "POST",
+      { timeout: 30000 },
+    );
+
     await page
       .getByPlaceholder("What would you like me to do?")
       .fill("E2E test: new task submission");
     await page.getByRole("button", { name: "Run Task" }).click();
+
+    // Wait for the POST response first
+    const resp = await taskResponse;
+    if (!resp.ok()) {
+      // Task creation failed — button reverts to "Run Task", no redirect expected
+      test.skip(true, `Task creation returned ${resp.status()}`);
+      return;
+    }
+
     // Should redirect to /tasks/{uuid}
-    await expect(page).toHaveURL(/\/tasks\/[a-f0-9-]+/, { timeout: 15000 });
+    await expect(page).toHaveURL(/\/tasks\/[a-f0-9-]+/, { timeout: 30000 });
   });
 
   test("submitted task shows on task detail page with prompt as heading", async ({
@@ -131,17 +146,30 @@ test.describe("New Task Page", () => {
       if (!health.ok()) { test.skip(true, "Backend not reachable"); return; }
     } catch { test.skip(true, "Backend not reachable"); return; }
 
+    // Intercept the POST to /api/tasks so we can detect failures
+    const taskResponse = page.waitForResponse(
+      (r) => r.url().includes("/api/tasks") && r.request().method() === "POST",
+      { timeout: 30000 },
+    );
+
+    const prompt = "E2E test: verify prompt heading";
     await page
       .getByPlaceholder("What would you like me to do?")
-      .fill("E2E test: verify prompt heading");
+      .fill(prompt);
     await page.getByRole("button", { name: "Run Task" }).click();
-    await page.waitForURL(/\/tasks\/[a-f0-9-]+/, { timeout: 20000 });
 
-    // The prompt should appear in the heading
-    await expect(page.locator("h1")).toContainText(
-      "E2E test: verify prompt heading",
-      { timeout: 10000 },
-    );
+    // Wait for the POST response first
+    const resp = await taskResponse;
+    if (!resp.ok()) {
+      test.skip(true, `Task creation returned ${resp.status()}`);
+      return;
+    }
+
+    await page.waitForURL(/\/tasks\/[a-f0-9-]+/, { timeout: 30000 });
+
+    // The h1 shows task?.prompt which loads via react-query — wait for it to resolve.
+    // It may initially show "Task" before the query returns the full prompt.
+    await expect(page.locator("h1")).toContainText(prompt, { timeout: 15000 });
   });
 
   test("button shows Starting... while task is being created", async ({

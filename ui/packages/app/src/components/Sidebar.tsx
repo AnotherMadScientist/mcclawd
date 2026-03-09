@@ -12,6 +12,7 @@ import {
   DollarSign,
   Activity,
   BookOpen,
+  Shield,
 } from "lucide-react";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -26,13 +27,17 @@ const configItems = [
   { to: "/config/secrets", icon: KeyRound, label: "Secrets" },
   { to: "/config/docker", icon: Container, label: "Agents" },
   { to: "/config/usage", icon: DollarSign, label: "Usage" },
+  { to: "/config/settings", icon: Settings, label: "Settings" },
+];
+
+const securityItems = [
   { to: "/config/security/events", icon: Activity, label: "Audit Log" },
   { to: "/config/security/rules", icon: BookOpen, label: "Detection Rules" },
-  { to: "/config/settings", icon: Settings, label: "Settings" },
 ];
 
 export function Sidebar() {
   const [configOpen, setConfigOpen] = useState(true);
+  const [securityOpen, setSecurityOpen] = useState(true);
   const { logout } = useAuth();
 
   const { data: health, status: healthStatus } = useQuery({
@@ -99,6 +104,42 @@ export function Sidebar() {
         {configOpen && (
           <div className="ml-4 space-y-1">
             {configItems.map(({ to, icon: Icon, label }) => (
+              <NavLink
+                key={to}
+                to={to}
+                className={({ isActive }) =>
+                  cn(
+                    "flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors",
+                    isActive
+                      ? "bg-primary/10 text-primary"
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                  )
+                }
+              >
+                <Icon className="w-4 h-4" />
+                {label}
+              </NavLink>
+            ))}
+          </div>
+        )}
+
+        {/* Security section */}
+        <button
+          onClick={() => setSecurityOpen(!securityOpen)}
+          className="flex items-center justify-between w-full px-3 py-2 rounded-md text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+        >
+          <span className="flex items-center gap-3">
+            <Shield className="w-4 h-4" />
+            Security
+          </span>
+          <ChevronDown
+            className={cn("w-4 h-4 transition-transform", securityOpen && "rotate-180")}
+          />
+        </button>
+
+        {securityOpen && (
+          <div className="ml-4 space-y-1">
+            {securityItems.map(({ to, icon: Icon, label }) => (
               <NavLink
                 key={to}
                 to={to}
