@@ -432,9 +432,24 @@ async fn run_agent_sandboxed(
     };
 
     let mut secrets_map = std::collections::HashMap::new();
-    if let Some(backend) = state.secrets.read().await.as_ref() {
-        if let Ok(Some(key)) = backend.get("ANTHROPIC_API_KEY").await {
-            secrets_map.insert("ANTHROPIC_API_KEY".to_string(), key);
+    {
+        // Try vault first, fall back to env var (mirrors run_agent_host logic)
+        let vault_key = if let Some(backend) = state.secrets.read().await.as_ref() {
+            backend.get("ANTHROPIC_API_KEY").await.ok().flatten()
+        } else {
+            None
+        };
+        let api_key = vault_key
+            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty());
+        match api_key {
+            Some(k) => {
+                secrets_map.insert("ANTHROPIC_API_KEY".to_string(), k);
+            }
+            None => {
+                tracing::error!("ANTHROPIC_API_KEY not found in vault or environment — container will fail");
+            }
         }
     }
 
@@ -1864,7 +1879,7 @@ pub struct ContainerInfoResponse {
 ///
 /// Container metadata persists in Postgres even after the container is removed.
 /// History and artifacts are always persisted independently of container lifecycle.
-/// POST /api/transcribe — speech-to-text via ElevenLabs STT API
+/// POST /api/transcribe — speech-to-text via OpenAI Whisper API (primary) or ElevenLabs STT (fallback)
 pub async fn transcribe_audio(
     State(state): State<AppState>,
     mut multipart: Multipart,
@@ -1873,68 +1888,132 @@ pub async fn transcribe_audio(
     let mut audio_data: Option<Vec<u8>> = None;
     while let Ok(Some(field)) = multipart.next_field().await {
         if field.name() == Some("audio") {
-            audio_data = Some(field.bytes().await.map_err(|e| {
-                tracing::error!(error = %e, "Failed to read audio field");
-                StatusCode::BAD_REQUEST
-            })?.to_vec());
+            audio_data = Some(
+                field
+                    .bytes()
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(error = %e, "Failed to read audio field");
+                        StatusCode::BAD_REQUEST
+                    })?
+                    .to_vec(),
+            );
             break;
         }
     }
     let audio_bytes = audio_data.ok_or(StatusCode::BAD_REQUEST)?;
 
-    // 2. Get ElevenLabs API key from vault
-    let api_key = {
-        let secrets = state.secrets.read().await;
-        match secrets.as_ref() {
-            Some(backend) => match backend.get("ELEVENLABS_API_KEY").await {
-                Ok(Some(key)) if !key.is_empty() => key,
-                _ => {
-                    return Ok(Json(serde_json::json!({
-                        "error": "ELEVENLABS_API_KEY not set"
-                    })));
-                }
-            },
-            None => {
-                return Ok(Json(serde_json::json!({ "error": "Vault locked" })));
-            }
+    // 2. Try OpenAI Whisper first, fall back to ElevenLabs
+    let secrets = state.secrets.read().await;
+    let backend = match secrets.as_ref() {
+        Some(b) => b,
+        None => {
+            return Ok(Json(serde_json::json!({ "error": "Vault locked" })));
         }
     };
 
-    // 3. Call ElevenLabs Speech-to-Text API
+    // Try OPENAI_API_KEY first (primary — Whisper API)
+    let openai_key = match backend.get("OPENAI_API_KEY").await {
+        Ok(Some(key)) if !key.is_empty() => Some(key),
+        _ => None,
+    };
+
+    // Try ELEVENLABS_API_KEY as fallback
+    let elevenlabs_key = match backend.get("ELEVENLABS_API_KEY").await {
+        Ok(Some(key)) if !key.is_empty() => Some(key),
+        _ => None,
+    };
+
+    // Release the lock before making HTTP calls
+    drop(secrets);
+
+    if openai_key.is_none() && elevenlabs_key.is_none() {
+        return Ok(Json(serde_json::json!({
+            "error": "No speech-to-text API key configured. Set OPENAI_API_KEY or ELEVENLABS_API_KEY in secrets."
+        })));
+    }
+
     let client = reqwest::Client::new();
-    let part = reqwest::multipart::Part::bytes(audio_bytes)
-        .file_name("audio.webm")
-        .mime_str("application/octet-stream")
-        .unwrap();
-    let form = reqwest::multipart::Form::new()
-        .part("file", part)
-        .text("model_id", "scribe_v2");
 
-    let res = client
-        .post("https://api.elevenlabs.io/v1/speech-to-text")
-        .header("xi-api-key", &api_key)
-        .multipart(form)
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
-        .await;
+    // 3a. Try OpenAI Whisper API
+    if let Some(api_key) = openai_key {
+        let part = reqwest::multipart::Part::bytes(audio_bytes.clone())
+            .file_name("audio.webm")
+            .mime_str("audio/webm")
+            .unwrap();
+        let form = reqwest::multipart::Form::new()
+            .part("file", part)
+            .text("model", "whisper-1");
 
-    match res {
-        Ok(r) if r.status().is_success() => {
-            let body: serde_json::Value = r.json().await.unwrap_or_default();
-            let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            Ok(Json(serde_json::json!({ "text": text })))
-        }
-        Ok(r) => {
-            let status = r.status().as_u16();
-            let body = r.text().await.unwrap_or_default();
-            tracing::error!(status, body = %body, "ElevenLabs STT failed");
-            Ok(Json(serde_json::json!({ "error": format!("ElevenLabs {status}: {body}") })))
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "ElevenLabs STT network error");
-            Ok(Json(serde_json::json!({ "error": format!("Network error: {e}") })))
+        let res = client
+            .post("https://api.openai.com/v1/audio/transcriptions")
+            .header("Authorization", format!("Bearer {api_key}"))
+            .multipart(form)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await;
+
+        match res {
+            Ok(r) if r.status().is_success() => {
+                let body: serde_json::Value = r.json().await.unwrap_or_default();
+                let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                return Ok(Json(serde_json::json!({ "text": text })));
+            }
+            Ok(r) => {
+                let status = r.status().as_u16();
+                let body = r.text().await.unwrap_or_default();
+                tracing::warn!(status, body = %body, "OpenAI Whisper failed, trying fallback");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "OpenAI Whisper network error, trying fallback");
+            }
         }
     }
+
+    // 3b. Fallback to ElevenLabs STT
+    if let Some(api_key) = elevenlabs_key {
+        let part = reqwest::multipart::Part::bytes(audio_bytes)
+            .file_name("audio.webm")
+            .mime_str("application/octet-stream")
+            .unwrap();
+        let form = reqwest::multipart::Form::new()
+            .part("file", part)
+            .text("model_id", "scribe_v2");
+
+        let res = client
+            .post("https://api.elevenlabs.io/v1/speech-to-text")
+            .header("xi-api-key", &api_key)
+            .multipart(form)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await;
+
+        match res {
+            Ok(r) if r.status().is_success() => {
+                let body: serde_json::Value = r.json().await.unwrap_or_default();
+                let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                return Ok(Json(serde_json::json!({ "text": text })));
+            }
+            Ok(r) => {
+                let status = r.status().as_u16();
+                let body = r.text().await.unwrap_or_default();
+                tracing::error!(status, body = %body, "ElevenLabs STT failed");
+                return Ok(Json(
+                    serde_json::json!({ "error": format!("ElevenLabs {status}: {body}") }),
+                ));
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "ElevenLabs STT network error");
+                return Ok(Json(
+                    serde_json::json!({ "error": format!("Network error: {e}") }),
+                ));
+            }
+        }
+    }
+
+    Ok(Json(
+        serde_json::json!({ "error": "All speech-to-text backends failed" }),
+    ))
 }
 
 pub async fn get_container_info(
