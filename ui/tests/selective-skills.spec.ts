@@ -121,7 +121,7 @@ test.describe("Selective Skills & Tool Profiles (New Task Page)", () => {
     if (skills.length === 0) {
       // With no skills installed the section is hidden — verify it is absent
       await expect(
-        page.getByText("Skills (deselect to exclude)"),
+        page.getByText("Skills (select to include)"),
       ).not.toBeVisible();
       test.skip(true, "No skills installed — skill checkbox section is hidden");
       return;
@@ -129,7 +129,7 @@ test.describe("Selective Skills & Tool Profiles (New Task Page)", () => {
 
     // Skills installed: section must be visible
     await expect(
-      page.getByText("Skills (deselect to exclude)"),
+      page.getByText("Skills (select to include)"),
     ).toBeVisible({ timeout: 5000 });
 
     // At least one checkbox should exist for the first skill
@@ -137,6 +137,8 @@ test.describe("Selective Skills & Tool Profiles (New Task Page)", () => {
     const firstSkillName = (firstSkill.info?.name ?? firstSkill.name) as string;
     const checkbox = page.locator(`input[type="checkbox"]`).first();
     await expect(checkbox).toBeVisible();
+    // Opt-in: checkboxes start UNCHECKED by default
+    await expect(checkbox).not.toBeChecked();
     // Skill name label should appear (use substring match for resilience)
     await expect(page.getByText(firstSkillName).first()).toBeVisible({ timeout: 5000 });
   });
@@ -174,20 +176,20 @@ test.describe("Selective Skills & Tool Profiles (New Task Page)", () => {
 
     await page.getByRole("button", { name: "Advanced Options" }).click();
     await expect(
-      page.getByText("Skills (deselect to exclude)"),
+      page.getByText("Skills (select to include)"),
     ).toBeVisible({ timeout: 5000 });
 
-    // All checkboxes start checked (selectedSkills is empty → all true)
+    // Opt-in: all checkboxes start UNCHECKED by default
     const firstCheckbox = page.locator(`input[type="checkbox"]`).first();
-    await expect(firstCheckbox).toBeChecked();
-
-    // Click first checkbox — deselects that skill
-    await firstCheckbox.click();
     await expect(firstCheckbox).not.toBeChecked();
 
-    // Click again — re-selects
+    // Click first checkbox — selects that skill
     await firstCheckbox.click();
     await expect(firstCheckbox).toBeChecked();
+
+    // Click again — deselects
+    await firstCheckbox.click();
+    await expect(firstCheckbox).not.toBeChecked();
   });
 
   // ---------------------------------------------------------------------------
@@ -267,13 +269,14 @@ test.describe("Selective Skills & Tool Profiles (New Task Page)", () => {
 
     await page.getByRole("button", { name: "Advanced Options" }).click();
     await expect(
-      page.getByText("Skills (deselect to exclude)"),
+      page.getByText("Skills (select to include)"),
     ).toBeVisible({ timeout: 5000 });
 
-    // Deselect the first skill — this triggers selectedSkills to contain all-but-first
-    const firstCheckbox = page.locator(`input[type="checkbox"]`).first();
-    await firstCheckbox.click();
-    await expect(firstCheckbox).not.toBeChecked();
+    // Opt-in: select only the second skill (leave first unchecked)
+    const checkboxes = page.locator(`input[type="checkbox"]`);
+    const secondCheckbox = checkboxes.nth(1);
+    await secondCheckbox.click();
+    await expect(secondCheckbox).toBeChecked();
 
     const [request] = await Promise.all([
       page.waitForRequest(
@@ -289,13 +292,13 @@ test.describe("Selective Skills & Tool Profiles (New Task Page)", () => {
     ]);
 
     const body = JSON.parse(request.postData() || "{}");
-    // skills[] should be non-empty and NOT include the first skill
+    // skills[] should contain only the second skill (opt-in: only checked skills sent)
     expect(Array.isArray(body.skills)).toBe(true);
     expect(body.skills.length).toBeGreaterThan(0);
     expect(body.skills).not.toContain(skills[0].name);
   });
 
-  test("task creation omits skills when all skills selected (default)", async ({
+  test("task creation omits skills when none selected (default opt-in)", async ({
     page,
   }) => {
     test.setTimeout(30_000);
@@ -311,7 +314,7 @@ test.describe("Selective Skills & Tool Profiles (New Task Page)", () => {
       return;
     }
 
-    // Do NOT open Advanced Options — leave skills at default (all selected = undefined sent)
+    // Do NOT open Advanced Options — leave skills at default (none selected = undefined sent)
     const [request] = await Promise.all([
       page.waitForRequest(
         (req) =>
@@ -326,7 +329,7 @@ test.describe("Selective Skills & Tool Profiles (New Task Page)", () => {
     ]);
 
     const body = JSON.parse(request.postData() || "{}");
-    // When all skills are selected (selectedSkills.length === 0), skills is not sent
+    // Opt-in: when no skills are selected (default), skills is not sent or is empty
     const skills = body.skills;
     const isAbsentOrEmpty =
       skills === undefined || skills === null || (Array.isArray(skills) && skills.length === 0);
