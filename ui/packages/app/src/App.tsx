@@ -16,6 +16,7 @@ import { DockerPage } from "./pages/DockerPage";
 import { UsagePage } from "./pages/UsagePage";
 import { SecurityEventsPage } from "./pages/SecurityEventsPage";
 import { SecurityRulesPage } from "./pages/SecurityRulesPage";
+import { WorldNewsPage } from "./pages/WorldNewsPage";
 
 const queryClient = new QueryClient();
 
@@ -28,7 +29,8 @@ export default function App() {
             <Route path="/login" element={<LoginPage />} />
             <Route path="/setup" element={<SetupPage />} />
             <Route element={<Layout />}>
-              <Route index element={<TasksPage />} />
+              <Route index element={<WorldNewsPage />} />
+              <Route path="tasks" element={<TasksPage />} />
               <Route path="tasks/new" element={<NewTaskPage />} />
               <Route path="tasks/:id" element={<TaskDetailPage />} />
               <Route path="config/workspace" element={<WorkspacePage />} />

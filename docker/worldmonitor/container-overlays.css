@@ -1,0 +1,442 @@
+/* container-overlays.css — Floating overlay panels + layout overrides for WorldMonitor container
+   Dark-theme panels matching the app aesthetic.
+   Lives OUTSIDE app/ so git pull inside app/ never conflicts. */
+
+/* ══════════════════════════════════════════════════════════════════════
+   LAYOUT OVERRIDE: Force panels below map on ALL screen widths
+   The app switches to side-by-side at >=1600px. We override that.
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* ── Fix scroll: app sets overflow:hidden on body, override for panels ── */
+html, body {
+  overflow: visible !important;
+  overflow-y: auto !important;
+  height: auto !important;
+}
+
+/* Force the main-content to always stack vertically and allow scroll */
+.main-content {
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: visible !important;
+  height: auto !important;
+  min-height: 100vh;
+}
+
+#panelsGrid {
+  overflow: visible !important;
+  height: auto !important;
+  min-height: 400px;
+  flex-shrink: 0 !important;
+}
+
+/* Prevent the panels-grid from going beside the map at wide screens */
+@media (min-width: 1600px) {
+  #mapSection {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  #panelsGrid {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  .map-bottom-grid {
+    display: none !important;
+  }
+}
+
+/* ── Shared overlay panel base ─────────────────────────────────────── */
+.wm-overlay-panel {
+  position: fixed;
+  z-index: 1000;
+  background: rgba(10, 12, 16, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: #c8ccd4;
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: opacity 0.2s ease;
+}
+
+.wm-overlay-panel.collapsed {
+  height: 36px !important;
+  min-height: 36px !important;
+  overflow: hidden;
+}
+
+/* ── Panel header ──────────────────────────────────────────────────── */
+.wm-overlay-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.wm-overlay-header:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.wm-overlay-title {
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #9ca3af;
+}
+
+.wm-overlay-count {
+  font-size: 10px;
+  color: #6b7280;
+  margin-left: 8px;
+}
+
+.wm-overlay-toggle {
+  font-size: 10px;
+  color: #6b7280;
+  transition: transform 0.2s ease;
+}
+
+.wm-overlay-panel.collapsed .wm-overlay-toggle {
+  transform: rotate(180deg);
+}
+
+/* ── Panel body ────────────────────────────────────────────────────── */
+.wm-overlay-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+}
+
+/* Custom scrollbar */
+.wm-overlay-body::-webkit-scrollbar {
+  width: 4px;
+}
+
+.wm-overlay-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.wm-overlay-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2px;
+}
+
+.wm-overlay-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* ── RHS: Event list panel ─────────────────────────────────────────── */
+#wm-event-panel {
+  top: 82px;
+  right: 4px;
+  width: 260px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 140px);
+}
+
+.wm-event-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.wm-event-row:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.wm-event-row:last-child {
+  border-bottom: none;
+}
+
+.wm-event-icon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  margin-top: 1px;
+}
+
+.wm-event-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.wm-event-title {
+  font-size: 11px;
+  color: #e5e7eb;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-bottom: 2px;
+}
+
+.wm-event-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: #6b7280;
+}
+
+.wm-event-time {
+  white-space: nowrap;
+}
+
+.wm-event-location {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wm-event-severity {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.wm-event-severity.critical {
+  background: #ef4444;
+  box-shadow: 0 0 4px rgba(239, 68, 68, 0.5);
+}
+
+.wm-event-severity.high {
+  background: #f97316;
+}
+
+.wm-event-severity.medium {
+  background: #eab308;
+}
+
+.wm-event-severity.low {
+  background: #22c55e;
+}
+
+.wm-event-severity.info {
+  background: #3b82f6;
+}
+
+.wm-event-empty {
+  padding: 24px 12px;
+  text-align: center;
+  color: #4b5563;
+  font-size: 11px;
+}
+
+/* ── LHS: X/Twitter stream panel ───────────────────────────────────── */
+#wm-x-panel {
+  top: 82px;
+  left: 12px;
+  width: 320px;
+  max-height: calc(100vh - 140px);
+}
+
+.wm-x-section {
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.wm-x-section:last-child {
+  border-bottom: none;
+}
+
+.wm-x-section-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #6b7280;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.wm-x-accounts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.wm-x-account-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  background: rgba(29, 155, 240, 0.12);
+  border: 1px solid rgba(29, 155, 240, 0.2);
+  border-radius: 12px;
+  font-size: 10px;
+  color: #1d9bf0;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-decoration: none;
+}
+
+.wm-x-account-chip:hover {
+  background: rgba(29, 155, 240, 0.22);
+  border-color: rgba(29, 155, 240, 0.35);
+}
+
+.wm-x-hashtags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.wm-x-hashtag {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  background: rgba(139, 92, 246, 0.12);
+  border: 1px solid rgba(139, 92, 246, 0.2);
+  border-radius: 12px;
+  font-size: 10px;
+  color: #a78bfa;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-decoration: none;
+}
+
+.wm-x-hashtag:hover {
+  background: rgba(139, 92, 246, 0.22);
+  border-color: rgba(139, 92, 246, 0.35);
+}
+
+.wm-x-embed-container {
+  margin-top: 8px;
+  border-radius: 6px;
+  overflow: hidden;
+  min-height: 300px;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.wm-x-embed-container iframe {
+  border: none;
+  width: 100%;
+}
+
+.wm-x-region-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  font-size: 10px;
+  color: #9ca3af;
+  margin-bottom: 8px;
+}
+
+.wm-x-loading {
+  padding: 24px 12px;
+  text-align: center;
+  color: #4b5563;
+  font-size: 11px;
+}
+
+/* ── LHS: Live feed items ──────────────────────────────────────────── */
+.wm-x-feed-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.wm-x-feed-item {
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.wm-x-feed-item:last-child {
+  border-bottom: none;
+}
+
+.wm-x-feed-title {
+  font-size: 11px;
+  color: #d1d5db;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+a.wm-x-feed-title:hover {
+  color: #60a5fa;
+}
+
+.wm-x-feed-source {
+  display: block;
+  font-size: 9px;
+  color: #6b7280;
+  margin-top: 2px;
+}
+
+.wm-x-community-link {
+  display: block;
+  padding: 5px 0;
+  font-size: 11px;
+  color: #93c5fd;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  transition: color 0.15s ease;
+}
+
+.wm-x-community-link:last-child {
+  border-bottom: none;
+}
+
+.wm-x-community-link:hover {
+  color: #60a5fa;
+}
+
+.wm-x-community-link::before {
+  content: '\2192 ';
+  color: #4b5563;
+}
+
+/* ── Responsive: hide overlays on small screens ────────────────────── */
+@media (max-width: 900px) {
+  #wm-event-panel,
+  #wm-x-panel {
+    display: none;
+  }
+}
+
+@media (max-width: 1200px) {
+  #wm-x-panel {
+    width: 240px;
+  }
+
+  #wm-event-panel {
+    width: 220px;
+  }
+}
+
+@media (max-width: 1050px) {
+  #wm-event-panel {
+    display: none;
+  }
+}

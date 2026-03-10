@@ -7,6 +7,11 @@ export default defineConfig({
   server: {
     port: 8080,
     proxy: {
+      "/worldmonitor": {
+        target: "http://localhost:3001",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/worldmonitor/, ""),
+      },
       "/api": {
         target: "http://localhost:9090",
         changeOrigin: true,

@@ -1,5 +1,6 @@
 import { NavLink } from "react-router";
 import {
+  Globe,
   LayoutDashboard,
   FileText,
   Puzzle,
@@ -74,6 +75,21 @@ export function Sidebar() {
         <NavLink
           to="/"
           end
+          className={({ isActive }) =>
+            cn(
+              "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors",
+              isActive
+                ? "bg-primary/10 text-primary"
+                : "text-muted-foreground hover:bg-muted hover:text-foreground",
+            )
+          }
+        >
+          <Globe className="w-4 h-4" />
+          World News
+        </NavLink>
+
+        <NavLink
+          to="/tasks"
           className={({ isActive }) =>
             cn(
               "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors",

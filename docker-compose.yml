@@ -105,6 +105,21 @@ services:
       timeout: 3s
       retries: 3
 
+  worldmonitor:
+    build: ./docker/worldmonitor
+    ports:
+      - "127.0.0.1:3001:3000"
+    env_file:
+      - docker/worldmonitor/.env
+    networks:
+      - mcclawd-net
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
 networks:
   mcclawd-net:
     driver: bridge

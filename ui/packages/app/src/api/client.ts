@@ -162,6 +162,13 @@ export const api = {
         method: "DELETE",
       }),
   },
+  worldmonitor: {
+    status: () => apiFetch<{ running: boolean; status?: number }>("/api/worldmonitor/status"),
+    syncEnv: () =>
+      apiFetch<{ synced: number; keys: string[] }>("/api/worldmonitor/sync-env", {
+        method: "POST",
+      }),
+  },
   secrets: {
     list: () => apiFetch<{ name: string }[]>("/api/secrets"),
     get: (name: string) => apiFetch<{ name: string; value: string }>(`/api/secrets/${name}`),

@@ -1,0 +1,7 @@
+.git
+.claude
+.planning
+node_modules
+*.md
+.env*
+.DS_Store

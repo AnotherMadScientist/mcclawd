@@ -24,6 +24,7 @@ use super::webauthn_auth;
 use super::workspace;
 use super::ws;
 use super::runner_build;
+use super::worldmonitor;
 
 pub fn api_router(state: AppState) -> Router<AppState> {
     // Public routes (no auth required)
@@ -118,6 +119,15 @@ pub fn api_router(state: AppState) -> Router<AppState> {
             get(secrets::get_secret)
                 .put(secrets::update_secret)
                 .delete(secrets::delete_secret),
+        )
+        // WorldMonitor
+        .route(
+            "/api/worldmonitor/sync-env",
+            post(worldmonitor::sync_env),
+        )
+        .route(
+            "/api/worldmonitor/status",
+            get(worldmonitor::status),
         )
         // Config
         .route(

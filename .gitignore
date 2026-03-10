@@ -33,6 +33,7 @@ dist/
 .env
 .env.*
 secrets.enc
+docker/worldmonitor/.env
 
 # Test artifacts
 ui/test-results/

@@ -143,7 +143,7 @@ export function TaskDetailPage() {
       <div className="flex items-center justify-between py-4">
         <div className="flex items-center gap-4">
           <button
-            onClick={() => navigate("/")}
+            onClick={() => navigate("/tasks")}
             className="p-2 rounded-lg hover:bg-muted transition-colors"
           >
             <ArrowLeft className="w-5 h-5" />
