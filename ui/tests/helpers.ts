@@ -36,7 +36,7 @@ export async function login(page: Page) {
     await route.continue();
   });
 
-  await page.goto("/");
+  await page.goto("/tasks");
   await expect(page.getByRole("heading", { name: "Tasks" })).toBeVisible();
 }
 

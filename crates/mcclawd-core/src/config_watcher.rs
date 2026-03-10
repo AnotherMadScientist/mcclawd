@@ -190,7 +190,7 @@ default_workspace = "updated"
         let config = rx.borrow();
         // Should use default values.
         assert_eq!(config.agent.max_turns, 20);
-        assert_eq!(config.agent.model, "claude-sonnet-4-5");
+        assert_eq!(config.agent.model, "claude-haiku-4-5-20251001");
     }
 
     #[test]

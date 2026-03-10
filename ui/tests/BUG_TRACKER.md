@@ -1,14 +1,14 @@
 # McClawd Bug Tracker
 
-> Bugs discovered during E2E testing. Last updated: 2026-03-08.
+> Bugs discovered during E2E testing. Last updated: 2026-03-10.
 
 ## Summary
 
 | Severity | Open | Fixed | Won't Fix |
 |----------|------|-------|-----------|
-| Critical | 0 | 5 | 0 |
-| Major | 3 | 37 | 0 |
-| Minor | 0 | 8 | 0 |
+| Critical | 0 | 5 | 1 |
+| Major | 14 | 37 | 0 |
+| Minor | 4 | 8 | 0 |
 
 ## Bugs
 
@@ -1055,3 +1055,130 @@
 - **Fixed:** 2026-03-09 — Added Docker API pre-flight check; increased test timeout 120s→200s, content wait 75s→100s, timeliness threshold 90s→150s; lowered required fact matches 3→2.
 - **Test:** skill-mcp-injection.spec.ts:322 "full workflow: install skill + upload doc + agent analyzes with MCP tools"
 - **Files:** `ui/tests/skill-mcp-injection.spec.ts`
+
+### BUG-066: ~~8 production panics in OutboundChunk type conversions~~
+- **Severity:** ~~critical~~ → none
+- **Status:** won't fix (false positive)
+- **Page:** N/A (backend)
+- **Discovered:** 2026-03-10
+- **Resolved:** 2026-03-10
+- **File:** `crates/mcclawd-api/src/server/types.rs:168-335`
+- **Error:** Audit found all `panic!` sites are inside `#[test]` blocks (test-only code). `container.rs:1028,1073` are in test fns. `swarm_registry.rs:284` is in a test. `tasks.rs:1776,1875` `.unwrap()` calls are on `Response::builder()` with hardcoded valid headers (infallible). No production panic risk.
+
+### BUG-067: Swarm LLM Planner not wired (Phase 2 blocker)
+- **Severity:** major
+- **Status:** open
+- **Page:** N/A (backend)
+- **Discovered:** 2026-03-10
+- **File:** `crates/mcclawd-swarm/src/planner.rs:288`
+- **Error:** `plan_with_llm()` returns `SwarmError::PlanningFailed("LLM planner not yet wired")`. Testing-only via `decompose_with_dag()`.
+- **Fix:** Build Rig agent with create_subtask, add_dependency, finalize_plan tools. Wire up SwarmCoordinator in `run.rs:12`.
+- **Files:** `planner.rs`, `crates/mcclawd-api/src/commands/run.rs`
+
+### BUG-068: 4 channel adapters are stubs (Phase 3)
+- **Severity:** major
+- **Status:** open (deferred Phase 3)
+- **Page:** N/A (backend)
+- **Discovered:** 2026-03-10
+- **Description:** WhatsApp (`adapter.rs:106`), Email/IMAP (`adapter.rs:122`), Slack (`adapter.rs:106`), Discord (`adapter.rs:107`) — all return placeholder error messages. External API webhooks/polling not wired.
+- **Files:** `crates/mcclawd-channel-whatsapp/`, `crates/mcclawd-channel-email/`, `crates/mcclawd-channel-slack/`, `crates/mcclawd-channel-discord/`
+
+### BUG-069: AWS Secrets Manager backend is a stub
+- **Severity:** major
+- **Status:** open (deferred Phase 2+)
+- **Page:** N/A (backend)
+- **Discovered:** 2026-03-10
+- **File:** `crates/mcclawd-core/src/secrets/aws.rs`
+- **Error:** All methods (`get`, `set`, `delete`, `list`) return "not yet wired" errors.
+- **Fix:** Implement using aws-sdk-secretsmanager crate.
+
+### BUG-070: DLP cannot scan MCP tool results (Rig limitation)
+- **Severity:** major
+- **Status:** open
+- **Page:** N/A (backend)
+- **Discovered:** 2026-03-10
+- **File:** `crates/mcclawd-api/src/server/tasks.rs:1179`
+- **Error:** Rig does not expose tool call results to the host. DLP pipeline can only scan prompts and final responses, not intermediate MCP tool outputs. Builtin tools use GuardedTool wrapper as workaround.
+- **Fix:** Requires Rig upstream change or custom middleware layer.
+
+### BUG-071: E2E test — mcp-porter container lifecycle flaky
+- **Severity:** major
+- **Status:** open
+- **Page:** /config/mcp
+- **Discovered:** 2026-03-10
+- **Test:** mcp-porter.spec.ts:281 "MCP tools overview updates live when task container appears and disappears"
+- **Error:** Flaky — container start/stop timing varies. Previously fixed with longer timeouts (BUG-063) but still failing intermittently.
+
+### BUG-072: E2E test — new-task "Starting..." button state
+- **Severity:** major
+- **Status:** open
+- **Page:** /tasks/new
+- **Discovered:** 2026-03-10
+- **Test:** new-task.spec.ts:175 "button shows Starting... while task is being created"
+- **Error:** Button state transition too fast or assertion timing issue.
+
+### BUG-073: E2E test — security audit trail with LLM
+- **Severity:** major
+- **Status:** open
+- **Page:** /tasks/:id
+- **Discovered:** 2026-03-10
+- **Test:** security-audit.spec.ts:346 "task detail page shows security audit trail when events exist"
+- **Error:** Requires LLM call to generate security events. May timeout or produce unexpected output.
+
+### BUG-074: E2E test — skill scan badge icon types
+- **Severity:** major
+- **Status:** open
+- **Page:** /config/skills
+- **Discovered:** 2026-03-10
+- **Test:** skill-scan-verify.spec.ts:375 "scan result states reflected in badge icon types"
+- **Error:** SecurityBadge icon assertion failing — badge state may not update after scan.
+
+### BUG-075: E2E test — markdown code blocks render
+- **Severity:** major
+- **Status:** open
+- **Page:** /tasks/:id
+- **Discovered:** 2026-03-10
+- **Test:** task-detail.spec.ts:315 "markdown code blocks render with highlighting"
+- **Error:** Requires LLM to generate code block output. Timeout or content mismatch.
+
+### BUG-076: config_watcher test had stale default model
+- **Severity:** minor
+- **Status:** fixed
+- **Fixed:** 2026-03-10
+- **File:** `crates/mcclawd-core/src/config_watcher.rs:193`
+- **Error:** Test expected `"claude-sonnet-4-5"` but default changed to `"claude-haiku-4-5-20251001"`.
+- **Fix:** Updated test assertion.
+
+### BUG-077: 9 console.log debug statements in frontend
+- **Severity:** minor
+- **Status:** open
+- **Page:** Various
+- **Discovered:** 2026-03-10
+- **Files:** `MicButton.tsx` (8 instances: lines 61, 66, 92, 104, 129, 138, 153, 166), `NewTaskPage.tsx` (line 127)
+- **Fix:** Remove or gate behind `import.meta.env.DEV` flag.
+
+### BUG-078: Default route changed to WorldNewsPage
+- **Severity:** minor
+- **Status:** open
+- **Page:** / (root)
+- **Discovered:** 2026-03-10
+- **File:** `ui/packages/app/src/App.tsx`
+- **Error:** Root `/` route now renders `WorldNewsPage` instead of `TasksPage`. Login helper navigates to `/` and expects "Tasks" heading — may break E2E tests. TasksPage moved to `/tasks`.
+- **Fix:** Verify E2E login helper works with new routing. Update tests if needed.
+
+### BUG-079: login helper expects "Tasks" heading at root
+- **Severity:** minor
+- **Status:** open
+- **Page:** N/A (test helper)
+- **Discovered:** 2026-03-10
+- **File:** `ui/tests/helpers.ts:40`
+- **Error:** `login()` navigates to `/` then asserts `heading "Tasks"` is visible. With WorldNewsPage as default route, this heading may not exist. Could cause cascading test failures.
+- **Fix:** Update login helper to navigate to `/tasks` or update assertion.
+
+### BUG-080: WorldMonitor feature uncommitted
+- **Severity:** major
+- **Status:** open
+- **Page:** N/A
+- **Discovered:** 2026-03-10
+- **Description:** WorldMonitor feature (news page, API proxy, Docker service) is uncommitted across 9 modified files + 3 new files. Includes route changes, sidebar additions, vite proxy config. Needs review and commit or stash.
+- **Files:** `worldmonitor.rs`, `WorldNewsPage.tsx`, `docker-compose.yml`, `App.tsx`, `Sidebar.tsx`, `vite.config.ts`, `routes.rs`, `mod.rs`, `client.ts`
