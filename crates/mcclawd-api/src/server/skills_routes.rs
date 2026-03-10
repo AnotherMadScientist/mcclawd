@@ -19,7 +19,7 @@ use mcclawd_core::clawhub::cache::CachedSearchResult;
 use mcclawd_core::clawhub::installer::{InstalledSkillInfo, SkillInstaller};
 use mcclawd_core::clawhub::{ClawHubCache, ClawHubClient, ClawHubSearchResult};
 use mcclawd_core::clawhub::ClawHubSkillMeta;
-use mcclawd_core::scanner::{self, ScanResult, ScanStatus};
+use mcclawd_core::scanner::{self, ScanIssue, ScanResult, ScanStatus};
 
 use super::state::AppState;
 
@@ -488,10 +488,9 @@ pub async fn scan_skill(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<ScanResult>, (StatusCode, Json<serde_json::Value>)> {
-    // Check cache first
-    if let Some(cached) = state.scan_cache.get(&name) {
-        return Ok(Json(cached.clone()));
-    }
+    // Always invalidate cache — user explicitly requested a fresh scan.
+    // The cache is repopulated after the scan completes (line below: scan_cache.insert).
+    state.scan_cache.remove(&name);
 
     // Try installed path first
     let config = state.config.read().await;
@@ -550,10 +549,18 @@ pub async fn scan_skill(
                     tmp
                 }
                 Err(_) => {
-                    // Can't get content — return NotScanned
+                    // Can't get content — return NotScanned with explanation
                     let result = ScanResult {
                         status: ScanStatus::NotScanned,
-                        issues: vec![],
+                        issues: vec![ScanIssue {
+                            code: "S003".to_string(),
+                            severity: "info".to_string(),
+                            description: format!(
+                                "Skill '{}' is not installed and content could not be downloaded from ClawHub. \
+                                 Install the skill first, then re-scan.",
+                                name
+                            ),
+                        }],
                     };
                     return Ok(Json(result));
                 }
@@ -576,7 +583,11 @@ pub async fn scan_skill(
             tracing::error!("Scan failed for skill '{}': {e}", name);
             let result = ScanResult {
                 status: ScanStatus::NotScanned,
-                issues: vec![],
+                issues: vec![ScanIssue {
+                    code: "S004".to_string(),
+                    severity: "info".to_string(),
+                    description: format!("Scan failed: {e}"),
+                }],
             };
             Ok(Json(result))
         }
@@ -590,10 +601,8 @@ pub async fn preview_scan_skill(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<ScanResult>, (StatusCode, Json<serde_json::Value>)> {
-    // Check cache first
-    if let Some(cached) = state.scan_cache.get(&name) {
-        return Ok(Json(cached.clone()));
-    }
+    // Always invalidate cache — user explicitly requested a fresh scan.
+    state.scan_cache.remove(&name);
 
     let config = state.config.read().await;
     let installed_path = config.skills.managed_dir.join(&name).join("SKILL.md");

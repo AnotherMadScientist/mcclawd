@@ -217,7 +217,7 @@ fn default_max_turns() -> usize {
     20
 }
 fn default_model() -> String {
-    "claude-sonnet-4-5".to_string()
+    "claude-haiku-4-5-20251001".to_string()
 }
 fn default_workspace() -> String {
     "default".to_string()

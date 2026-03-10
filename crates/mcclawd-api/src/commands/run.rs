@@ -96,7 +96,7 @@ async fn run_in_process(
 
     let max_turns = config.agent.max_turns;
     let (agent, _memory, _mcp_conns) =
-        AgentEngine::build(workspace, &api_key, max_turns, config, None).await?;
+        AgentEngine::build(workspace, &api_key, max_turns, config, None, &config.agent.model).await?;
     tracing::info!(max_turns, "Agent built");
 
     eprintln!("McClawd v0.5.0 — thinking...\n");

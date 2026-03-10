@@ -51,6 +51,7 @@ struct RunnerConfig {
     agent_type: String,
     max_turns: usize,
     history: Vec<RigMessage>,
+    model: String,
 }
 
 impl RunnerConfig {
@@ -90,6 +91,8 @@ impl RunnerConfig {
             .unwrap_or_else(|_| "25".into())
             .parse()
             .unwrap_or(25);
+        let model = std::env::var("MCCLAWD_MODEL")
+            .unwrap_or_else(|_| "claude-haiku-4-5-20251001".into());
 
         Ok(Self {
             prompt,
@@ -98,6 +101,7 @@ impl RunnerConfig {
             agent_type,
             max_turns,
             history,
+            model,
         })
     }
 }
@@ -266,6 +270,8 @@ async fn run_server() -> Result<()> {
         .unwrap_or_else(|_| "25".into())
         .parse()
         .unwrap_or(25);
+    let model = std::env::var("MCCLAWD_MODEL")
+        .unwrap_or_else(|_| "claude-haiku-4-5-20251001".into());
 
     let workspace = load_workspace();
     let config = McclawdConfig::default();
@@ -281,7 +287,7 @@ async fn run_server() -> Result<()> {
             context = context.with_skill_context_override(ctx.clone());
         }
         let system_prompt = context.build_system_prompt();
-        let agent = AgentEngine::build_system_agent(&api_key, &system_prompt).await?;
+        let agent = AgentEngine::build_system_agent(&api_key, &system_prompt, &model).await?;
         (agent, None, vec![])
     } else {
         // For task agents: if MCCLAWD_SKILL_CONTEXT is set, use it as override;
@@ -292,7 +298,7 @@ async fn run_server() -> Result<()> {
             None // Will use skill_context_override instead
         };
         let (agent, mem, bundles) =
-            AgentEngine::build_with_skill_filter(workspace, &api_key, max_turns, &config, None, skill_filter).await?;
+            AgentEngine::build_with_skill_filter(workspace, &api_key, max_turns, &config, None, skill_filter, &model).await?;
         (agent, Some(mem), bundles)
     };
 
@@ -457,7 +463,7 @@ async fn run() -> Result<()> {
             context = context.with_skill_context_override(ctx.clone());
         }
         let system_prompt = context.build_system_prompt();
-        let agent = AgentEngine::build_system_agent(&cfg.api_key, &system_prompt).await?;
+        let agent = AgentEngine::build_system_agent(&cfg.api_key, &system_prompt, &cfg.model).await?;
         (agent, None, vec![])
     } else {
         let skill_filter: Option<Vec<String>> = if skill_context_override.is_none() {
@@ -466,7 +472,7 @@ async fn run() -> Result<()> {
             None
         };
         let (agent, mem, bundles) =
-            AgentEngine::build_with_skill_filter(workspace, &cfg.api_key, cfg.max_turns, &config, None, skill_filter).await?;
+            AgentEngine::build_with_skill_filter(workspace, &cfg.api_key, cfg.max_turns, &config, None, skill_filter, &cfg.model).await?;
         (agent, Some(mem), bundles)
     };
 

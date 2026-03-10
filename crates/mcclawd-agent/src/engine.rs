@@ -13,7 +13,7 @@ use mcclawd_tools::guarded_tool::GuardedTool;
 use mcclawd_tools::system_tools::{CreateTask, NavigateTo};
 use rig::agent::Agent;
 use rig::client::CompletionClient;
-use rig::providers::anthropic::{self, completion::CLAUDE_4_SONNET};
+use rig::providers::anthropic;
 use std::sync::Arc;
 
 /// The concrete Anthropic completion-model type used throughout McClawd.
@@ -46,8 +46,9 @@ impl AgentEngine {
         max_turns: usize,
         config: &McclawdConfig,
         security_pipeline: Option<Arc<HookPipeline>>,
+        model: &str,
     ) -> anyhow::Result<(McclawdAgent, MemoryStore, Vec<McpBundle>)> {
-        Self::build_with_skill_filter(workspace, api_key, max_turns, config, security_pipeline, None).await
+        Self::build_with_skill_filter(workspace, api_key, max_turns, config, security_pipeline, None, model).await
     }
 
     /// Build a task agent with an optional skill filter.
@@ -60,6 +61,7 @@ impl AgentEngine {
         config: &McclawdConfig,
         security_pipeline: Option<Arc<HookPipeline>>,
         skill_filter: Option<Vec<String>>,
+        model: &str,
     ) -> anyhow::Result<(McclawdAgent, MemoryStore, Vec<McpBundle>)> {
         let mut context = ContextBuilder::new(workspace)
             .with_skills_dir(config.skills.managed_dir.clone());
@@ -77,7 +79,7 @@ impl AgentEngine {
             security_pipeline.unwrap_or_else(|| Arc::new(HookPipeline::new()));
 
         let mut builder = client
-            .agent(CLAUDE_4_SONNET)
+            .agent(model)
             .preamble(&system_prompt)
             .max_tokens(8192)
             .default_max_turns(max_turns)
@@ -110,11 +112,12 @@ impl AgentEngine {
     pub async fn build_system_agent(
         api_key: &str,
         system_prompt: &str,
+        model: &str,
     ) -> anyhow::Result<McclawdAgent> {
         let client = anthropic::Client::new(api_key)?;
 
         let agent = client
-            .agent(CLAUDE_4_SONNET)
+            .agent(model)
             .preamble(system_prompt)
             .max_tokens(4096)
             .default_max_turns(3)

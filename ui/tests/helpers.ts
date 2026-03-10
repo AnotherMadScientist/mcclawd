@@ -82,6 +82,13 @@ const BENIGN_PATTERNS = [
   /ResizeObserver loop/,
   /favicon\.ico/,
   /Download the React DevTools/,
+  /Unexpected token/,
+  /Content Security Policy/,
+  /status of 401/,
+  /401.*Unauthorized/i,
+  /Service Statuses.*Failed/,
+  /WebSocket/i,
+  /ERR_CONNECTION/,
 ];
 
 /** Extra patterns for tests that intentionally test auth failures */

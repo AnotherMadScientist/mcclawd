@@ -499,6 +499,7 @@ async fn run_agent_sandboxed(
             Ok(mut env) => {
                 // Override image: McpPorter returns mcclawd-agent:{hash}, but we need the runner
                 env.image = "mcclawd-runner:latest".to_string();
+                env.model = config.agent.model.clone();
                 tracing::info!(
                     gateway_url = %env.gateway_url,
                     tools = ?env.allowed_tools,
@@ -524,6 +525,7 @@ async fn run_agent_sandboxed(
                     ),
                     allowed_tools: if fallback_tools.is_empty() { vec!["*".to_string()] } else { fallback_tools },
                     skill_context: String::new(),
+                    model: config.agent.model.clone(),
                 }
             }
         }
@@ -560,6 +562,7 @@ async fn run_agent_sandboxed(
             ),
             allowed_tools: if fallback_tools.is_empty() { vec!["*".to_string()] } else { fallback_tools },
             skill_context: String::new(),
+            model: config.agent.model.clone(),
         }
     };
 
@@ -871,7 +874,7 @@ async fn run_agent_sandboxed(
                         .send_and_persist(&fwd_task_id, &fwd_tx, chunk)
                         .await;
                 }
-                // Done: update task status to Completed, then broadcast
+                // Done: update task status to Completed, clean up container, then broadcast
                 OutboundChunk::Done => {
                     {
                         let mut mgr = fwd_state.tasks.write().await;
@@ -880,6 +883,16 @@ async fn run_agent_sandboxed(
                     fwd_state
                         .pg_update_status(&fwd_task_id, "Completed", None)
                         .await;
+                    // Clean up the container — task is done
+                    {
+                        let handle = fwd_state.task_containers.write().await.remove(&fwd_task_id);
+                        if let Some(h) = handle {
+                            let cid = h.container_id.clone();
+                            if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {
+                                let _ = orch.cleanup_container(&cid).await;
+                            }
+                        }
+                    }
                     fwd_state
                         .send_and_persist(&fwd_task_id, &fwd_tx, OutboundChunk::Done)
                         .await;
@@ -1095,7 +1108,7 @@ async fn run_agent_host(
     let pipeline = Some(state.security_pipeline.clone());
     // Pass task_skills as filter: empty = no skills, non-empty = only those skills
     let skill_filter = Some(task_skills.to_vec());
-    let (agent, _memory, _mcp_conns) = match AgentEngine::build_with_skill_filter(workspace, &api_key, config.agent.max_turns, &config, pipeline, skill_filter).await {
+    let (agent, _memory, _mcp_conns) = match AgentEngine::build_with_skill_filter(workspace, &api_key, config.agent.max_turns, &config, pipeline, skill_filter, &config.agent.model).await {
         Ok(result) => result,
         Err(e) => {
             let msg = format!("Failed to build agent: {e}");

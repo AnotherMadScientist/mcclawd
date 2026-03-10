@@ -208,6 +208,7 @@ pub async fn ensure_system_agent_container(
         match porter.prepare_base_environment(&config).await {
             Ok(mut env) => {
                 env.image = "mcclawd-runner:latest".to_string();
+                env.model = config.agent.model.clone();
                 tracing::info!(
                     gateway_url = %env.gateway_url,
                     "McpPorter resolved system agent base environment (no skills/MCP tools)"
@@ -224,6 +225,7 @@ pub async fn ensure_system_agent_container(
                     ),
                     allowed_tools: vec![],
                     skill_context: String::new(),
+                    model: config.agent.model.clone(),
                 }
             }
         }
@@ -236,6 +238,7 @@ pub async fn ensure_system_agent_container(
             ),
             allowed_tools: vec![],
             skill_context: String::new(),
+            model: config.agent.model.clone(),
         }
     };
 
@@ -470,7 +473,7 @@ async fn run_system_agent_host(
     // Build agent with system tools
     let system_prompt = build_system_prompt(&workspace_prompt);
     let agent =
-        match mcclawd_agent::engine::AgentEngine::build_system_agent(&api_key, &system_prompt)
+        match mcclawd_agent::engine::AgentEngine::build_system_agent(&api_key, &system_prompt, &config.agent.model)
             .await
         {
             Ok(a) => a,

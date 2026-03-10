@@ -56,6 +56,8 @@ pub struct AgentEnvironment {
     pub allowed_tools: Vec<String>,
     /// Combined skill context for the agent system prompt
     pub skill_context: String,
+    /// LLM model identifier, e.g. "claude-haiku-4-5-20251001"
+    pub model: String,
 }
 
 #[derive(Clone)]
@@ -483,6 +485,7 @@ impl SandboxOrchestrator {
             format!("MCCLAWD_TASK_ID={}", task_id),
             format!("MCCLAWD_GATEWAY_URL={}", agent_env.gateway_url),
             format!("MCCLAWD_ALLOWED_TOOLS={allowed_tools_str}"),
+            format!("MCCLAWD_MODEL={}", agent_env.model),
         ];
 
         let mut mounts = vec![Mount {
@@ -605,6 +608,7 @@ impl SandboxOrchestrator {
             format!("MCCLAWD_GATEWAY_URL={}", agent_env.gateway_url),
             format!("MCCLAWD_ALLOWED_TOOLS={allowed_tools_str}"),
             format!("MCCLAWD_MAX_TURNS={max_turns}"),
+            format!("MCCLAWD_MODEL={}", agent_env.model),
         ];
 
         if let Some(at) = agent_type {
@@ -740,6 +744,7 @@ impl SandboxOrchestrator {
             "MCCLAWD_AGENT_TYPE=system".to_string(),
             format!("MCCLAWD_GATEWAY_URL={}", agent_env.gateway_url),
             format!("MCCLAWD_ALLOWED_TOOLS={allowed_tools_str}"),
+            format!("MCCLAWD_MODEL={}", agent_env.model),
         ];
 
         let mounts = vec![Mount {
@@ -832,6 +837,7 @@ impl SandboxOrchestrator {
             format!("MCCLAWD_GATEWAY_URL={}", agent_env.gateway_url),
             format!("MCCLAWD_ALLOWED_TOOLS={allowed_tools_str}"),
             format!("MCCLAWD_MAX_TURNS={max_turns}"),
+            format!("MCCLAWD_MODEL={}", agent_env.model),
         ];
 
         if let Some(at) = agent_type {

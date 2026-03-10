@@ -935,6 +935,7 @@ async fn reconcile_containers_and_tasks(state: AppState, pg_store: PgTaskStore) 
                         ),
                         allowed_tools,
                         skill_context,
+                        model: config.agent.model.clone(),
                     };
 
                     if let Ok(orch) = crate::sandbox::SandboxOrchestrator::new() {

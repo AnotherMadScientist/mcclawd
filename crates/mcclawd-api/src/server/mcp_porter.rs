@@ -133,6 +133,7 @@ impl McpPorter {
             gateway_url: format!("http://agentgateway:3000"),
             allowed_tools,
             skill_context: tool_set.skill_context.clone(),
+            model: String::new(), // Caller overrides with config.agent.model
         })
     }
 
@@ -280,6 +281,7 @@ impl McpPorter {
             // No MCP tools allowed for the base/system agent environment
             allowed_tools: vec![],
             skill_context: String::new(),
+            model: String::new(), // Caller overrides with config.agent.model
         })
     }
 
