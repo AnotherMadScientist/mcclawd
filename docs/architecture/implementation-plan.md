@@ -213,42 +213,145 @@ No two workstreams touch the same files.
 2. Scan before messages reach users, not after
 3. Tests: verify outbound message with credit card number is redacted
 
-**Task C3: Secret tokenization at host boundaries**
-The LLM and agent context must **never see raw secret values**. Instead:
-1. In agent context / system prompts, secrets appear as `{SECRET_NAME}` tokens
-   (e.g. `{ANTHROPIC_API_KEY}`, `{GITHUB_TOKEN}`)
-2. The `ContextBuilder` replaces any accidentally-leaked secret values with
-   their `{TOKEN}` form before the prompt reaches the LLM
-3. At the **host→container boundary** (ContainerRuntime.start()), tokens are
-   resolved to real values and written to tmpfs at `/run/secrets/{KEY}` (mode 0400)
-4. Tool call arguments containing `{SECRET_NAME}` tokens are substituted at
-   the MCP call boundary (AgentGateway proxy layer), never inside the LLM turn
+**Task C3: Unified redaction tokenization at trust boundaries**
 
-Implementation:
-- Add `SecretTokenizer` in `crates/mcclawd-core/src/hooks/secret_tokenizer.rs` (CREATE)
-  - `tokenize(text: &str, known_secrets: &[&str]) -> String` — replaces raw values with `{NAME}`
-  - `resolve(text: &str, store: &dyn SecretBackend) -> String` — replaces `{NAME}` with values
-- Wire `tokenize()` into `ContextBuilder` (before LLM sees the prompt)
-- Wire `tokenize()` into `HookPipeline` as a pre-LLM hook
-- Wire `resolve()` into `ContainerRuntime::start()` for tmpfs secret injection
-- Wire `resolve()` into MCP tool call dispatch for argument substitution
+All sensitive data — secrets, PII, DLP matches — is replaced with **typed tokens
+carrying a human-glanceable suffix** before crossing into LLM context. A per-task
+**RedactionVault** maps tokens back to original values for resolution at execution
+boundaries.
+
+**Token format**: `{TYPE:LABEL:…SUFFIX}`
+
+| Type | Example token | What it replaces |
+|------|--------------|-----------------|
+| SECRET | `{SECRET:ANTHROPIC_API_KEY:…3kF9}` | API key from SecretBackend |
+| SECRET | `{SECRET:GITHUB_TOKEN:…xQ2m}` | Rotated key (different suffix) |
+| PII | `{PII:CREDIT_CARD:…4242}` | Credit card number |
+| PII | `{PII:PHONE:…7890}` | Phone number |
+| PII | `{PII:EMAIL:…@acme.com}` | Email address (domain as suffix) |
+| PII | `{PII:SSN:…6789}` | Social security number |
+| DLP | `{DLP:AWS_ACCESS_KEY:…WZYX}` | Detected by DLP pattern match |
+| DLP | `{DLP:PRIVATE_KEY:…a7b2}` | SHA256 last 4 of key |
+
+**Suffix rules** (last N chars of the original value, never enough to reconstruct):
+- Numbers (card, phone, SSN): last 4 digits
+- API keys/tokens: last 4 alphanumeric characters
+- Email: `…@domain.tld`
+- Private keys: last 4 hex chars of SHA256 hash
+- Generic strings: last 4 characters
+
+**Why suffixes matter**: A human reviewing the audit trail or LLM output can
+immediately tell *which* card or *which* key version is involved without seeing
+the raw value. The LLM can reference "the card ending in 4242" naturally.
+
+**RedactionVault** (per-task, in-memory):
+```rust
+/// Per-task vault mapping redaction tokens → original values.
+/// Created when a task starts, dropped when the task ends.
+/// Never serialized. Never persisted. Never enters LLM context.
+pub struct RedactionVault {
+    /// token → original value (e.g. "{PII:CREDIT_CARD:…4242}" → "4111111111114242")
+    entries: DashMap<String, RedactionEntry>,
+}
+
+pub struct RedactionEntry {
+    pub original: String,       // raw value (zeroized on drop)
+    pub redaction_type: RedactionType,  // Secret | Pii | Dlp
+    pub label: String,          // "CREDIT_CARD", "ANTHROPIC_API_KEY"
+    pub suffix: String,         // "4242", "3kF9"
+    pub created_at: DateTime<Utc>,
+}
+```
+
+**Dataflow with tokenization**:
+
+```
+User prompt: "charge card 4111111111114242"
+       │
+       ▼
+┌─ RedactionTokenizer ──────────────────────────────────┐
+│  1. DLP patterns detect credit card → match           │
+│  2. Generate suffix: last 4 = "4242"                  │
+│  3. Generate token: "{PII:CREDIT_CARD:…4242}"         │
+│  4. Store in RedactionVault: token → "4111...4242"    │
+│  5. Replace in text: "charge card {PII:CREDIT_CARD:…4242}" │
+└───────────────────────────────────────────────────────┘
+       │
+       ▼
+  LLM sees: "charge card {PII:CREDIT_CARD:…4242}"
+  LLM responds: "I'll charge the card ending in 4242"
+       │
+       ▼  tool_call("stripe_charge", {card: "{PII:CREDIT_CARD:…4242}"})
+       │
+┌─ Execution boundary (host → MCP/container) ──────────┐
+│  RedactionVault.resolve("{PII:CREDIT_CARD:…4242}")    │
+│  → "4111111111114242"                                 │
+│  Actual API call uses real card number                 │
+└───────────────────────────────────────────────────────┘
+```
+
+**Handling key rotation / duplicates**:
+- Same label, different value → different suffix → different token
+- `{SECRET:ANTHROPIC_API_KEY:…3kF9}` (production) vs `{SECRET:ANTHROPIC_API_KEY:…mN7x}` (staging)
+- Collision handling: if two values produce same suffix, append 2-char hash: `…4242:a3`
+
+**Implementation**:
+- `RedactionVault` in `crates/mcclawd-core/src/hooks/redaction_vault.rs` (CREATE)
+  - `DashMap<String, RedactionEntry>` with `zeroize` on drop for `original` field
+  - `register(redaction_type, label, original) -> String` — generates token, stores mapping
+  - `resolve(token: &str) -> Option<String>` — looks up original value
+  - `resolve_all(text: &str) -> String` — replaces all `{TYPE:LABEL:…SUFFIX}` tokens in text
+  - `tokenize_all(text: &str, patterns: &[DlpPattern], secrets: &[(name, value)]) -> String`
+    — scans text, registers all matches, returns tokenized text
+- `RedactionTokenizer` as a `SecurityHook` in `crates/mcclawd-core/src/hooks/secret_tokenizer.rs` (CREATE)
+  - Wraps `RedactionVault` + `DlpPattern` list
+  - `before_tool_call()`: tokenizes tool arguments via vault
+  - `after_tool_call()`: tokenizes tool results via vault
+  - Runs **before** DlpHook in the pipeline (so DLP sees clean tokenized text)
+- Wire into `HookPipeline` as first hook (before DLP, secret scanner, audit)
+- Wire `RedactionVault` into `AppState` as `Arc<DashMap<TaskId, RedactionVault>>`
+- Wire `resolve_all()` into execution boundaries:
+  - `ContainerRuntime::start()` for tmpfs secret injection at `/run/secrets/{KEY}`
+  - MCP tool call dispatch for argument substitution
+  - `ContextBuilder` for pre-LLM prompt tokenization (secrets from SecretBackend)
+
+**Audit integration**:
+- `RedactionTokenizer` pushes `PendingFinding` to `SecurityContext` for each tokenization
+  - `finding_type: "redaction_applied"`
+  - `tag: "redaction:PII:CREDIT_CARD"` (or `"redaction:SECRET:ANTHROPIC_API_KEY"`)
+  - `redacted_preview: "{PII:CREDIT_CARD:…4242}"` (the token itself, safe to store)
+- These flow through the existing `AuditHook → PgAuditSink → security_events + dlp_findings` pipeline
+- UI shows: "Redacted CREDIT_CARD (…4242) in tool args for stripe_charge"
 
 Files OWNED (in addition to C1/C2 files above):
-| `crates/mcclawd-core/src/hooks/secret_tokenizer.rs` | CREATE |
+
+| File | Action |
+|------|--------|
+| `crates/mcclawd-core/src/hooks/redaction_vault.rs` | CREATE — token↔value vault |
+| `crates/mcclawd-core/src/hooks/secret_tokenizer.rs` | CREATE — SecurityHook wrapper |
 
 Tests:
-- `tokenize("key is sk-abc123", &["OPENAI_KEY"]) == "key is {OPENAI_KEY}"`
-- `resolve("{GITHUB_TOKEN}", store) == "ghp_xxx..."` (from SecretBackend)
-- E2E: agent prompt never contains raw secret values, only `{TOKEN}` placeholders
-- E2E: container /run/secrets/KEY contains the real value
+- `vault.register(Pii, "CREDIT_CARD", "4111111111114242") == "{PII:CREDIT_CARD:…4242}"`
+- `vault.resolve("{PII:CREDIT_CARD:…4242}") == Some("4111111111114242")`
+- `vault.register(Secret, "API_KEY", "sk-abc123") == "{SECRET:API_KEY:…c123}"`
+- Same label + different value → different token: `…c123` vs `…d456`
+- Suffix collision: `…4242:a3` disambiguates two cards ending in 4242
+- `resolve_all()` handles multiple tokens in one string
+- `tokenize_all()` finds and replaces all DLP matches + known secrets in text
+- `RedactionEntry.original` is zeroized on drop (no secret residue in memory)
+- E2E: LLM prompt contains only tokens, container /run/secrets has real values
+- E2E: audit trail shows `redaction_applied` findings with safe token previews
 
 #### Acceptance criteria
 - `cargo test -p mcclawd-swarm` passes (shared memory DLP)
 - `cargo test -p mcclawd-channels` passes (channel DLP)
-- `cargo test -p mcclawd-core` passes (secret tokenizer)
+- `cargo test -p mcclawd-core` passes (redaction vault + tokenizer)
 - No PII/secrets can flow through SharedMemory or outbound channels unscanned
-- LLM context never contains raw secret values — only `{SECRET_NAME}` tokens
+- LLM context never contains raw sensitive values — only `{TYPE:LABEL:…SUFFIX}` tokens
+- Tokens carry enough suffix for human identification but not value reconstruction
+- Key rotation produces distinct tokens (different suffixes)
 - Secret values are resolved only at host→container and host→MCP boundaries
+- All tokenization events flow through existing audit pipeline as `redaction_applied` findings
 
 ---
 
@@ -458,7 +561,8 @@ crates/mcclawd-channels/
   src/traits.rs           → WS-C
 
 crates/mcclawd-core/
-  src/hooks/secret_tokenizer.rs → WS-C (CREATE)
+  src/hooks/redaction_vault.rs    → WS-C (CREATE)
+  src/hooks/secret_tokenizer.rs   → WS-C (CREATE)
 
 crates/mcclawd-api/
   src/server/swarm_sse.rs → WS-F (CREATE)
