@@ -3240,12 +3240,11 @@ User (Web UI / CLI / Channel)
                        │
                        ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│  run_agent() — Sandbox Decision                                  │
+│  run_agent() — Container Execution (Docker Required)              │
 │                                                                  │
 │  Try Docker (SandboxOrchestrator::new() + health_check)          │
 │  ├─ Docker available → run_agent_sandboxed()                     │
-│  ├─ Docker unavailable + strict_sandbox=true → FAIL              │
-│  └─ Docker unavailable + strict_sandbox=false → run_agent_host() │
+│  └─ Docker unavailable → FAIL (no host fallback)                 │
 └──────────────────────┬───────────────────────────────────────────┘
                        │
                        ▼

@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use super::taint_trace::TaintTrace;
 use super::SecurityHook;
 
 /// A finding collected during a scan pass — written to the DB by AuditHook.
@@ -34,6 +35,12 @@ pub struct SecurityContext {
     pub threat_level: String,
     /// Whether any hook blocked the call.
     pub was_blocked: bool,
+    /// Session-level taint trace — accumulates across all tool calls within a task.
+    /// Created when set_task_context is first called for a task_id,
+    /// persists across tool calls (not cleared per-call like findings).
+    pub taint_trace: Option<TaintTrace>,
+    /// Active taint span ID (set in before_tool_call, completed in after_tool_call).
+    pub active_span_id: Option<String>,
 }
 
 impl SecurityContext {
@@ -91,13 +98,30 @@ impl HookPipeline {
     }
 
     /// Call before each tool invocation to associate events with the current task.
+    ///
+    /// Creates a taint trace for the task if one doesn't exist yet (first call),
+    /// or reuses the existing trace (subsequent calls within the same task).
+    /// Per-call state (findings, threat_level) is reset; the trace persists.
     pub async fn set_task_context(&self, task_id: &str) {
         let mut ctx = self.context.write().await;
+        // Create taint trace on first call for this task, preserve across calls
+        let needs_new_trace = ctx.task_id.as_deref() != Some(task_id)
+            || ctx.taint_trace.is_none();
         ctx.task_id = Some(task_id.to_string());
-        // Clear findings from the previous call.
+        if needs_new_trace {
+            ctx.taint_trace = Some(TaintTrace::new(task_id));
+        }
+        // Clear per-call state (findings accumulate within one tool call only)
         ctx.findings.clear();
         ctx.threat_level = "safe".to_string();
         ctx.was_blocked = false;
+        ctx.active_span_id = None;
+    }
+
+    /// Get the accumulated taint trace for the current task (for evaluation/persistence).
+    pub async fn get_taint_trace(&self) -> Option<TaintTrace> {
+        let ctx = self.context.read().await;
+        ctx.taint_trace.clone()
     }
 
     /// Instantiate user-defined hooks from config and append them after existing hooks.
@@ -128,9 +152,16 @@ impl SecurityHook for HookPipeline {
         tool_name: &str,
         args: &serde_json::Value,
     ) -> crate::Result<()> {
+        // Start a taint span for this tool call
+        {
+            let mut ctx = self.context.write().await;
+            if let Some(ref mut trace) = ctx.taint_trace {
+                let span_id = trace.start_span(tool_name);
+                ctx.active_span_id = Some(span_id);
+            }
+        }
+
         // Run ALL hooks (so AuditHook always persists findings), return first error.
-        // Previous fail-fast behavior skipped AuditHook when DlpHook blocked,
-        // causing detected findings to never reach the database.
         let mut first_error = None;
         for hook in &self.hooks {
             if let Err(e) = hook.before_tool_call(tool_name, args).await {
@@ -160,6 +191,26 @@ impl SecurityHook for HookPipeline {
                 }
             }
         }
+
+        // Complete the taint span with accumulated findings from this tool call
+        {
+            let mut ctx = self.context.write().await;
+            // Extract values before mutably borrowing taint_trace
+            let tags: Vec<String> = ctx.findings.iter().map(|f| f.tag.clone()).collect();
+            let threat_level = ctx.threat_level.clone();
+            let action = if ctx.was_blocked {
+                "blocked"
+            } else if first_error.is_some() {
+                "warned"
+            } else {
+                "allowed"
+            };
+            let span_id = ctx.active_span_id.take();
+            if let (Some(trace), Some(sid)) = (&mut ctx.taint_trace, &span_id) {
+                trace.complete_span(sid, tags, &threat_level, action);
+            }
+        }
+
         match first_error {
             Some(e) => Err(e),
             None => Ok(()),

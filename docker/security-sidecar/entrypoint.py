@@ -72,18 +72,103 @@ class HealthResponse(BaseModel):
 
 
 # ─── Initialize detectors ────────────────────────────────────────────
-from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-# Explicitly use en_core_web_sm (the model installed in the Docker image).
-# Without this, presidio defaults to en_core_web_lg which is 400MB and
-# fails with "No space left on device" in our read-only slim container.
+# Use en_core_web_md for better NER accuracy (person names, orgs, locations).
 nlp_config = {
     "nlp_engine_name": "spacy",
-    "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+    "models": [{"lang_code": "en", "model_name": "en_core_web_md"}],
 }
 nlp_engine = NlpEngineProvider(nlp_configuration=nlp_config).create_engine()
+
+# Build custom recognizers for patterns Presidio doesn't cover natively
+custom_recognizers = []
+
+# Cloud provider API keys
+cloud_patterns = [
+    ("AWS_ACCESS_KEY", r"AKIA[0-9A-Z]{16}", 0.95),
+    ("AWS_SECRET_KEY", r"(?:aws_secret_access_key|secret_key)\s*[=:]\s*[A-Za-z0-9/+=]{40}", 0.95),
+    ("AZURE_KEY", r"[A-Za-z0-9+/]{86}==", 0.6),
+    ("GCP_API_KEY", r"AIza[A-Za-z0-9_\-]{35}", 0.95),
+    ("GCP_SERVICE_ACCOUNT", r'"type"\s*:\s*"service_account"', 0.9),
+]
+
+# AI/ML provider keys
+ai_patterns = [
+    ("OPENAI_KEY", r"sk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}", 0.98),
+    ("ANTHROPIC_KEY", r"sk-(?:proj|ant)-[A-Za-z0-9\-_]{80,}", 0.98),
+    ("HUGGINGFACE_TOKEN", r"hf_[A-Za-z0-9]{34,}", 0.95),
+    ("REPLICATE_TOKEN", r"r8_[A-Za-z0-9]{40}", 0.95),
+]
+
+# SaaS platform tokens
+saas_patterns = [
+    ("GITHUB_TOKEN", r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36}", 0.95),
+    ("GITHUB_CLASSIC", r"github_pat_[A-Za-z0-9_]{82}", 0.98),
+    ("GITLAB_TOKEN", r"glpat-[A-Za-z0-9\-]{20}", 0.95),
+    ("SLACK_TOKEN", r"xox[boaprs]-[0-9A-Za-z\-]{10,}", 0.95),
+    ("SLACK_WEBHOOK", r"https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+", 0.95),
+    ("DISCORD_TOKEN", r"[MN][A-Za-z0-9]{23,}\.[A-Za-z0-9\-_]{6}\.[A-Za-z0-9\-_]{27}", 0.9),
+    ("DISCORD_WEBHOOK", r"https://discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9\-_]+", 0.95),
+    ("STRIPE_KEY", r"(?:r|s)k_(?:live|test)_[A-Za-z0-9]{24,}", 0.95),
+    ("SQUARE_KEY", r"sq0[a-z]{3}-[A-Za-z0-9\-_]{22,}", 0.9),
+    ("SENDGRID_KEY", r"SG\.[A-Za-z0-9\-_]{22}\.[A-Za-z0-9\-_]{43}", 0.95),
+    ("TWILIO_KEY", r"SK[0-9a-fA-F]{32}", 0.85),
+    ("MAILGUN_KEY", r"key-[A-Za-z0-9]{32}", 0.85),
+    ("DATADOG_KEY", r"[a-f0-9]{32}", 0.4),  # low confidence — too generic alone
+    ("SHOPIFY_KEY", r"shpat_[A-Fa-f0-9]{32}", 0.95),
+    ("VERCEL_TOKEN", r"[A-Za-z0-9]{24}", 0.3),  # very generic
+    ("FIREBASE_KEY", r"AIza[A-Za-z0-9\-_]{35}", 0.9),
+]
+
+# Package registry tokens
+registry_patterns = [
+    ("NPM_TOKEN", r"npm_[A-Za-z0-9]{36}", 0.95),
+    ("PYPI_TOKEN", r"pypi-AgEIcHlwaS5vcmc[A-Za-z0-9\-_]{50,}", 0.98),
+    ("NUGET_KEY", r"oy2[A-Za-z0-9]{43}", 0.9),
+    ("RUBYGEMS_KEY", r"rubygems_[A-Za-z0-9]{48}", 0.95),
+    ("DOCKER_TOKEN", r"dckr_pat_[A-Za-z0-9\-_]{27}", 0.95),
+]
+
+# Crypto/blockchain
+crypto_patterns = [
+    ("ETH_PRIVATE_KEY", r"0x[0-9a-fA-F]{64}", 0.7),
+    ("BTC_WIF", r"[5KL][1-9A-HJ-NP-Za-km-z]{50,51}", 0.7),
+]
+
+# Infrastructure secrets
+infra_patterns = [
+    ("JWT_TOKEN", r"eyJ[A-Za-z0-9\-_]{20,}\.eyJ[A-Za-z0-9\-_]{20,}\.[A-Za-z0-9\-_]{20,}", 0.85),
+    ("DATABASE_URL", r"(?:postgres|mysql|mongodb|redis|amqp)://[^\s\"']+:[^\s\"']+@", 0.95),
+    ("PRIVATE_KEY_PEM", r"-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----", 0.99),
+    ("BEARER_TOKEN", r"[Bb]earer\s+[A-Za-z0-9\-_.~+/]{20,}", 0.75),
+    ("BASIC_AUTH", r"[Bb]asic\s+[A-Za-z0-9+/=]{20,}", 0.8),
+    ("GENERIC_SECRET", r"(?:password|secret|token|key|credential)\s*[=:]\s*['\"][^\s'\"]{8,}['\"]", 0.7),
+]
+
+# Medical/HIPAA
+medical_patterns = [
+    ("MEDICAL_RECORD", r"MRN[:\s]*\d{6,}", 0.8),
+    ("DEA_NUMBER", r"[A-Z][A-Z9][0-9]{7}", 0.6),
+    ("NPI_NUMBER", r"\b\d{10}\b", 0.3),  # low confidence — too generic alone
+]
+
+# Register all custom patterns with Presidio
+all_custom_patterns = (
+    cloud_patterns + ai_patterns + saas_patterns + registry_patterns +
+    crypto_patterns + infra_patterns + medical_patterns
+)
+for entity_type, regex_str, score in all_custom_patterns:
+    recognizer = PatternRecognizer(
+        supported_entity=entity_type,
+        patterns=[Pattern(name=entity_type.lower(), regex=regex_str, score=score)],
+    )
+    custom_recognizers.append(recognizer)
+
 presidio_analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
+for r in custom_recognizers:
+    presidio_analyzer.registry.add_recognizer(r)
 
 from detect_secrets.core.scan import scan_line
 from detect_secrets.settings import default_settings
@@ -147,16 +232,47 @@ def _redact_preview(text: str, start: int, end: int) -> str:
 
 # ─── Scan implementations ────────────────────────────────────────────
 def scan_pii(text: str) -> list[Detection]:
+    """Run Presidio with ALL registered recognizers (built-in + custom).
+
+    Presidio natively detects: PERSON, PHONE_NUMBER, EMAIL_ADDRESS, CREDIT_CARD,
+    CRYPTO, IBAN_CODE, IP_ADDRESS, MEDICAL_LICENSE, NRP, LOCATION, DATE_TIME,
+    US_SSN, US_BANK_NUMBER, US_DRIVER_LICENSE, US_ITIN, US_PASSPORT, UK_NHS,
+    SG_NRIC_FIN, AU_ABN, AU_ACN, AU_TFN, AU_MEDICARE, IN_PAN, IN_AADHAAR,
+    plus all custom recognizers registered above (cloud keys, AI tokens, etc.)
+    """
     detections = []
     try:
-        results = presidio_analyzer.analyze(text=text, language="en")
+        # Analyze with ALL entities (None = use all registered recognizers)
+        results = presidio_analyzer.analyze(
+            text=text,
+            language="en",
+            entities=None,  # All registered entities
+            score_threshold=0.3,  # Low threshold — we use confidence for triage
+        )
         for r in results:
             rec_name = "unknown"
             if r.recognition_metadata:
                 rec_name = r.recognition_metadata.get("recognizer_name", "unknown")
+            # Classify finding_type based on entity category
+            finding_type = "pii"
+            if r.entity_type in (
+                "AWS_ACCESS_KEY", "AWS_SECRET_KEY", "AZURE_KEY", "GCP_API_KEY",
+                "GCP_SERVICE_ACCOUNT", "OPENAI_KEY", "ANTHROPIC_KEY",
+                "HUGGINGFACE_TOKEN", "REPLICATE_TOKEN", "GITHUB_TOKEN",
+                "GITHUB_CLASSIC", "GITLAB_TOKEN", "SLACK_TOKEN", "SLACK_WEBHOOK",
+                "DISCORD_TOKEN", "DISCORD_WEBHOOK", "STRIPE_KEY", "SQUARE_KEY",
+                "SENDGRID_KEY", "TWILIO_KEY", "MAILGUN_KEY", "SHOPIFY_KEY",
+                "FIREBASE_KEY", "NPM_TOKEN", "PYPI_TOKEN", "NUGET_KEY",
+                "RUBYGEMS_KEY", "DOCKER_TOKEN", "ETH_PRIVATE_KEY", "BTC_WIF",
+                "JWT_TOKEN", "DATABASE_URL", "PRIVATE_KEY_PEM", "BEARER_TOKEN",
+                "BASIC_AUTH", "GENERIC_SECRET", "DATADOG_KEY", "VERCEL_TOKEN",
+            ):
+                finding_type = "secret"
+            elif r.entity_type in ("MEDICAL_RECORD", "DEA_NUMBER", "NPI_NUMBER"):
+                finding_type = "medical"
             detections.append(Detection(
                 detector="presidio",
-                finding_type="pii",
+                finding_type=finding_type,
                 tag=r.entity_type,
                 pattern_name=rec_name,
                 confidence=r.score,
@@ -300,13 +416,17 @@ async def trace_evaluate(req: TraceEvalRequest):
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
+    supported = presidio_analyzer.get_supported_entities()
     return HealthResponse(
         status="ok",
         components={
-            "presidio": "ok",
+            "presidio": f"ok ({len(supported)} entities)",
+            "presidio_entities": ", ".join(sorted(supported)),
             "detect_secrets": "ok",
             "injection_patterns": f"{len(compiled_injection_patterns)} loaded",
             "secret_patterns": f"{len(compiled_secret_patterns)} loaded",
+            "custom_recognizers": f"{len(custom_recognizers)} loaded",
+            "spacy_model": "en_core_web_md",
             "invariant": "ok" if invariant_available else "unavailable",
         },
     )
@@ -420,10 +540,14 @@ async def scan_skill(req: SkillScanRequest):
 
 @app.get("/detectors")
 async def list_detectors():
+    supported = presidio_analyzer.get_supported_entities()
     return {
         "detectors": [
-            {"name": "presidio", "type": "pii", "status": "active",
-             "entities": len(presidio_analyzer.get_supported_entities())},
+            {"name": "presidio", "type": "pii+secrets", "status": "active",
+             "entities": sorted(supported),
+             "entity_count": len(supported),
+             "model": "en_core_web_md",
+             "custom_recognizers": len(custom_recognizers)},
             {"name": "detect_secrets", "type": "secret", "status": "active"},
             {"name": "extra_patterns", "type": "secret", "status": "active",
              "patterns": len(compiled_secret_patterns)},

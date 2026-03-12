@@ -8,12 +8,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-# Download ONLY the small spacy model (~12MB). presidio defaults to
-# en_core_web_lg (400MB) which exceeds disk quotas. entrypoint.py
-# explicitly configures presidio to use en_core_web_sm instead.
-RUN python -m spacy download en_core_web_sm
+# Download the medium spacy model (~40MB) for better NER accuracy.
+# The small model misses many PII entities; the large model (400MB)
+# is overkill for our use case. Medium is the sweet spot.
+RUN python -m spacy download en_core_web_md
 # Pre-validate the model loads correctly at build time.
-RUN python -c "import spacy; spacy.load('en_core_web_sm'); print('spacy model ok')"
+RUN python -c "import spacy; spacy.load('en_core_web_md'); print('spacy model ok')"
 
 COPY entrypoint.py .
 COPY config/ config/

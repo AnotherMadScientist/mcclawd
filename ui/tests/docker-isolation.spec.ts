@@ -67,8 +67,8 @@ test.describe("Docker Container Isolation @docker @security @container-isolation
     expect(status).toBe(200);
     expect(body).toBeTruthy();
     expect(body.task_id).toBe(taskId);
-    // execution_mode should be present (docker or host depending on Docker availability)
-    expect(["docker", "host"]).toContain(body.execution_mode);
+    // execution_mode must always be 'docker' — host fallback has been removed
+    expect(body.execution_mode).toBe("docker");
   });
 
   test("container uses sandbox base_image from config", async ({ page }) => {
@@ -94,20 +94,11 @@ test.describe("Docker Container Isolation @docker @security @container-isolation
     expect(body).toHaveProperty("execution_mode");
   });
 
-  test("execution_mode is always 'docker' in strict mode", async ({ page }) => {
-    const config = await getConfig(page);
-    if (config.sandbox.strict_sandbox) {
-      const taskId = await createTaskViaApi(page, "strict mode test");
-      const { body } = await getContainerInfo(page, taskId);
-      // In strict mode, execution_mode must be 'docker' (host fallback is blocked)
-      expect(body.execution_mode).toBe("docker");
-    }
-  });
-
-  test("strict_sandbox config is present and boolean", async ({ page }) => {
-    const config = await getConfig(page);
-    // strict_sandbox defaults to false for dev, true for production
-    expect(typeof config.sandbox.strict_sandbox).toBe("boolean");
+  test("execution_mode is always docker", async ({ page }) => {
+    const taskId = await createTaskViaApi(page, "docker-only mode test");
+    const { body } = await getContainerInfo(page, taskId);
+    // Docker is always required — there is no host fallback
+    expect(body.execution_mode).toBe("docker");
   });
 
   test("container has resource limits enforced", async ({ page }) => {

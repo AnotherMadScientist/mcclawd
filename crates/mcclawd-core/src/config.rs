@@ -300,6 +300,7 @@ fn default_mcp_servers() -> Vec<McpServerConfig> {
 /// Configuration for Docker sandbox execution.
 ///
 /// All agent execution runs inside Docker containers — there is no host-mode fallback.
+/// Docker must be available for any task to execute.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
     /// Docker image to use as base for agent containers.
@@ -314,10 +315,6 @@ pub struct SandboxConfig {
     /// Docker network name for agent + MCP communication. Default: "mcclawd_default".
     #[serde(default = "default_sandbox_network")]
     pub network: String,
-    /// When true (default), tasks fail if Docker is unavailable instead of
-    /// falling back to host execution. Set to false only for development.
-    #[serde(default = "default_true")]
-    pub strict_sandbox: bool,
     /// Maximum number of PIDs allowed in agent containers. Default: 256.
     #[serde(default = "default_pids_limit")]
     pub pids_limit: Option<i64>,
@@ -330,7 +327,6 @@ impl Default for SandboxConfig {
             memory_limit: default_sandbox_memory(),
             cpu_limit: None,
             network: default_sandbox_network(),
-            strict_sandbox: false,
             pids_limit: default_pids_limit(),
         }
     }
