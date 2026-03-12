@@ -10,34 +10,49 @@ use super::state::AppState;
 #[derive(Debug, Serialize)]
 pub struct SecretEntry {
     pub name: String,
+    /// Optional human-readable descriptor (e.g. "prod billing account").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub descriptor: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct SecretValue {
     pub name: String,
     pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub descriptor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateSecretRequest {
     pub name: String,
     pub value: String,
+    /// Optional human-readable descriptor for this secret.
+    pub descriptor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateSecretRequest {
     pub value: String,
+    /// Optional descriptor update. If omitted, existing descriptor is preserved.
+    pub descriptor: Option<String>,
 }
 
-/// GET /api/secrets — list secret names from the encrypted vault
+/// GET /api/secrets — list secret names (with descriptors) from the encrypted vault
 pub async fn list_secrets(State(state): State<AppState>) -> Result<Json<Vec<SecretEntry>>, StatusCode> {
     let guard = state.secrets.read().await;
     let backend = guard.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let keys = backend.list().await.map_err(|e| {
+    let secrets = backend.list_with_metadata().await.map_err(|e| {
         tracing::error!("Failed to list secrets: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    let entries: Vec<SecretEntry> = keys.into_iter().map(|name| SecretEntry { name }).collect();
+    let entries: Vec<SecretEntry> = secrets
+        .into_iter()
+        .map(|s| SecretEntry {
+            name: s.key,
+            descriptor: s.descriptor,
+        })
+        .collect();
     Ok(Json(entries))
 }
 
@@ -48,10 +63,13 @@ pub async fn create_secret(
 ) -> Result<StatusCode, StatusCode> {
     let guard = state.secrets.read().await;
     let backend = guard.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    backend.set(&body.name, &body.value).await.map_err(|e| {
-        tracing::error!("Failed to create secret: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    backend
+        .set_with_descriptor(&body.name, &body.value, body.descriptor.as_deref())
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create secret: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     Ok(StatusCode::CREATED)
 }
 
@@ -67,7 +85,14 @@ pub async fn get_secret(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     match value {
-        Some(v) => Ok(Json(SecretValue { name, value: v })),
+        Some(v) => {
+            let descriptor = backend.get_descriptor(&name).await.unwrap_or(None);
+            Ok(Json(SecretValue {
+                name,
+                value: v,
+                descriptor,
+            }))
+        }
         None => Err(StatusCode::NOT_FOUND),
     }
 }
@@ -80,7 +105,16 @@ pub async fn update_secret(
 ) -> Result<StatusCode, StatusCode> {
     let guard = state.secrets.read().await;
     let backend = guard.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    backend.set(&name, &body.value).await.map_err(|e| {
+    // If descriptor is provided in the request, update it; otherwise preserve existing
+    match &body.descriptor {
+        Some(d) => {
+            backend
+                .set_with_descriptor(&name, &body.value, Some(d.as_str()))
+                .await
+        }
+        None => backend.set(&name, &body.value).await,
+    }
+    .map_err(|e| {
         tracing::error!("Failed to update secret: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;

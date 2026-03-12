@@ -60,6 +60,9 @@ enum SecretsAction {
         /// Value to set (if omitted, prompts interactively)
         #[arg(long)]
         value: Option<String>,
+        /// Human-readable descriptor (e.g. "prod billing account", "steve's key")
+        #[arg(short, long)]
+        descriptor: Option<String>,
     },
     /// Get a secret value (masked)
     Get { key: String },
@@ -145,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
             commands::run::execute(&prompt, &workspace, swarm).await?;
         }
         Commands::Secrets { action } => match action {
-            SecretsAction::Set { key, value } => commands::secrets::set(&key, value.as_deref()).await?,
+            SecretsAction::Set { key, value, descriptor } => commands::secrets::set(&key, value.as_deref(), descriptor.as_deref()).await?,
             SecretsAction::Get { key } => commands::secrets::get(&key).await?,
             SecretsAction::List => commands::secrets::list().await?,
             SecretsAction::Delete { key } => commands::secrets::delete(&key).await?,

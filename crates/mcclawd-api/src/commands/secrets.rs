@@ -48,7 +48,7 @@ fn confirm(prompt: &str, auto_yes: bool) -> bool {
     answer.is_empty() || answer == "y" || answer == "yes"
 }
 
-pub async fn set(key: &str, inline_value: Option<&str>) -> anyhow::Result<()> {
+pub async fn set(key: &str, inline_value: Option<&str>, descriptor: Option<&str>) -> anyhow::Result<()> {
     let value = if let Some(v) = inline_value {
         v.to_string()
     } else {
@@ -60,8 +60,11 @@ pub async fn set(key: &str, inline_value: Option<&str>) -> anyhow::Result<()> {
     };
 
     let backend = get_backend()?;
-    backend.set(key, &value).await?;
-    println!("Secret '{}' saved.", key);
+    backend.set_with_descriptor(key, &value, descriptor).await?;
+    match descriptor {
+        Some(d) => println!("Secret '{}' saved [{}].", key, d),
+        None => println!("Secret '{}' saved.", key),
+    }
     Ok(())
 }
 
@@ -74,7 +77,11 @@ pub async fn get(key: &str) -> anyhow::Result<()> {
             } else {
                 "****".to_string()
             };
-            println!("{}: {}", key, masked);
+            let desc = backend.get_descriptor(key).await?;
+            match desc {
+                Some(d) => println!("{}: {} [{}]", key, masked, d),
+                None => println!("{}: {}", key, masked),
+            }
         }
         None => println!("Secret '{}' not found.", key),
     }
@@ -83,13 +90,16 @@ pub async fn get(key: &str) -> anyhow::Result<()> {
 
 pub async fn list() -> anyhow::Result<()> {
     let backend = get_backend()?;
-    let keys = backend.list().await?;
-    if keys.is_empty() {
+    let secrets = backend.list_with_metadata().await?;
+    if secrets.is_empty() {
         println!("No secrets stored.");
     } else {
         println!("Stored secrets:");
-        for key in keys {
-            println!("  {}", key);
+        for s in secrets {
+            match s.descriptor {
+                Some(d) => println!("  {}  [{}]", s.key, d),
+                None => println!("  {}", s.key),
+            }
         }
     }
     Ok(())
@@ -208,14 +218,17 @@ pub async fn init(env_file: Option<&str>, auto_yes: bool) -> anyhow::Result<()> 
         }
     }
 
-    // List all secrets
-    let keys = backend.list().await?;
-    if keys.is_empty() {
+    // List all secrets with descriptors
+    let secrets = backend.list_with_metadata().await?;
+    if secrets.is_empty() {
         println!("\nVault is empty. Set secrets with: mc secrets set <KEY>");
     } else {
         println!("\nSecrets in vault:");
-        for key in &keys {
-            println!("  {}", key);
+        for s in &secrets {
+            match &s.descriptor {
+                Some(d) => println!("  {}  [{}]", s.key, d),
+                None => println!("  {}", s.key),
+            }
         }
     }
 
@@ -245,11 +258,14 @@ pub async fn reset(auto_yes: bool) -> anyhow::Result<()> {
     if has_secrets {
         // Show how many secrets will be lost
         if let Ok(backend) = get_backend() {
-            if let Ok(keys) = backend.list().await {
-                if !keys.is_empty() {
-                    println!("  {} ({} secret{})", secrets_path.display(), keys.len(), if keys.len() == 1 { "" } else { "s" });
-                    for key in &keys {
-                        println!("    - {key}");
+            if let Ok(secrets) = backend.list_with_metadata().await {
+                if !secrets.is_empty() {
+                    println!("  {} ({} secret{})", secrets_path.display(), secrets.len(), if secrets.len() == 1 { "" } else { "s" });
+                    for s in &secrets {
+                        match &s.descriptor {
+                            Some(d) => println!("    - {} [{}]", s.key, d),
+                            None => println!("    - {}", s.key),
+                        }
                     }
                 } else {
                     println!("  {} (empty)", secrets_path.display());

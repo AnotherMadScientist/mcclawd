@@ -3,21 +3,33 @@ use aes_gcm_siv::{
     Aes256GcmSiv, Nonce,
 };
 use argon2::Argon2;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 use zeroize::Zeroizing;
 
-use super::SecretBackend;
+use super::{SecretBackend, SecretMeta};
 use crate::{McclawdError, Result};
+
+/// A stored secret: value + optional human-readable descriptor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SecretRecord {
+    value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    descriptor: Option<String>,
+}
 
 /// Encrypted file-based secret storage.
 /// Secrets are stored as JSON encrypted with AES-256-GCM-SIV.
 /// The encryption key is derived from a passphrase via argon2.
+///
+/// Storage format v2: `HashMap<String, SecretRecord>` (value + descriptor).
+/// Automatically migrates from v1 format (`HashMap<String, String>`).
 pub struct EncryptedFileBackend {
     path: PathBuf,
     key: Zeroizing<[u8; 32]>,
-    cache: RwLock<HashMap<String, String>>,
+    cache: RwLock<HashMap<String, SecretRecord>>,
 }
 
 impl EncryptedFileBackend {
@@ -58,7 +70,28 @@ impl EncryptedFileBackend {
         let plaintext = cipher
             .decrypt(nonce, encrypted)
             .map_err(|e| McclawdError::Secret(format!("Decryption failed: {e}")))?;
-        let map: HashMap<String, String> = serde_json::from_slice(&plaintext)?;
+
+        // Try v2 format first (HashMap<String, SecretRecord>),
+        // fall back to v1 (HashMap<String, String>) and migrate.
+        let map: HashMap<String, SecretRecord> =
+            match serde_json::from_slice::<HashMap<String, SecretRecord>>(&plaintext) {
+                Ok(v2) => v2,
+                Err(_) => {
+                    // v1 migration: plain string values → SecretRecord with no descriptor
+                    let v1: HashMap<String, String> = serde_json::from_slice(&plaintext)?;
+                    v1.into_iter()
+                        .map(|(k, v)| {
+                            (
+                                k,
+                                SecretRecord {
+                                    value: v,
+                                    descriptor: None,
+                                },
+                            )
+                        })
+                        .collect()
+                }
+            };
         *self.cache.get_mut() = map;
         Ok(())
     }
@@ -99,13 +132,31 @@ impl EncryptedFileBackend {
 impl SecretBackend for EncryptedFileBackend {
     async fn get(&self, key: &str) -> Result<Option<String>> {
         let cache = self.cache.read().await;
-        Ok(cache.get(key).cloned())
+        match cache.get(key) {
+            Some(record) => {
+                tracing::debug!(
+                    key = %key,
+                    descriptor = record.descriptor.as_deref().unwrap_or(""),
+                    "secret.accessed"
+                );
+                Ok(Some(record.value.clone()))
+            }
+            None => Ok(None),
+        }
     }
 
     async fn set(&self, key: &str, value: &str) -> Result<()> {
         {
             let mut cache = self.cache.write().await;
-            cache.insert(key.to_string(), value.to_string());
+            // Preserve existing descriptor when updating just the value
+            let existing_descriptor = cache.get(key).and_then(|r| r.descriptor.clone());
+            cache.insert(
+                key.to_string(),
+                SecretRecord {
+                    value: value.to_string(),
+                    descriptor: existing_descriptor,
+                },
+            );
         }
         self.save_to_disk().await
     }
@@ -121,6 +172,41 @@ impl SecretBackend for EncryptedFileBackend {
     async fn list(&self) -> Result<Vec<String>> {
         let cache = self.cache.read().await;
         Ok(cache.keys().cloned().collect())
+    }
+
+    async fn set_with_descriptor(
+        &self,
+        key: &str,
+        value: &str,
+        descriptor: Option<&str>,
+    ) -> Result<()> {
+        {
+            let mut cache = self.cache.write().await;
+            cache.insert(
+                key.to_string(),
+                SecretRecord {
+                    value: value.to_string(),
+                    descriptor: descriptor.map(|d| d.to_string()),
+                },
+            );
+        }
+        self.save_to_disk().await
+    }
+
+    async fn get_descriptor(&self, key: &str) -> Result<Option<String>> {
+        let cache = self.cache.read().await;
+        Ok(cache.get(key).and_then(|r| r.descriptor.clone()))
+    }
+
+    async fn list_with_metadata(&self) -> Result<Vec<SecretMeta>> {
+        let cache = self.cache.read().await;
+        Ok(cache
+            .iter()
+            .map(|(k, r)| SecretMeta {
+                key: k.clone(),
+                descriptor: r.descriptor.clone(),
+            })
+            .collect())
     }
 }
 

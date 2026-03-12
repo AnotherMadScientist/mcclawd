@@ -94,11 +94,16 @@ impl AppState {
         let data_dir = dirs::home_dir().map(|h| h.join(".mcclawd"));
         let provider_pool = ProviderPool::with_data_dir(pool_config, data_dir);
 
+        // Shared secrets reference — lifecycle managers get a clone so they can
+        // resolve ${SECRET_NAME} tokens once the vault is unlocked.
+        let secrets: Arc<RwLock<Option<Arc<dyn SecretBackend>>>> =
+            Arc::new(RwLock::new(None));
+
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
             tasks: Arc::new(RwLock::new(TaskManager::new())),
             jwt_secret: Self::load_or_create_jwt_secret()?,
-            secrets: Arc::new(RwLock::new(None)),
+            secrets: secrets.clone(),
             task_streams: Arc::new(RwLock::new(HashMap::new())),
             task_events: Arc::new(RwLock::new(HashMap::new())),
             supervisor,
@@ -113,8 +118,8 @@ impl AppState {
             scan_cache: Arc::new(DashMap::new()),
             scheduler: TaskScheduler::new(),
             swarm_registry: SwarmRegistry::new(),
-            mcp_lifecycle: McpLifecycleManager::new().ok(),
-            mcp_porter: McpLifecycleManager::new()
+            mcp_lifecycle: McpLifecycleManager::with_shared_secrets(secrets.clone()).ok(),
+            mcp_porter: McpLifecycleManager::with_shared_secrets(secrets)
                 .ok()
                 .and_then(|lm| McpPorter::new(lm).ok())
                 .map(Arc::new),

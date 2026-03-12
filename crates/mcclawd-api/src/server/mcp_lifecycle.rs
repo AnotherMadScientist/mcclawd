@@ -10,7 +10,10 @@ use bollard::network::ConnectNetworkOptions;
 use bollard::Docker;
 use futures::StreamExt;
 use mcclawd_core::config::McpServerConfig;
+use mcclawd_core::secrets::SecretBackend;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Status of an MCP server container.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,12 +29,26 @@ pub struct McpServerStatus {
 #[derive(Clone)]
 pub struct McpLifecycleManager {
     docker: Docker,
+    /// Shared secret backend for resolving `${SECRET_NAME}` tokens in MCP server env vars.
+    /// Points to the same RwLock as AppState.secrets — automatically available once vault is unlocked.
+    secrets: Arc<RwLock<Option<Arc<dyn SecretBackend>>>>,
 }
 
 impl McpLifecycleManager {
     pub fn new() -> anyhow::Result<Self> {
         let docker = Docker::connect_with_local_defaults()?;
-        Ok(Self { docker })
+        Ok(Self {
+            docker,
+            secrets: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    /// Create with a shared secrets reference (same Arc as AppState.secrets).
+    pub fn with_shared_secrets(
+        secrets: Arc<RwLock<Option<Arc<dyn SecretBackend>>>>,
+    ) -> anyhow::Result<Self> {
+        let docker = Docker::connect_with_local_defaults()?;
+        Ok(Self { docker, secrets })
     }
 
     /// Container naming convention for MCP servers.
@@ -81,7 +98,20 @@ impl McpLifecycleManager {
             ..Default::default()
         };
 
-        let env: Vec<String> = config.env.clone();
+        // Resolve ${SECRET_NAME} tokens in env vars if a secret backend is available
+        let env: Vec<String> = {
+            let guard = self.secrets.read().await;
+            if let Some(ref backend) = *guard {
+                mcclawd_core::secrets::resolve_secret_tokens(&config.env, backend.as_ref())
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(server = %config.name, error = %e, "Failed to resolve secret tokens in env — using raw values");
+                        config.env.clone()
+                    })
+            } else {
+                config.env.clone()
+            }
+        };
 
         let container_config = Config {
             image: Some(config.image.clone()),
