@@ -1,9 +1,30 @@
 # Implementation Plan: Unified Architecture
 
 > Phased plan to implement the unified architecture from `unified-architecture.md`.
-> Each task is sized, ordered by dependency, and tagged with the crate it touches.
+> Incorporates McClawd v5, IronClaw, OpenBrowserClaw, Pi/pi_agent_rust, and OpenClaw.
+> All code runs in containers. Firecracker-first. DLP on everything.
 
-## Phase 1A: Core Wiring (Immediate — Make What Exists Work Together)
+## Phase 0: Container Runtime Abstraction (Foundation)
+
+### 0. ContainerRuntime trait + Docker backend
+**Crate**: `mcclawd-runner` (new: runtime.rs, docker.rs)
+**What**: Extract current Docker logic behind a `ContainerRuntime` trait. This is the
+foundation that Firecracker and WASM backends plug into later.
+**Why**: McPorter currently hardcodes Docker. The trait abstraction lets us swap
+Firecracker in without touching McPorter, AgentEngine, or SwarmCoordinator.
+**Depends on**: Nothing
+**Size**: M
+
+```rust
+pub trait ContainerRuntime: Send + Sync {
+    async fn build(&self, base: &str, steps: &[String], hash: &str) -> Result<String>;
+    async fn start(&self, image_id: &str, config: &SandboxConfig) -> Result<ContainerHandle>;
+    async fn stop(&self, handle: &ContainerHandle) -> Result<()>;
+    async fn health(&self, handle: &ContainerHandle) -> Result<bool>;
+}
+```
+
+## Phase 1A: Core Wiring (Make What Exists Work Together)
 
 ### 1. Wire SwarmPlanner to LLM via Rig agent
 **Crate**: `mcclawd-swarm` (planner.rs)
@@ -11,26 +32,7 @@
 the three planner tools (create_subtask, add_dependency, finalize_plan).
 **Why**: The tools exist, the DAG exists, the coordinator exists — they just aren't connected.
 **Depends on**: Nothing
-**Size**: S (the tools are already implemented, just need to build the agent)
-
-```rust
-// In SwarmPlanner::decompose():
-let state: PlannerState = Arc::new(Mutex::new(TaskDag::new()));
-let client = anthropic::Client::new(&self.api_key)?;
-let agent = client
-    .agent(self.model.as_deref().unwrap_or("claude-haiku-4-5-20251001"))
-    .preamble(&planner_system_prompt(roles))
-    .tool(CreateSubtaskTool::new(state.clone()))
-    .tool(AddDependencyTool::new(state.clone()))
-    .tool(FinalizePlanTool::new(state.clone()))
-    .default_max_turns(10)
-    .build();
-
-agent.prompt(prompt).await?;
-let dag = Arc::try_unwrap(state).unwrap().into_inner();
-dag.validate()?;
-Ok(dag)
-```
+**Size**: S
 
 ### 2. Wire WorkerAgent to real Rig agents
 **Crate**: `mcclawd-swarm` (worker.rs) + `mcclawd-agent` (engine.rs)
@@ -43,125 +45,157 @@ per subtask, using the role's skills from AGENTS.md.
 ### 3. GuardedSharedMemory — DLP on shared memory writes
 **Crate**: `mcclawd-swarm` (shared_memory.rs)
 **What**: Wrap `SharedMemory` with `HookPipeline` so every `set()` is DLP-scanned.
-**Why**: Swarm workers pass data through SharedMemory. Without DLP here, a tool could
-return PII that gets stored unscanned and read by another worker into its LLM context.
-**Depends on**: Nothing (can be done in parallel with #1/#2)
+**Why**: Swarm workers pass data through SharedMemory. Without DLP here, PII flows
+between workers unscanned.
+**Depends on**: Nothing
 **Size**: S
 
 ### 4. Wire prompt sanitizer into ContextBuilder
 **Crate**: `mcclawd-agent` (context.rs)
-**What**: Call `sanitizer.rs` on the assembled system prompt before it's passed to the agent.
-The sanitizer already exists — it just isn't called.
-**Why**: Without this, prompt injection markers in workspace files could affect agent behavior.
+**What**: Call `sanitizer.rs` on the assembled system prompt before passing to agent.
 **Depends on**: Nothing
 **Size**: XS
 
 ### 5. Channel-level DLP on outbound messages
 **Crate**: `mcclawd-channels` (traits.rs or pipeline.rs)
-**What**: Add a DLP scan in the outbound path before messages reach the user.
-**Why**: Defense-in-depth. Even if all tool-level DLP works, the LLM could hallucinate
-realistic-looking PII in its response.
+**What**: DLP scan in outbound path before messages reach users.
 **Depends on**: Nothing
 **Size**: S
 
-## Phase 1B: OpenClaw Compatibility Gaps
+## Phase 1B: Security Hardening + OpenClaw Gaps
 
-### 6. Gap 1 — Add IDENTITY.md, TOOLS.md, HEARTBEAT.md
-**Crate**: `mcclawd-agent` (workspace.rs, context.rs)
-**What**: Add parsers for the 3 missing workspace files. Wire into ContextBuilder priority order.
+### 6. Fix shell injection in McPorter
+**Crate**: `mcclawd-api` (server/mcp_porter.rs)
+**What**: Sanitize install_steps against shell metacharacters. Critical security fix.
 **Depends on**: Nothing
+**Size**: XS
+
+### 7. Remove host execution fallback
+**Crate**: `mcclawd-api` (server/mcp_porter.rs)
+**What**: Error when Docker/Firecracker unavailable instead of running on host.
+**Depends on**: Nothing
+**Size**: XS
+
+### 8. iron-verify skill verification (from IronClaw)
+**Crate**: `mcclawd-core` (new: verify.rs)
+**What**: Static analysis on SKILL.md install steps before execution:
+- Capability audit (network, shell, root access)
+- Data flow analysis (curl to unknown domains, non-PyPI pip sources)
+- Known vulnerability patterns (injection, traversal)
+- Capability declaration check against `## Capabilities` section
+**Why**: IronClaw's key insight — verify before trust, not trust-then-sandbox.
+**Depends on**: Nothing
+**Size**: M
+
+### 9. Resource limits on containers
+**Crate**: `mcclawd-runner`
+**What**: Enforce memory_limit, cpu_limit, pids_limit on all containers.
+**Depends on**: #0 (ContainerRuntime trait)
 **Size**: S
 
-### 7. Gap 5 — Complete ClawHub versioning
-**Crate**: `mcclawd-core` (clawhub/installer.rs), `mcclawd-api` (commands/)
-**What**: Add `--version` flag to `mc skills install`, wire `mc skills update --check`.
-**Depends on**: Nothing
-**Size**: S
-
-### 8. Gap 6 — Progressive skill disclosure
+### 10. Progressive skill disclosure (from Pi)
 **Crate**: `mcclawd-agent` (context.rs)
-**What**: Replace full skill context loading with summary-first approach.
-Load only name + description (~97 chars per skill) into system prompt.
-Inject full context dynamically when user message matches a skill.
+**What**: Load only name + description (~97 chars per skill) into system prompt.
+Inject full SKILL.md context dynamically when user message matches.
+**Why**: Cuts initial prompt from ~15K to ~3K tokens. Pi's best architectural insight.
 **Depends on**: Nothing
-**Size**: M (need SkillRouter matching logic)
+**Size**: M
 
-## Phase 1C: Security Hardening (from audit)
-
-### 9. Fix shell injection in McPorter Dockerfile generation
-**Crate**: `mcclawd-api` (server/mcp_porter.rs)
-**What**: Sanitize install_steps before interpolating into Dockerfile RUN commands.
-Reject steps containing shell metacharacters (`;`, `&&`, `|`, `` ` ``, `$()`).
-**Depends on**: Nothing
-**Size**: XS (critical security fix)
-
-### 10. Remove host execution fallback
-**Crate**: `mcclawd-api` (server/mcp_porter.rs)
-**What**: When Docker is unavailable, return an error instead of falling back to host execution.
-**Depends on**: Nothing
-**Size**: XS (critical security fix)
-
-### 11. Add resource limits to SandboxConfig
-**Crate**: `mcclawd-runner` or `mcclawd-api`
-**What**: Enforce memory_limit, cpu_limit, pids_limit on Docker containers.
+### 11. Gap 1 — Add IDENTITY.md, TOOLS.md, HEARTBEAT.md
+**Crate**: `mcclawd-agent` (workspace.rs, context.rs)
+**What**: Parsers for 3 missing workspace files. Wire into ContextBuilder.
 **Depends on**: Nothing
 **Size**: S
 
-## Phase 2: Deeper Integration
+### 12. Gap 5 — Complete ClawHub versioning
+**Crate**: `mcclawd-core` (clawhub/installer.rs), `mcclawd-api` (commands/)
+**What**: `--version` flag on install, `mc skills update --check`.
+**Depends on**: Nothing
+**Size**: S
 
-### 12. LlmSynthesis merger — wire to real LLM
+## Phase 2: Firecracker + WASM + Deeper Integration
+
+### 13. Firecracker ContainerRuntime backend
+**Crate**: `mcclawd-runner` (new: firecracker.rs)
+**What**: Implement `ContainerRuntime` for Firecracker microVMs:
+- Build ext4 rootfs from install steps (instead of Dockerfile)
+- Boot microVM with minimal kernel via Firecracker API
+- Connect to AgentGateway via TAP network or virtio-vsock
+- Jailer integration for seccomp + cgroup enforcement
+**Why**: Hardware-level isolation. No shared kernel. No container escape. 168ms boot.
+**Depends on**: #0 (ContainerRuntime trait)
+**Size**: L
+
+### 14. Remote execution support
+**Crate**: `mcclawd-api` (new: remote.rs), `mcclawd-runner`
+**What**: `mc-remote` daemon that accepts MCP requests from local `mc` binary.
+Route Tier 2 tool calls to remote AgentGateway over WireGuard/SSH tunnel.
+Config: `remote_gateway = "wg://10.0.0.2:3000"`.
+**Why**: Run heavy skills on OVH KS-1 (32GB RAM, KVM), lightweight on laptop.
+**Depends on**: #13 (Firecracker on remote), #0 (ContainerRuntime)
+**Size**: L
+
+### 15. WASM sandbox tier (from IronClaw)
+**Crate**: `mcclawd-runner` (new: wasm.rs), `mcclawd-tools` (new: wasm_tool.rs)
+**What**: Wasmtime runtime implementing `ContainerRuntime` for .wasm skills.
+IronClaw-style capability model: zero access by default, explicit opt-in for
+http/fs/exec/secrets. Credential injection at execution boundary.
+Leak detection on outbound HTTP requests.
+**Depends on**: #0 (ContainerRuntime trait)
+**Size**: L
+
+### 16. LlmSynthesis merger
 **Crate**: `mcclawd-swarm` (merger.rs)
-**What**: Replace the concatenation placeholder in `MergeStrategy::LlmSynthesis` with
-an actual Rig agent call that synthesizes subtask outputs into a coherent final response.
-**Depends on**: #1, #2 (need working swarm first)
+**What**: Wire `MergeStrategy::LlmSynthesis` to actual Rig agent call.
+**Depends on**: #1, #2
 **Size**: S
 
-### 13. JSONL session persistence
+### 17. JSONL session persistence (from Pi)
 **Crate**: `mcclawd-tasks` (new: session.rs)
-**What**: Persist task conversations as JSONL files with tree branching support.
-Replace in-memory TaskManager with crash-recoverable persistence.
-**Depends on**: Nothing (can start anytime)
-**Size**: M
-
-### 14. QuickJS extension runtime (Pi compatibility)
-**Crate**: `mcclawd-tools` (new: quickjs_runtime.rs)
-**What**: Embed QuickJS to run OpenClaw/Pi TypeScript extensions in-process.
-Wrap as Rig Tool behind GuardedTool for DLP coverage.
-**Depends on**: Nothing technically, but lower priority
-**Size**: L
-
-### 15. User-defined hooks (Gap 2)
-**Crate**: `mcclawd-core` (hooks/user_hook.rs)
-**What**: Wire UserHookConfig triggers (before_tool_call, after_tool_call, on_error)
-to shell commands or HTTP calls.
+**What**: Persist conversations as JSONL with tree branching and compaction.
 **Depends on**: Nothing
 **Size**: M
 
-### 16. Swarm UI — real-time wave progress
-**Crate**: `mcclawd-api` (server/), `ui/`
-**What**: SSE endpoint streaming swarm wave progress. Frontend renders DAG visualization
-with per-worker status (pending/running/completed/failed).
-**Depends on**: #1, #2 (need working swarm)
-**Size**: L
-
-## Phase 3: Execution Tiers & Scale
-
-### 17. WASM execution tier
-**Crate**: `mcclawd-tools` (new: wasm_runtime.rs)
-**What**: Wasmtime integration for skills that provide .wasm artifacts.
-**Depends on**: Architecture validation from Phase 1-2
-**Size**: L
-
-### 18. PostgreSQL scratchboard
-**Crate**: `mcclawd-swarm` (new: pg_memory.rs), `mcclawd-core` (persistence/)
-**What**: SharedMemoryBackend::Postgres for cross-process and long-running swarms.
-**Depends on**: #3 (GuardedSharedMemory trait abstraction)
+### 18. User-defined hooks (OpenClaw Gap 2)
+**Crate**: `mcclawd-core` (hooks/user_hook.rs)
+**What**: Wire triggers (before_tool_call, after_tool_call, on_error) to
+shell commands or HTTP calls per UserHookConfig.
+**Depends on**: Nothing
 **Size**: M
 
-### 19. Cross-tier shared memory (WebSocket)
+### 19. Swarm UI — real-time wave progress
+**Crate**: `mcclawd-api` (server/), `ui/`
+**What**: SSE endpoint streaming swarm progress. DAG visualization in frontend.
+**Depends on**: #1, #2
+**Size**: L
+
+## Phase 3: Browser Tier + Scale
+
+### 20. Browser execution tier (from OpenBrowserClaw)
+**Crate**: New `mcclawd-browser` crate or `ui/` integration
+**What**: Web Worker agent loop, OPFS file storage, IndexedDB state,
+v86-emulated bash, DLP patterns compiled to JS regex,
+AES-256-GCM key management. Can connect to remote Tier 2 via WebSocket.
+**Depends on**: Phase 2 complete
+**Size**: XL
+
+### 21. PostgreSQL scratchboard
+**Crate**: `mcclawd-swarm` (new: pg_memory.rs)
+**What**: `SharedMemoryBackend::Postgres` for cross-process swarms.
+**Depends on**: #3 (GuardedSharedMemory abstraction)
+**Size**: M
+
+### 22. Cross-tier shared memory (WebSocket)
 **Crate**: `mcclawd-api` (server/), `ui/`
 **What**: WebSocket pub/sub for browser ↔ server scratchboard sync.
-**Depends on**: #18 (PostgreSQL backend)
+**Depends on**: #20, #21
+**Size**: L
+
+### 23. QuickJS/WASM extension runtime for Pi TS extensions
+**Crate**: `mcclawd-tools` (new: quickjs_wasm.rs)
+**What**: Run 224 verified Pi/OpenClaw TypeScript extensions via QuickJS
+compiled to WASM, inside the Tier 1 WASM sandbox.
+**Depends on**: #15 (WASM tier)
 **Size**: L
 
 ---
@@ -169,55 +203,99 @@ with per-worker status (pending/running/completed/failed).
 ## Dependency Graph
 
 ```
-Phase 1A (parallel start):
-  #1 SwarmPlanner wiring ──► #2 Worker wiring ──► #12 LlmSynthesis merger
-  #3 GuardedSharedMemory    (independent)          ──► #18 PG scratchboard
-  #4 Prompt sanitizer       (independent)
-  #5 Channel DLP            (independent)
+Phase 0:
+  #0 ContainerRuntime trait ──┬──► #9  Resource limits
+                              ├──► #13 Firecracker backend
+                              ├──► #14 Remote execution
+                              └──► #15 WASM sandbox
+
+Phase 1A (parallel):
+  #1 SwarmPlanner ──► #2 Workers ──► #16 LlmSynthesis, #19 Swarm UI
+  #3 GuardedSharedMemory ──► #21 PG scratchboard
+  #4 Prompt sanitizer
+  #5 Channel DLP
 
 Phase 1B (parallel with 1A):
-  #6 Workspace files        (independent)
-  #7 ClawHub versioning     (independent)
-  #8 Progressive disclosure (independent)
+  #6  Shell injection fix
+  #7  Remove host fallback
+  #8  iron-verify
+  #9  Resource limits (after #0)
+  #10 Progressive disclosure
+  #11 Workspace files
+  #12 ClawHub versioning
 
-Phase 1C (parallel with 1A/1B):
-  #9  Shell injection fix   (independent, critical)
-  #10 Remove host fallback  (independent, critical)
-  #11 Resource limits       (independent)
-
-Phase 2 (after 1A):
-  #12 LlmSynthesis         (after #1, #2)
-  #13 JSONL sessions        (independent)
-  #14 QuickJS runtime       (independent)
-  #15 User hooks            (independent)
-  #16 Swarm UI              (after #1, #2)
+Phase 2 (after 1A/1B):
+  #13 Firecracker ──► #14 Remote execution
+  #15 WASM sandbox
+  #16 LlmSynthesis
+  #17 JSONL sessions
+  #18 User hooks
+  #19 Swarm UI
 
 Phase 3 (after Phase 2):
-  #17 WASM tier             (independent)
-  #18 PG scratchboard       (after #3)
-  #19 Cross-tier sync       (after #18)
+  #20 Browser tier ──► #22 Cross-tier sync
+  #21 PG scratchboard
+  #23 QuickJS/WASM extensions (after #15)
 ```
 
-## Recommended Execution Order (What to Build First)
+## Recommended Sprint Order
 
-**Sprint 1** (highest impact, many can be parallel):
-- #9, #10 (security — XS, do immediately)
-- #1 (SwarmPlanner wiring — S, unblocks #2 and #12)
-- #3 (GuardedSharedMemory — S, unblocks swarm DLP)
-- #4 (Prompt sanitizer wiring — XS)
-- #8 (Progressive disclosure — M, biggest context quality improvement)
+**Sprint 1** (foundation + critical security):
+- #0 ContainerRuntime trait (M — unlocks everything)
+- #6, #7 (security fixes — XS each)
+- #1 SwarmPlanner wiring (S — unblocks swarm)
+- #4 Prompt sanitizer (XS)
 
-**Sprint 2**:
-- #2 (Worker wiring — M, makes swarm actually work)
-- #5 (Channel DLP — S)
-- #6 (Workspace files — S)
-- #11 (Resource limits — S)
+**Sprint 2** (swarm + DLP + Pi patterns):
+- #2 Worker wiring (M — makes swarm work)
+- #3 GuardedSharedMemory (S)
+- #5 Channel DLP (S)
+- #10 Progressive disclosure (M — biggest context quality win)
+- #8 iron-verify (M — security gate on skill install)
 
-**Sprint 3**:
-- #12 (LlmSynthesis — S)
-- #7 (ClawHub versioning — S)
-- #13 (JSONL sessions — M)
+**Sprint 3** (OpenClaw compat + persistence):
+- #9 Resource limits (S)
+- #11 Workspace files (S)
+- #12 ClawHub versioning (S)
+- #16 LlmSynthesis merger (S)
+- #17 JSONL sessions (M)
 
-**Sprint 4+**:
-- #14, #15, #16 (QuickJS, user hooks, swarm UI)
-- #17, #18, #19 (WASM, PG scratchboard, cross-tier)
+**Sprint 4** (Firecracker + WASM — the big leap):
+- #13 Firecracker backend (L)
+- #15 WASM sandbox (L)
+- #18 User hooks (M)
+
+**Sprint 5** (remote + UI):
+- #14 Remote execution (L)
+- #19 Swarm UI (L)
+
+**Sprint 6+** (browser + scale):
+- #20 Browser tier (XL)
+- #21 PG scratchboard (M)
+- #22 Cross-tier sync (L)
+- #23 QuickJS/WASM extensions (L)
+
+---
+
+## What We Cherry-Pick vs Build
+
+| Component | Source | Cherry-pick or Build? |
+|---|---|---|
+| DLP patterns (109) | McClawd | Already built |
+| HookPipeline | McClawd | Already built |
+| Swarm DAG + waves | McClawd | Already built, wire to LLM |
+| MCP via AgentGateway | McClawd | Already built |
+| SKILL.md parser | McClawd | Already built |
+| ClawHub client | McClawd | Already built |
+| Capability permissions | IronClaw | Build (inspired by, not forked) |
+| iron-verify static analysis | IronClaw | Build (pattern, not library) |
+| WASM sandbox model | IronClaw | Build with Wasmtime |
+| Credential injection | IronClaw | Build (McClawd SecretStore already close) |
+| Firecracker runtime | IronClaw concept + AWS Firecracker | Build on raw Firecracker API |
+| Progressive disclosure | Pi | Build (algorithm, not library) |
+| JSONL sessions | Pi | Build (file format, not library) |
+| QuickJS extensions | pi_agent_rust | Evaluate as dependency for Phase 3 |
+| Browser agent loop | OpenBrowserClaw | Build (Web Worker pattern) |
+| OPFS + IndexedDB | OpenBrowserClaw | Build (browser APIs) |
+| AES-256-GCM browser keys | OpenBrowserClaw | Build (Web Crypto API) |
+| v86 bash emulation | OpenBrowserClaw | Dependency (v86 is a library) |

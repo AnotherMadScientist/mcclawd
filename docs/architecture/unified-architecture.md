@@ -1,15 +1,31 @@
 # McClawd Unified Architecture
 
-> Combines McClawd v5, OpenClaw ecosystem compatibility, browser-hybrid execution tiers, full DLP, and swarm orchestration into a single extensible platform.
+> Combines the best of McClawd v5, IronClaw, OpenBrowserClaw, Pi/pi_agent_rust, and the
+> OpenClaw ecosystem into a single extensible platform. All code runs in containers.
+> Skills auto-install from ClawHub. DLP on everything. Firecracker or Docker isolation.
+
+## Heritage: What We Take From Each Project
+
+| Source | What we adopt | What we skip |
+|---|---|---|
+| **McClawd v5** | Rig agent loop, MCP-first tools via AgentGateway, HookPipeline DLP (109 patterns), ClawHub client/installer, SKILL.md parser, workspace files, channel architecture (5 transports), swarm DAG + wave scheduler | Manual ReAct loop (Rig handles it) |
+| **[IronClaw](https://github.com/nearai/ironclaw)** | WASM sandbox for lightweight tools, capability-based permissions, `iron-verify` static analysis on skill install, credential injection at execution boundary, leak detection on outbound HTTP, **Firecracker microVM as Docker alternative** | NEAR AI default provider (we use Rig multi-provider), PostgreSQL-only storage |
+| **[OpenBrowserClaw](https://github.com/sachaa/openbrowserclaw)** | Browser-native execution model (Web Worker agent, OPFS files, IndexedDB state), AES-256-GCM key management, v86-emulated Linux for bash-in-browser, zero-infrastructure offline mode | `eval()` in Worker (security risk), no DLP |
+| **[Pi/pi_agent_rust](https://github.com/Dicklesworthstone/pi_agent_rust)** | Progressive skill disclosure (97-char summaries, inject full context on demand), JSONL session persistence with tree branching, embedded QuickJS for OpenClaw TS extensions (224 verified) | Pi's custom agent loop (Rig is better), no MCP support, Pi's TUI |
+| **[OpenClaw](https://github.com/openclaw/openclaw)** | SKILL.md format (5,700 skills on ClawHub), workspace files (SOUL/AGENTS/USER/IDENTITY/TOOLS/HEARTBEAT.md), JSON5 config, mcporter concept, channel integrations | TypeScript runtime (we're Rust), permissive security model |
 
 ## Design Principles
 
-1. **Zero-code skill consumption** — Any ClawHub SKILL.md installs and runs without recompilation
-2. **McPorter as the universal skill runtime** — Skills declare what they need; McPorter builds the container
-3. **DLP at every boundary** — HookPipeline wraps every tool call, shared memory write, and outbound message
-4. **OpenClaw-first** — Workspace files, SKILL.md format, JSON5 config, ClawHub registry are the native interface
-5. **Swarm-native** — Single agent and swarm are the same code path (swarm of 1 = single agent)
-6. **Execution tiers** — Same skill can run in-process, WASM, or Docker depending on what it needs
+1. **All code runs in containers** — No host execution. Skills, tools, and agent code run in Firecracker microVMs or Docker containers. The `mc` binary is the only process on the host.
+2. **Zero-code skill consumption** — Any ClawHub SKILL.md installs and runs without recompilation
+3. **McPorter as the universal skill runtime** — Skills declare what they need; McPorter builds the container image and manages lifecycle
+4. **DLP at every boundary** — HookPipeline wraps every tool call, shared memory write, outbound message, and cross-container communication
+5. **OpenClaw-first** — Workspace files, SKILL.md format, JSON5 config, ClawHub registry are the native interface
+6. **Swarm-native** — Single agent and swarm are the same code path (swarm of 1 = single agent)
+7. **Firecracker-first, Docker-fallback** — microVMs for production isolation (168ms boot), Docker for development convenience
+8. **Skill verification before execution** — `iron-verify` static analysis on install, capability-based permissions at runtime
+9. **Progressive disclosure** — Skill summaries in prompt, full context injected on demand (from Pi)
+10. **Runs anywhere** — Local machine, OVH KS-1, any bare-metal with KVM, or cloud VMs with nested virt
 
 ---
 
@@ -200,94 +216,252 @@ The **SKILL.md is the API contract**. Everything else is derived from it.
 
 ---
 
-## 3. Execution Tiers
+## 3. Execution Tiers & Container Strategy
 
-Skills run at different levels depending on their runtime requirements:
+**Core rule: ALL code runs in containers.** The `mc` binary is the only host process.
+Skills, tools, agent workers — everything else runs isolated.
+
+### 3.1 Container Runtime: Firecracker-First, Docker-Fallback
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Tier 0: In-Process (Rust)                                  │
-│  ─────────────────────────                                  │
-│  Tools: memory_store, memory_recall, navigate_to,           │
-│         create_task                                         │
-│  Runtime: Native Rust, compiled into mc binary              │
-│  Latency: Nanoseconds                                       │
-│  DLP: GuardedTool wraps each with HookPipeline              │
-│  Sandbox: None (trusted code, part of mc binary)            │
-│                                                             │
-│  When to use: Builtins only. Not for user skills.           │
-└─────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Tier 1: MCP over Docker (Primary skill runtime)            │
-│  ───────────────────────────────────────────────            │
-│  Tools: Any ClawHub skill (langextract, web-search,         │
-│         filesystem, git, code-analysis, etc.)               │
-│  Runtime: Docker container with supergateway (stdio→HTTP)   │
-│  Latency: Milliseconds (HTTP to AgentGateway)               │
-│  DLP: GuardedTool scans args before call, results after     │
-│  Sandbox: Full Docker isolation (cgroups, namespaces,       │
-│           resource limits, read-only rootfs)                │
-│                                                             │
-│  How it works:                                              │
-│  mc ──rmcp──► AgentGateway ──HTTP──► supergateway ──stdio──►│
-│                                       MCP server process    │
-│                                                             │
-│  When to use: Default for all external skills.              │
-└─────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Tier 2: WASM MCP Servlet (Future — lightweight skills)     │
-│  ──────────────────────────────────────────────────         │
-│  Tools: Skills that can compile to WASM (Rust, Go, TS)      │
-│  Runtime: Wasmtime/wasm32 in-process or mcp.run hosted      │
-│  Latency: Microseconds (in-process), milliseconds (hosted)  │
-│  DLP: Same HookPipeline, same GuardedTool                   │
-│  Sandbox: WASM capability model (no ambient filesystem/net) │
-│                                                             │
-│  Advantages: No Docker overhead, starts instantly,          │
-│  portable to browser tier                                   │
-│                                                             │
-│  When to use: When SKILL.md declares `runtime: wasm` and    │
-│  provides a .wasm artifact.                                 │
-└─────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Tier 3: Browser (Future — offline/edge execution)          │
-│  ─────────────────────────────────────────────              │
-│  Tools: JS-native tools, WASM-compiled tools                │
-│  Runtime: Web Workers + OPFS + IndexedDB                    │
-│  DLP: Same 109 DLP patterns compiled to JS regex            │
-│  Sandbox: Browser origin sandbox                            │
-│                                                             │
-│  Limitations: No Docker, no native binaries, CORS limits    │
-│  Use case: Offline mode, edge deployment, zero-server       │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  IronBox: Firecracker microVM Runtime (Production)              │
+│  ─────────────────────────────────────────────────              │
+│  Source: IronClaw's zero-trust isolation model                  │
+│                                                                 │
+│  Why Firecracker over Docker:                                   │
+│  • 168ms boot time (vs ~1s for Docker)                          │
+│  • Hardware-level isolation via KVM (not just cgroups/ns)       │
+│  • No shared kernel — each VM has its own                       │
+│  • No container escape possible (it's a real VM)                │
+│  • Jailer enforces seccomp + cgroup limits                      │
+│  • AWS Lambda / Fly.io scale-to-zero proven at 10K+ VMs        │
+│                                                                 │
+│  Requirements:                                                  │
+│  • Linux host with KVM support (/dev/kvm)                       │
+│  • Bare metal (OVH KS-1, Hetzner, any dedicated server)        │
+│  • Or cloud VM with nested virtualization enabled               │
+│                                                                 │
+│  How it works:                                                  │
+│  McPorter builds rootfs (ext4 image) from SKILL.md install      │
+│  steps instead of Dockerfile. Firecracker boots the rootfs      │
+│  with a minimal kernel. MCP server runs inside the microVM.     │
+│  AgentGateway connects via virtio-vsock or TAP network.         │
+│                                                                 │
+│  mc ──rmcp──► AgentGateway ──vsock/TAP──► Firecracker microVM  │
+│                                           └─► MCP server        │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  Docker Runtime (Development / No-KVM Fallback)                 │
+│  ──────────────────────────────────────────────                 │
+│  Same McPorter API, different backend.                          │
+│  Used when: /dev/kvm not available, macOS, CI/CD, dev laptops.  │
+│                                                                 │
+│  mc ──rmcp──► AgentGateway ──HTTP──► Docker container           │
+│                                      └─► supergateway ──stdio──►│
+│                                          MCP server             │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Tier Selection Logic
-
-McPorter selects the tier automatically based on SKILL.md:
+### 3.2 McPorter Container Abstraction
 
 ```rust
-// Pseudocode — in McPorter.select_tier()
+/// McPorter builds and manages containers regardless of backend.
+/// SKILL.md install steps are the universal input.
+pub trait ContainerRuntime: Send + Sync {
+    /// Build an image/rootfs from install steps. Returns cached image ID.
+    async fn build(&self, base: &str, install_steps: &[String], hash: &str) -> Result<String>;
+    /// Start a container/microVM. Returns network endpoint.
+    async fn start(&self, image_id: &str, config: &SandboxConfig) -> Result<ContainerHandle>;
+    /// Stop and clean up.
+    async fn stop(&self, handle: &ContainerHandle) -> Result<()>;
+    /// Check health.
+    async fn health(&self, handle: &ContainerHandle) -> Result<bool>;
+}
+
+// Implementations:
+// - FirecrackerRuntime (production, requires KVM)
+// - DockerRuntime (development, fallback)
+// - WasmRuntime (lightweight skills, IronClaw-style WASM sandbox)
+```
+
+### 3.3 Execution Tiers
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Tier 0: In-Process (Rust builtins only)                    │
+│  ───────────────────────────────────────                    │
+│  Tools: memory_store, memory_recall, navigate_to,           │
+│         create_task                                         │
+│  These are part of the mc binary — trusted, no sandbox.     │
+│  DLP: GuardedTool wraps each with HookPipeline              │
+│  NOT for user skills. Only hardcoded builtins.              │
+└─────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Tier 1: WASM Sandbox (from IronClaw)                       │
+│  ────────────────────────────────────                       │
+│  Tools: Lightweight skills with .wasm artifact              │
+│  Runtime: Wasmtime in-process with IronClaw's capability    │
+│           model — zero access by default, explicit opt-in   │
+│  Security (from IronClaw):                                  │
+│  • Capability-based permissions (http, secrets, fs, exec)   │
+│  • Endpoint allowlisting for HTTP calls                     │
+│  • Credential injection at execution boundary               │
+│  • Leak detection on outbound requests                      │
+│  • 15ms overhead per invocation (IronClaw benchmark)        │
+│  DLP: Same HookPipeline wrapping                            │
+│                                                             │
+│  When: SKILL.md declares `runtime: wasm` or skill provides  │
+│  a .wasm artifact from ClawHub                              │
+│                                                             │
+│  Also runs: Pi/OpenClaw TS extensions via QuickJS compiled  │
+│  to WASM (224 verified extensions)                          │
+└─────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Tier 2: Firecracker microVM / Docker (Primary runtime)     │
+│  ──────────────────────────────────────────────────         │
+│  Tools: Any ClawHub skill (langextract, web-search,         │
+│         filesystem, git, code-analysis, etc.)               │
+│  Runtime: Firecracker microVM (prod) or Docker (dev)        │
+│  Isolation: Hardware-level (KVM) or kernel-level (cgroups)  │
+│  Network: AgentGateway routes MCP calls to containers       │
+│  DLP: GuardedTool scans args before, results after          │
+│                                                             │
+│  Skills auto-install:                                       │
+│  1. ClawHub download → SKILL.md                             │
+│  2. iron-verify static analysis (from IronClaw)             │
+│  3. McPorter builds rootfs/image from install steps         │
+│  4. Container starts with MCP server                        │
+│  5. AgentGateway discovers tools automatically              │
+│                                                             │
+│  Default for: All skills that need native binaries,         │
+│  arbitrary language runtimes, or network access              │
+└─────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Tier 3: Browser (from OpenBrowserClaw)                     │
+│  ──────────────────────────────────────                     │
+│  Tools: JS-native, WASM-compiled, v86-emulated bash         │
+│  Runtime: Web Worker + OPFS + IndexedDB                     │
+│  DLP: Same 109 patterns compiled to JS regex                │
+│  Security: AES-256-GCM keys in IndexedDB (from OBC)        │
+│  Sandbox: Browser origin sandbox + CSP                      │
+│                                                             │
+│  Use case: Offline mode, zero-server edge deployment        │
+│  Can connect to remote Tier 2 containers via WebSocket      │
+│                                                             │
+│  From OpenBrowserClaw: OPFS file storage, IndexedDB state,  │
+│  v86 Alpine Linux for bash, fetch API for HTTP tools        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 3.4 Remote Execution (OVH KS-1 / Bare Metal)
+
+```
+Local machine (laptop/desktop)           Remote box (OVH KS-1)
+┌────────────────────┐                   ┌──────────────────────────┐
+│  mc binary (host)  │                   │  mc-remote daemon        │
+│  UI (browser)      │   WireGuard VPN   │                          │
+│                    │ ◄───────────────► │  Firecracker microVMs    │
+│  Tier 0: builtins  │   or SSH tunnel   │  ├─ MCP langextract      │
+│  Tier 1: WASM      │                   │  ├─ MCP filesystem       │
+│                    │   AgentGateway    │  ├─ MCP web-search       │
+│  Sends MCP calls   │ ──────────────►   │  └─ AgentGateway         │
+│  to remote gateway │                   │                          │
+│                    │                   │  /dev/kvm ✓              │
+│  LLM API calls     │                   │  32GB RAM                │
+│  go direct to      │                   │  Runs 50+ microVMs       │
+│  Anthropic/etc     │                   │                          │
+└────────────────────┘                   └──────────────────────────┘
+
+Config:
+[execution]
+runtime = "firecracker"         # or "docker"
+remote_gateway = "wg://10.0.0.2:3000"  # AgentGateway on remote box
+local_wasm = true               # run WASM skills locally
+```
+
+This means:
+- Lightweight WASM skills (Tier 1) run locally — instant, no network hop
+- Heavy skills (Tier 2) run on the KS-1 — 32GB RAM, real KVM isolation
+- Agent loop runs locally via Rig — LLM calls go direct to API
+- Tool calls route through AgentGateway on the remote box
+- Swarm workers can span both local and remote
+
+### 3.5 Tier Selection Logic
+
+```rust
 fn select_tier(skill: &LoadedSkill, config: &McclawdConfig) -> ExecutionTier {
-    // Tier 0: Builtin tools (hardcoded list)
+    // Tier 0: Builtin tools (hardcoded, trusted)
     if BUILTIN_TOOLS.contains(&skill.name) {
         return Tier::InProcess;
     }
 
-    // Tier 2: WASM artifact available and WASM runtime enabled
+    // Tier 1: WASM artifact available
     if skill.has_wasm_artifact() && config.execution.wasm_enabled {
         return Tier::Wasm;
     }
 
-    // Tier 1: Default — Docker container
-    Tier::Docker
+    // Tier 2: Container (Firecracker or Docker)
+    if config.execution.remote_gateway.is_some() {
+        return Tier::RemoteContainer;  // route to remote box
+    }
+    Tier::LocalContainer  // run locally
 }
+```
+
+### 3.6 Skill Verification Pipeline (from IronClaw)
+
+Before any skill runs, it passes through verification:
+
+```
+mc skills install langextract
+         │
+         ▼
+┌─ ClawHub Download ─────────────────────────────────────────┐
+│  Download SKILL.md + any artifacts (.wasm, etc.)           │
+└────────────┬───────────────────────────────────────────────┘
+             │
+             ▼
+┌─ iron-verify Static Analysis (from IronClaw) ──────────────┐
+│                                                             │
+│  1. Capability audit:                                       │
+│     Does install step request network? ── log + warn        │
+│     Does it install a shell? ── flag for review             │
+│     Does it run as root? ── block unless --allow-root       │
+│                                                             │
+│  2. Data flow analysis:                                     │
+│     Scan install steps for:                                 │
+│     • curl/wget to unknown domains ── warn                  │
+│     • pip install from non-PyPI sources ── block            │
+│     • git clone from non-verified repos ── warn             │
+│                                                             │
+│  3. Known vulnerability patterns:                           │
+│     • SQL injection in config templates                     │
+│     • Command injection in shell scripts                    │
+│     • Path traversal in file operations                     │
+│                                                             │
+│  4. Capability declaration check:                           │
+│     SKILL.md ## Capabilities section must declare:          │
+│     - http: [list of allowed domains]                       │
+│     - fs: [list of allowed paths]                           │
+│     - exec: [list of allowed commands]                      │
+│     Missing declarations ── skill runs with zero access     │
+│                                                             │
+│  Result: PASS / WARN (install with warnings) / BLOCK        │
+└─────────────────────────────────────────────────────────────┘
+             │
+             ▼
+┌─ McPorter Build ───────────────────────────────────────────┐
+│  Build rootfs/image from verified install steps            │
+│  Cache by SHA256 hash                                      │
+└────────────────────────────────────────────────────────────┘
 ```
 
 ---
