@@ -221,35 +221,47 @@ The **SKILL.md is the API contract**. Everything else is derived from it.
 **Core rule: ALL code runs in containers.** The `mc` binary is the only host process.
 Skills, tools, agent workers — everything else runs isolated.
 
-### 3.1 Container Runtime: Firecracker-First, Docker-Fallback
+### 3.1 IronBox: The Container Runtime
+
+[IronBox](https://github.com/macleodlabs-ai/ironbox) is McClawd's secure code execution
+engine — a Firecracker wrapper with **e2b.dev API compatibility**. IronBox is a sibling
+project under macleodlabs, purpose-built to be McClawd's sandbox layer.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  IronBox: Firecracker microVM Runtime (Production)              │
-│  ─────────────────────────────────────────────────              │
-│  Source: IronClaw's zero-trust isolation model                  │
+│  IronBox: Firecracker microVM Runtime                           │
+│  ────────────────────────────────────                           │
+│  macleodlabs-ai/ironbox — e2b.dev compatible API                │
 │                                                                 │
-│  Why Firecracker over Docker:                                   │
-│  • 168ms boot time (vs ~1s for Docker)                          │
-│  • Hardware-level isolation via KVM (not just cgroups/ns)       │
-│  • No shared kernel — each VM has its own                       │
-│  • No container escape possible (it's a real VM)                │
+│  Why IronBox over raw Docker:                                   │
+│  • Firecracker microVMs — 168ms boot, hardware KVM isolation    │
+│  • e2b.dev API compat — drop-in replacement for e2b sandboxes   │
+│  • No shared kernel — each microVM is a real VM                 │
+│  • No container escape possible                                 │
 │  • Jailer enforces seccomp + cgroup limits                      │
-│  • AWS Lambda / Fly.io scale-to-zero proven at 10K+ VMs        │
+│  • Proven pattern: AWS Lambda, Fly.io at 10K+ VMs              │
 │                                                                 │
-│  Requirements:                                                  │
-│  • Linux host with KVM support (/dev/kvm)                       │
-│  • Bare metal (OVH KS-1, Hetzner, any dedicated server)        │
-│  • Or cloud VM with nested virtualization enabled               │
+│  e2b.dev compatibility means:                                   │
+│  • Same sandbox create/start/stop/exec API                      │
+│  • Same filesystem and process management primitives            │
+│  • Can run e2b sandbox templates (custom environments)          │
+│  • Can swap between hosted e2b cloud and local IronBox           │
+│  • Existing e2b SDK integrations work with IronBox               │
 │                                                                 │
-│  How it works:                                                  │
-│  McPorter builds rootfs (ext4 image) from SKILL.md install      │
-│  steps instead of Dockerfile. Firecracker boots the rootfs      │
-│  with a minimal kernel. MCP server runs inside the microVM.     │
-│  AgentGateway connects via virtio-vsock or TAP network.         │
+│  How McClawd uses IronBox:                                      │
+│  McPorter calls IronBox API to create sandbox from SKILL.md     │
+│  install steps. IronBox builds rootfs, boots Firecracker,       │
+│  MCP server runs inside the microVM. AgentGateway connects      │
+│  via virtio-vsock or TAP network.                               │
 │                                                                 │
-│  mc ──rmcp──► AgentGateway ──vsock/TAP──► Firecracker microVM  │
+│  mc ──rmcp──► AgentGateway ──vsock/TAP──► IronBox microVM      │
 │                                           └─► MCP server        │
+│                                                                 │
+│  Deployment options:                                            │
+│  • Local: bare metal with /dev/kvm (OVH KS-1, Hetzner, etc.)   │
+│  • Remote: mc-remote daemon on dedicated server                 │
+│  • Cloud: e2b.dev hosted (same API, their infrastructure)       │
+│  • Dev fallback: Docker when no KVM available                   │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
@@ -264,26 +276,67 @@ Skills, tools, agent workers — everything else runs isolated.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 McPorter Container Abstraction
+### 3.2 McPorter → IronBox Integration
+
+McPorter is the orchestrator. IronBox is the runtime. McPorter doesn't care which
+backend runs the container — it talks to the `ContainerRuntime` trait.
 
 ```rust
-/// McPorter builds and manages containers regardless of backend.
-/// SKILL.md install steps are the universal input.
+/// ContainerRuntime abstracts IronBox, Docker, and WASM backends.
+/// McPorter calls this trait; the backend handles the rest.
 pub trait ContainerRuntime: Send + Sync {
-    /// Build an image/rootfs from install steps. Returns cached image ID.
+    /// Build a sandbox template / image from install steps. Returns cached ID.
     async fn build(&self, base: &str, install_steps: &[String], hash: &str) -> Result<String>;
-    /// Start a container/microVM. Returns network endpoint.
+    /// Start a sandbox / container. Returns network endpoint.
     async fn start(&self, image_id: &str, config: &SandboxConfig) -> Result<ContainerHandle>;
+    /// Execute a command in a running sandbox.
+    async fn exec(&self, handle: &ContainerHandle, cmd: &[String]) -> Result<ExecResult>;
     /// Stop and clean up.
     async fn stop(&self, handle: &ContainerHandle) -> Result<()>;
     /// Check health.
     async fn health(&self, handle: &ContainerHandle) -> Result<bool>;
+    /// Upload file to sandbox filesystem.
+    async fn write_file(&self, handle: &ContainerHandle, path: &str, data: &[u8]) -> Result<()>;
+    /// Download file from sandbox filesystem.
+    async fn read_file(&self, handle: &ContainerHandle, path: &str) -> Result<Vec<u8>>;
 }
 
 // Implementations:
-// - FirecrackerRuntime (production, requires KVM)
-// - DockerRuntime (development, fallback)
-// - WasmRuntime (lightweight skills, IronClaw-style WASM sandbox)
+// - IronBoxRuntime   (production — Firecracker via IronBox, e2b API compat)
+// - E2bCloudRuntime  (hosted — same API, e2b.dev infrastructure)
+// - DockerRuntime    (development — fallback when no KVM)
+// - WasmRuntime      (lightweight — IronClaw-style WASM sandbox)
+```
+
+### 3.2.1 IronBox / e2b Deployment Matrix
+
+| Deployment | Runtime | Where | When |
+|---|---|---|---|
+| **Local IronBox** | Firecracker | Bare metal with /dev/kvm | Production, self-hosted |
+| **Remote IronBox** | Firecracker | OVH KS-1, Hetzner via WireGuard | Heavy workloads on cheap hardware |
+| **e2b Cloud** | Firecracker | e2b.dev hosted | Scale-out, no infra management |
+| **Docker** | Docker | Anywhere | Development, macOS, CI/CD |
+| **WASM** | Wasmtime | In-process | Lightweight skills only |
+
+Because IronBox speaks the e2b API, switching between local Firecracker and hosted
+e2b.dev is a config change:
+
+```toml
+[execution]
+# Option 1: Local IronBox (Firecracker)
+runtime = "ironbox"
+ironbox_url = "http://localhost:5000"  # local IronBox daemon
+
+# Option 2: Remote IronBox (OVH KS-1)
+runtime = "ironbox"
+ironbox_url = "wg://10.0.0.2:5000"    # IronBox on remote box via WireGuard
+
+# Option 3: e2b.dev cloud
+runtime = "e2b"
+e2b_api_key = "secret:E2B_API_KEY"     # from SecretStore, never in config
+
+# Option 4: Docker fallback
+runtime = "docker"
 ```
 
 ### 3.3 Execution Tiers
