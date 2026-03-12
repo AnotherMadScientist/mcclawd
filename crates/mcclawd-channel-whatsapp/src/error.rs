@@ -21,6 +21,10 @@ pub enum WhatsAppError {
     #[error("Channel not connected")]
     NotConnected,
 
+    /// Adapter not yet available (Phase 3).
+    #[error("Not available: {0}")]
+    NotAvailable(String),
+
     /// Passthrough for other errors.
     #[error(transparent)]
     Other(#[from] anyhow::Error),

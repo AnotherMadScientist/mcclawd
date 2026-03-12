@@ -35,39 +35,58 @@ struct ErrorResponse {
     error: String,
 }
 
-/// GET /api/channels — list all registered channels (placeholder: returns empty array).
+/// GET /api/channels — list all registered channels.
+///
+/// Returns the CLI channel (always available) and any configured external channels.
+/// External channel adapters (Discord, Slack, WhatsApp, Email) are Phase 3.
 pub async fn list_channels() -> Json<Vec<ChannelInfo>> {
-    // Phase 3 placeholder — will query ChannelRegistry when wired up
-    Json(vec![])
+    Json(vec![ChannelInfo {
+        id: "cli".to_string(),
+        platform: "cli".to_string(),
+        enabled: true,
+        capabilities: CapabilitiesInfo {
+            supports_streaming: true,
+            supports_edit: false,
+            supports_markdown: true,
+            max_message_len: usize::MAX,
+            supports_files: false,
+            max_file_size: 0,
+        },
+    }])
 }
 
-/// GET /api/channels/{id} — get channel by ID (placeholder: returns 404).
+/// GET /api/channels/{id} — get channel by ID.
 pub async fn get_channel(Path(id): Path<String>) -> impl IntoResponse {
-    // Phase 3 placeholder — will look up channel by ID when registry is wired
-    tracing::debug!(channel_id = %id, "Channel lookup (placeholder — not found)");
+    if id == "cli" {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": "cli",
+                "platform": "cli",
+                "enabled": true,
+                "status": "connected",
+            })),
+        );
+    }
+    tracing::debug!(channel_id = %id, "Channel not found");
     (
         StatusCode::NOT_FOUND,
-        Json(ErrorResponse {
-            error: "Channel not found".into(),
-        }),
+        Json(serde_json::json!({
+            "error": format!("Channel '{id}' not found. External channels (Discord, Slack, WhatsApp, Email) are not yet available."),
+        })),
     )
 }
 
-/// POST /api/channels/{id}/test — send a test message to a channel (placeholder: returns 404).
+/// POST /api/channels/{id}/test — send a test message to a channel.
 pub async fn test_channel(
     Path(id): Path<String>,
-    Json(payload): Json<TestMessageRequest>,
+    Json(_payload): Json<TestMessageRequest>,
 ) -> impl IntoResponse {
-    // Phase 3 placeholder — will dispatch test message when channels are wired
-    tracing::debug!(
-        channel_id = %id,
-        message = %payload.message,
-        "Channel test (placeholder — not found)"
-    );
+    tracing::debug!(channel_id = %id, "Channel test requested");
     (
-        StatusCode::NOT_FOUND,
+        StatusCode::NOT_IMPLEMENTED,
         Json(ErrorResponse {
-            error: "Channel not found".into(),
+            error: format!("Channel test for '{id}' is not yet available. External channel adapters are Phase 3."),
         }),
     )
 }
@@ -77,25 +96,34 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn list_channels_returns_empty_array() {
+    async fn list_channels_returns_cli() {
         let result = list_channels().await;
-        assert!(result.0.is_empty());
+        assert_eq!(result.0.len(), 1);
+        assert_eq!(result.0[0].id, "cli");
+        assert!(result.0[0].enabled);
     }
 
     #[tokio::test]
-    async fn get_channel_returns_not_found() {
-        let result = get_channel(Path("nonexistent".into())).await;
+    async fn get_cli_channel_returns_ok() {
+        let result = get_channel(Path("cli".into())).await;
+        let response = result.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_unknown_channel_returns_not_found() {
+        let result = get_channel(Path("discord".into())).await;
         let response = result.into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
-    async fn test_message_returns_not_found() {
+    async fn test_message_returns_not_implemented() {
         let req = TestMessageRequest {
             message: "hello".into(),
         };
-        let result = test_channel(Path("nonexistent".into()), Json(req)).await;
+        let result = test_channel(Path("slack".into()), Json(req)).await;
         let response = result.into_response();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
     }
 }

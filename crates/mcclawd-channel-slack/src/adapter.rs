@@ -103,7 +103,7 @@ impl SlackChannel {
         &self,
         _shutdown: CancellationToken,
     ) -> Result<tokio::task::JoinHandle<()>, SlackError> {
-        // TODO(phase-3): Wire up Slack event handler.
+        // Phase 3: Wire up Slack event handler.
         //   1. If app_token is set, use Socket Mode via websocket
         //   2. Otherwise, expect Events API webhook delivery
         //   3. On each message event:
@@ -112,10 +112,9 @@ impl SlackChannel {
         //      c. Call normalize::normalize()
         //      d. Send the Envelope through self.inbox_tx
         //   4. Spawn the handler, select! with shutdown token
-        let handle = tokio::spawn(async {
-            tracing::info!("Slack listener placeholder -- not yet wired to slack-morphism");
-        });
-        Ok(handle)
+        Err(SlackError::NotAvailable(
+            "Slack listener requires slack-morphism dependency (Phase 3)".into(),
+        ))
     }
 
     /// Slack-specific capabilities.
@@ -146,9 +145,9 @@ impl mcclawd_channels::Channel for SlackChannel {
         _inbound_tx: mpsc::Sender<InboundMessage>,
         _shutdown: CancellationToken,
     ) -> mcclawd_core::Result<()> {
-        // Phase 0 start -- delegate to start_listener in real usage.
-        tracing::info!("SlackChannel::start (Phase 0 stub)");
-        Ok(())
+        Err(mcclawd_core::McclawdError::Channel(
+            "Slack channel adapter is not yet available (Phase 3). Configure slack-morphism to enable.".into(),
+        ))
     }
 
     async fn send_chunk(&self, chunk: OutboundChunk) -> mcclawd_core::Result<()> {

@@ -119,7 +119,7 @@ impl EmailChannel {
         &self,
         _shutdown: CancellationToken,
     ) -> Result<tokio::task::JoinHandle<()>, EmailError> {
-        // TODO(phase-3): Wire up IMAP polling.
+        // Phase 3: Wire up IMAP polling.
         //   1. Connect to IMAP server using async-imap
         //   2. Poll INBOX at `config.poll_interval_secs` intervals
         //   3. For each new message:
@@ -127,10 +127,9 @@ impl EmailChannel {
         //      b. Call normalize::normalize()
         //      c. Send the Envelope through self.inbox_tx
         //   4. select! with shutdown token
-        let handle = tokio::spawn(async {
-            tracing::info!("Email IMAP listener placeholder -- not yet wired to async-imap");
-        });
-        Ok(handle)
+        Err(EmailError::NotAvailable(
+            "Email listener requires async-imap dependency (Phase 3)".into(),
+        ))
     }
 
     /// Email-specific capabilities.
@@ -161,9 +160,9 @@ impl mcclawd_channels::Channel for EmailChannel {
         _inbound_tx: mpsc::Sender<InboundMessage>,
         _shutdown: CancellationToken,
     ) -> mcclawd_core::Result<()> {
-        // Phase 0 start -- delegate to start_listener in real usage.
-        tracing::info!("EmailChannel::start (Phase 0 stub)");
-        Ok(())
+        Err(mcclawd_core::McclawdError::Channel(
+            "Email channel adapter is not yet available (Phase 3). Configure async-imap to enable.".into(),
+        ))
     }
 
     async fn send_chunk(&self, chunk: OutboundChunk) -> mcclawd_core::Result<()> {

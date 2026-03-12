@@ -103,7 +103,7 @@ impl WhatsAppChannel {
         &self,
         _shutdown: CancellationToken,
     ) -> Result<tokio::task::JoinHandle<()>, WhatsAppError> {
-        // TODO(phase-3): Wire up webhook handler.
+        // Phase 3: Wire up webhook handler.
         //   1. Start an Axum/Actix HTTP server on a configured port
         //   2. Handle GET /webhook for verification (verify_token)
         //   3. Handle POST /webhook for incoming messages:
@@ -112,10 +112,9 @@ impl WhatsAppChannel {
         //      c. Send the Envelope through self.inbox_tx
         //   4. For outbound: read from outbound_rx, POST to Cloud API
         //      https://graph.facebook.com/v21.0/{phone_number_id}/messages
-        let handle = tokio::spawn(async {
-            tracing::info!("WhatsApp webhook placeholder -- not yet wired to Cloud API");
-        });
-        Ok(handle)
+        Err(WhatsAppError::NotAvailable(
+            "WhatsApp webhook requires Cloud API integration (Phase 3)".into(),
+        ))
     }
 
     /// WhatsApp-specific capabilities.
@@ -146,9 +145,9 @@ impl mcclawd_channels::Channel for WhatsAppChannel {
         _inbound_tx: mpsc::Sender<InboundMessage>,
         _shutdown: CancellationToken,
     ) -> mcclawd_core::Result<()> {
-        // Phase 0 start -- delegate to start_webhook in real usage.
-        tracing::info!("WhatsAppChannel::start (Phase 0 stub)");
-        Ok(())
+        Err(mcclawd_core::McclawdError::Channel(
+            "WhatsApp channel adapter is not yet available (Phase 3). Configure Cloud API webhook to enable.".into(),
+        ))
     }
 
     async fn send_chunk(&self, chunk: OutboundChunk) -> mcclawd_core::Result<()> {

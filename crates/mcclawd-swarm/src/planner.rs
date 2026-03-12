@@ -12,7 +12,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use rig::completion::ToolDefinition;
+use rig::client::CompletionClient;
+use rig::completion::{Prompt, ToolDefinition};
+use rig::providers::anthropic;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -278,21 +280,79 @@ impl SwarmPlanner {
 
     /// Decompose a prompt into a `TaskDag` using the planner agent.
     ///
-    /// In production, this runs an LLM agent with the planner tools.
-    /// For testing, use `decompose_with_dag()` to provide a pre-built DAG.
+    /// Builds a Rig agent with the three planner tools (`create_subtask`,
+    /// `add_dependency`, `finalize_plan`) and asks it to decompose the prompt
+    /// into subtasks with dependencies. The resulting DAG is validated before
+    /// being returned.
+    ///
+    /// For testing without an LLM, use `decompose_with_dag()`.
     pub async fn decompose(
         &self,
-        _prompt: &str,
-        _roles: &[AgentRoleInfo],
+        prompt: &str,
+        roles: &[AgentRoleInfo],
     ) -> crate::error::Result<TaskDag> {
-        // TODO: Wire up Rig agent with planner tools:
-        //   1. Build a Rig agent with create_subtask, add_dependency, finalize_plan tools
-        //   2. Provide the agent with the list of available roles + the prompt
-        //   3. Let the agent decompose the prompt by calling tools
-        //   4. Return the resulting TaskDag
-        Err(SwarmError::PlanningFailed(
-            "LLM planner not yet wired — use decompose_with_dag() for testing".into(),
-        ))
+        let client: anthropic::Client = anthropic::Client::new(&self.api_key)
+            .map_err(|e| SwarmError::PlanningFailed(format!("failed to create LLM client: {e}")))?;
+
+        let state: PlannerState = Arc::new(Mutex::new(TaskDag::new()));
+
+        let model = self
+            .model
+            .as_deref()
+            .unwrap_or("claude-sonnet-4-20250514");
+
+        let roles_desc = if roles.is_empty() {
+            "Available roles: researcher, coder, reviewer".to_string()
+        } else {
+            let descs: Vec<String> = roles
+                .iter()
+                .map(|r| {
+                    format!(
+                        "- {} (tools: [{}], skills: [{}]){}",
+                        r.id,
+                        r.tools.join(", "),
+                        r.skills.join(", "),
+                        r.specialty
+                            .as_deref()
+                            .map(|s| format!(" — {s}"))
+                            .unwrap_or_default()
+                    )
+                })
+                .collect();
+            format!("Available agent roles:\n{}", descs.join("\n"))
+        };
+
+        let system_prompt = format!(
+            "You are a swarm planner. Decompose the user's task into subtasks that can be \
+             executed by specialized agents. Use the provided tools to build an execution plan.\n\n\
+             {roles_desc}\n\n\
+             Rules:\n\
+             1. Call create_subtask for each subtask (assign appropriate agent_role)\n\
+             2. Call add_dependency to express ordering constraints\n\
+             3. Call finalize_plan when done — this validates the DAG\n\
+             4. Keep the plan minimal — only create subtasks that are necessary\n\
+             5. Use input_keys/output_key to thread data between subtasks"
+        );
+
+        let agent = client
+            .agent(model)
+            .preamble(&system_prompt)
+            .max_tokens(4096)
+            .tool(CreateSubtaskTool::new(state.clone()))
+            .tool(AddDependencyTool::new(state.clone()))
+            .tool(FinalizePlanTool::new(state.clone()))
+            .build();
+
+        let _response: String = agent
+            .prompt(prompt)
+            .await
+            .map_err(|e| SwarmError::PlanningFailed(format!("planner agent failed: {e}")))?;
+
+        let dag = Arc::try_unwrap(state)
+            .map_err(|_| SwarmError::PlanningFailed("failed to unwrap DAG state".into()))?
+            .into_inner();
+        dag.validate()?;
+        Ok(dag)
     }
 
     /// Test helper: manually provide a pre-built DAG instead of LLM decomposition.

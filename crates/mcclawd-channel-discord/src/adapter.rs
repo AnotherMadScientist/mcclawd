@@ -104,17 +104,16 @@ impl DiscordChannel {
         &self,
         _shutdown: CancellationToken,
     ) -> Result<tokio::task::JoinHandle<()>, DiscordError> {
-        // TODO(phase-3): Wire up serenity client.
+        // Phase 3: Wire up serenity client.
         //   1. Create `serenity::Client::builder(token, intents)`
         //   2. Add an event handler that:
         //      a. Converts serenity::model::channel::Message -> DiscordMessage
         //      b. Calls normalize::normalize()
         //      c. Sends the Envelope through self.inbox_tx
         //   3. Spawn the client, select! with shutdown token
-        let handle = tokio::spawn(async {
-            tracing::info!("Discord listener placeholder -- not yet wired to serenity");
-        });
-        Ok(handle)
+        Err(DiscordError::NotAvailable(
+            "Discord listener requires serenity dependency (Phase 3)".into(),
+        ))
     }
 
     /// Discord-specific capabilities.
@@ -145,9 +144,9 @@ impl mcclawd_channels::Channel for DiscordChannel {
         _inbound_tx: mpsc::Sender<InboundMessage>,
         _shutdown: CancellationToken,
     ) -> mcclawd_core::Result<()> {
-        // Phase 0 start -- delegate to start_listener in real usage.
-        tracing::info!("DiscordChannel::start (Phase 3 stub)");
-        Ok(())
+        Err(mcclawd_core::McclawdError::Channel(
+            "Discord channel adapter is not yet available (Phase 3). Configure serenity to enable.".into(),
+        ))
     }
 
     async fn send_chunk(&self, chunk: OutboundChunk) -> mcclawd_core::Result<()> {

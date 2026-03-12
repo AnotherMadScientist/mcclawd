@@ -9,6 +9,7 @@ mcclawd-agent = { workspace = true }
 mcclawd-tools = { workspace = true }
 
 rig-core = { workspace = true }
+reqwest = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

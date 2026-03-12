@@ -2,26 +2,26 @@ use mcclawd_agent::engine::AgentEngine;
 use mcclawd_agent::workspace::WorkspaceLoader;
 use mcclawd_core::config::McclawdConfig;
 use mcclawd_core::secrets::{EncryptedFileBackend, SecretBackend};
+use mcclawd_swarm::{SwarmConfig, SwarmCoordinator, SwarmPlanner};
 use rig::completion::Prompt;
 
 pub async fn execute(prompt: &str, workspace_name: &str, swarm: bool) -> anyhow::Result<()> {
     let config = McclawdConfig::default();
 
-    if swarm {
-        tracing::info!(prompt, "Swarm mode requested — will decompose task into subtasks");
-        // TODO: Wire up SwarmCoordinator for CLI swarm execution
-        eprintln!("McClawd v0.5.0 — swarm mode (not yet fully wired)\n");
-    }
-
-    // Try daemon mode first
+    // Try daemon mode first (handles both swarm and single-agent)
     let daemon_port = 9090;
     if let Ok(true) = try_daemon(prompt, workspace_name, daemon_port).await {
         return Ok(());
     }
 
-    // Fallback: in-process execution (Phase 0 behavior)
+    // Fallback: in-process execution
     tracing::info!("Daemon not available, running in-process");
-    run_in_process(prompt, workspace_name, &config).await
+
+    if swarm {
+        run_swarm(prompt, workspace_name, &config).await
+    } else {
+        run_in_process(prompt, workspace_name, &config).await
+    }
 }
 
 /// Try to submit the task to the daemon via HTTP API.
@@ -102,6 +102,45 @@ async fn run_in_process(
     eprintln!("McClawd v0.5.0 — thinking...\n");
     let response = agent.prompt(prompt).await?;
     println!("{}", response);
+
+    Ok(())
+}
+
+/// Swarm mode: decompose prompt into a DAG of subtasks and execute in parallel.
+async fn run_swarm(
+    prompt: &str,
+    _workspace_name: &str,
+    config: &McclawdConfig,
+) -> anyhow::Result<()> {
+    let passphrase = "mcclawd-local-dev";
+    let secrets = EncryptedFileBackend::new(&config.secrets_path(), passphrase)?;
+    let api_key = secrets
+        .get("ANTHROPIC_API_KEY")
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!("ANTHROPIC_API_KEY not found. Run: mc secrets set ANTHROPIC_API_KEY")
+        })?;
+
+    eprintln!("McClawd v0.5.0 — swarm mode, planning...\n");
+
+    let planner = SwarmPlanner::new(Some(config.agent.model.clone()), api_key);
+    let dag = planner.decompose(prompt, &[]).await?;
+
+    let waves = dag.topological_waves()?;
+    let wave_count = waves.len();
+    let subtask_count: usize = waves.iter().map(|w| w.len()).sum();
+    eprintln!("Plan: {subtask_count} subtasks in {wave_count} waves. Executing...\n");
+
+    let coordinator = SwarmCoordinator::new(SwarmConfig::default());
+    let result = coordinator.execute(prompt, &dag).await?;
+
+    println!("{}", result.final_output);
+
+    eprintln!(
+        "\nSwarm complete: {} subtasks, {}ms",
+        result.subtask_results.len(),
+        result.total_duration_ms
+    );
 
     Ok(())
 }

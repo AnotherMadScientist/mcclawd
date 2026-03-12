@@ -1,4 +1,8 @@
-//! Session management API route handlers — Phase 3b placeholders.
+//! Session management API route handlers.
+//!
+//! Sessions track conversations between a user and McClawd across channels.
+//! Multi-channel session management is Phase 3b; currently sessions are
+//! tracked per-task through the task system.
 
 use axum::{extract::Path, http::StatusCode, response::IntoResponse, Json};
 use serde::Serialize;
@@ -20,30 +24,38 @@ struct ErrorResponse {
     error: String,
 }
 
-/// GET /api/sessions — list recent sessions (placeholder: returns empty array).
-pub async fn list_sessions() -> Json<Vec<SessionInfo>> {
-    // Phase 3b placeholder — will query SessionStore when wired up
-    Json(vec![])
+/// GET /api/sessions — list recent sessions.
+///
+/// Multi-channel sessions are not yet available. Task-level sessions
+/// are accessible via the /api/tasks endpoints.
+pub async fn list_sessions() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "sessions": [],
+            "note": "Multi-channel session management is not yet available. Use /api/tasks for task-level session tracking."
+        })),
+    )
 }
 
-/// GET /api/sessions/{id} — get session details (placeholder: returns 404).
+/// GET /api/sessions/{id} — get session details.
 pub async fn get_session(Path(id): Path<String>) -> impl IntoResponse {
-    tracing::debug!(session_id = %id, "Session lookup (placeholder — not found)");
+    tracing::debug!(session_id = %id, "Session lookup");
     (
         StatusCode::NOT_FOUND,
         Json(ErrorResponse {
-            error: "Session not found".into(),
+            error: format!("Session '{id}' not found. Multi-channel sessions are not yet available."),
         }),
     )
 }
 
-/// GET /api/sessions/{id}/turns — get turns for a session (placeholder: returns 404).
+/// GET /api/sessions/{id}/turns — get turns for a session.
 pub async fn get_session_turns(Path(id): Path<String>) -> impl IntoResponse {
-    tracing::debug!(session_id = %id, "Session turns lookup (placeholder — not found)");
+    tracing::debug!(session_id = %id, "Session turns lookup");
     (
         StatusCode::NOT_FOUND,
         Json(ErrorResponse {
-            error: "Session not found".into(),
+            error: format!("Session '{id}' not found. Multi-channel sessions are not yet available."),
         }),
     )
 }
@@ -53,9 +65,10 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn list_sessions_returns_empty_array() {
+    async fn list_sessions_returns_ok() {
         let result = list_sessions().await;
-        assert!(result.0.is_empty());
+        let response = result.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

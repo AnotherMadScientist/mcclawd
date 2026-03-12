@@ -719,13 +719,14 @@ impl AgentsConfig {
     /// Extracts: agent IDs from ### headings, skills/tools from bullet lists,
     /// default_skills from ## Default Skills section.
     pub fn parse(markdown: &str) -> Self {
+        // Implemented in crates/mcclawd-agent/src/agents_parser.rs
         // Lightweight parser: scan headings + bullet patterns
         // ### <agent_id> → new AgentSpec
         // - **Skills:** → parse sub-bullets as skill names
         // - **Tools:** → parse as tool names
         // ## Default Skills → parse bullets as default skill names
         // ## Delegation Rules → capture bullets as rules
-        todo!()
+        // ... (regex-based line-by-line parsing)
     }
 
     /// Get skills for a specific agent (default_skills + agent-specific).
@@ -1801,7 +1802,17 @@ impl ChannelChunker {
         }
         // Split at last newline before limit, or last space, or hard split
         // Preserve code blocks across splits
-        todo!()
+        let mut parts = Vec::new();
+        let mut remaining = text;
+        while remaining.len() > max {
+            let split_at = remaining[..max].rfind('\n')
+                .or_else(|| remaining[..max].rfind(' '))
+                .unwrap_or(max);
+            parts.push(remaining[..split_at].to_string());
+            remaining = &remaining[split_at..].trim_start();
+        }
+        if !remaining.is_empty() { parts.push(remaining.to_string()); }
+        parts
     }
 }
 ```
@@ -2342,12 +2353,15 @@ McClawd reads OpenClaw's channel config format (`openclaw.json`) for migration:
 /// Handles: channels.telegram, channels.whatsapp, channels.discord, etc.
 /// Converts plaintext tokens → SecretBackend references (prompts to import).
 pub fn import_openclaw_channels(config: &OpenClawConfig) -> Result<ChannelsConfig> {
-    // For each channel in openclaw.json:
-    // 1. Extract bot token / credentials
-    // 2. Prompt user to store in SecretBackend
-    // 3. Generate McClawd TOML channel config with secret references
-    // 4. Convert bindings from openclaw format to McClawd format
-    todo!()
+    let mut channels = ChannelsConfig::default();
+    for (name, chan) in &config.channels {
+        // 1. Extract bot token / credentials from openclaw config
+        // 2. Store in SecretBackend via mc secrets set
+        // 3. Generate McClawd channel config with ${SECRET_NAME} references
+        // 4. Convert bindings from openclaw format to McClawd format
+        channels.add(name, ChannelConfig::from_openclaw(chan)?);
+    }
+    Ok(channels)
 }
 ```
 
@@ -2458,21 +2472,24 @@ pub struct EncryptedFileBackend {
 }
 
 impl EncryptedFileBackend {
-    pub fn open(path: PathBuf, master_key: &[u8]) -> Result<Self> {
-        // argon2id key derivation from master_key → 256-bit AES key
+    /// Implemented in crates/mcclawd-core/src/secrets/encrypted_file.rs
+    pub fn new(path: &Path, passphrase: &str) -> Result<Self> {
+        let key = derive_key(passphrase)?;  // argon2id → 256-bit
         // Load or create secrets.enc
         // File format: nonce (12 bytes) || ciphertext (JSON blob, encrypted)
-        todo!()
+        // Supports v1 (flat) and v2 (with descriptors) secret formats
     }
 }
 
 #[async_trait]
 impl SecretBackend for EncryptedFileBackend {
-    async fn get(&self, key: &str) -> Result<Secret<String>> {
-        // Decrypt file → parse JSON → extract key → wrap in Secret<T>
-        todo!()
+    async fn get(&self, key: &str) -> Result<Option<String>> {
+        // Decrypt file → parse JSON → extract key
+        // Supports descriptor-scoped lookups: "KEY:descriptor"
     }
-    // ...
+    async fn set(&self, key: &str, value: &str) -> Result<()> { /* ... */ }
+    async fn delete(&self, key: &str) -> Result<()> { /* ... */ }
+    async fn list(&self) -> Result<Vec<SecretEntry>> { /* ... */ }
 }
 ```
 
@@ -2572,16 +2589,17 @@ pub struct JwtIdentityProvider {
 }
 
 impl JwtIdentityProvider {
-    /// Create from a key file or generate ephemeral key for dev.
-    pub fn from_config(config: &IdentityConfig) -> Result<Self> { todo!() }
+    /// Implemented in crates/mcclawd-core/src/identity/jwt.rs
+    pub fn new(secret: &str) -> Self {
+        // HMAC-based encoding/decoding keys from shared secret
+    }
 }
 
 #[async_trait]
 impl IdentityProvider for JwtIdentityProvider {
     async fn issue_agent_identity(&self, agent_name: &str) -> Result<AgentIdentity> {
-        // JWT with sub: "mcclawd://agent/{name}", iat, exp
-        // Claims: roles (from config), allowed_tools, etc.
-        todo!()
+        // JWT with sub: "mcclawd://agent/{name}", iat, exp (24h)
+        // Claims: roles (from config), allowed_tools
     }
 
     async fn issue_task_identity(
@@ -2591,12 +2609,10 @@ impl IdentityProvider for JwtIdentityProvider {
     ) -> Result<AgentIdentity> {
         // JWT with sub: "mcclawd://task/{id}", act: { sub: parent.id }
         // RFC 8693 "act" claim for delegation chain
-        todo!()
     }
 
     async fn verify(&self, token: &str) -> Result<AgentIdentity> {
-        // Standard JWT verification
-        todo!()
+        // Standard JWT verification with exp/iss validation
     }
 }
 ```
@@ -3443,30 +3459,46 @@ Task execution needs API key:
 
 ---
 
-## 22. Remaining Architecture Gaps
+## 22. Architecture Status & Remaining Gaps
 
-### 22a. Must Define Now (Wave 1)
+### 22a. Resolved Gaps
 
-**Gap 1: Secret Descriptors + Token Substitution**
+**~~Gap 1: Secret Descriptors + Token Substitution~~ — RESOLVED**
 
-Secrets are flat key-value today. Need:
-- Optional descriptor/environment tag per secret (e.g. `prod`, `staging`, `dev`)
-- Token substitution in MCP server configs: `${SECRET_NAME}` → resolved value
-- Secret scoping per MCP server and per skill (as specced in §11c but not implemented)
+Implemented in commit 41579b2. Secrets support:
+- Optional descriptor/environment tags: `mc secrets set KEY --descriptor prod`
+- `${SECRET_NAME}` token substitution in MCP server configs
+- `${SECRET_NAME:descriptor}` scoping with fallback to untagged
+- v1→v2 migration for existing secret stores
 
-Proposed:
-```
-mc secrets set ANTHROPIC_API_KEY --descriptor prod
-mc secrets set ANTHROPIC_API_KEY --descriptor staging
+**~~Gap 4: Redaction System~~ — RESOLVED**
 
-# List shows:
-# ANTHROPIC_API_KEY [prod] ****...****
-# ANTHROPIC_API_KEY [staging] ****...****
+`RedactionVault` + `RedactionTokenizer` (commit 0a2aacd) are fully implemented:
+- Typed tokens: `{SECRET:API_KEY:…SUFFIX}`, `{PII:EMAIL:…SUFFIX}`, `{MEDICAL:MRN:…SUFFIX}`
+- Per-task vault lifecycle: created on task start, zeroized on drop
+- De-tokenization: only at tool dispatch boundary, never in LLM context
+- Pipeline: RedactionTokenizer runs first in HookPipeline, replaces sensitive values
+  with typed tokens before they reach DLP/secret scanner hooks
 
-# Config references:
-# { "env": { "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY:prod}" } }
-# Falls back to untagged if descriptor not found
-```
+**~~Gap 5: Architecture Doc Drift~~ — RESOLVED**
+
+Doc now reflects implemented reality:
+- Config is JSON5 (OpenClaw-native), not TOML
+- Agent loop is Rig-managed (no manual ReAct)
+- Container-only execution (no host fallback, no `strict_sandbox` flag)
+- Security pipeline, UI, WebAuthn, skills, swarms all implemented
+
+**~~DLP Taint Tracking~~ — RESOLVED**
+
+TaintTrace wired into HookPipeline (session-level):
+- `SecurityContext` carries `taint_trace: Option<TaintTrace>` across tool calls
+- Each tool call creates a `TaintSpan` (start in `before_tool_call`, complete in `after_tool_call`)
+- Spans record: tool name, tags from findings, threat level, action (allowed/blocked/warned)
+- `SecuritySidecarHook` pushes Presidio/detect-secrets findings into SecurityContext
+- Trace persists per task (not cleared between tool calls); findings are per-call
+- `to_invariant_messages()` converts trace to OpenAI format for policy evaluation
+
+### 22b. Active Gaps
 
 **Gap 2: Provider Pool Failover**
 
@@ -3479,30 +3511,16 @@ mc secrets set ANTHROPIC_API_KEY --descriptor staging
 **Gap 3: Channel → Pipeline Integration**
 
 Channel adapters (Telegram, Discord, Slack, WhatsApp, Email) are built but:
-- API routes return stubs (`GET /api/channels` → empty)
+- API routes for Discord/Slack/WhatsApp/Email return "not yet available" (Phase 3)
 - `InboundPipeline` is Phase 0 passthrough (no dedup, access control, routing, debounce)
 - Channel lifecycle (start/stop/health) not connected to daemon
 - Multi-channel routing via Bindings not wired
 
-**Gap 4: Redaction System Documentation**
-
-`RedactionVault` + `RedactionTokenizer` (commit 0a2aacd) needs architecture section:
-- How typed tokens (`{SECRET:API_KEY:…SUFFIX}`) flow through the pipeline
-- Per-task vault lifecycle (create on task start, destroy on task end)
-- De-tokenization rules (only for tool dispatch, never for LLM context)
-
-**Gap 5: Architecture Doc Drift**
-
-The doc references TOML config, manual ReAct loop, and Phase 0-only features. Reality:
-- Config is JSON5 (OpenClaw-native)
-- Agent loop is Rig-managed (no manual ReAct)
-- Security pipeline, UI, WebAuthn, skills, swarms all implemented
-- Doc needs reconciliation with actual codebase
-
-### 22b. Container Work (In Scope)
+### 22c. Container Work (In Scope)
 
 | Item | Status | Notes |
 |------|--------|-------|
+| Container-only execution | **Done** | No host fallback; Docker required for all tasks |
 | Per-task container networking isolation | Partial — uses shared `mcclawd_tools` network | Need per-task network or network policies |
 | Sandbox volume mounting | Implemented — /workspace, /attachments, /run/secrets | Need configurable user volumes from config |
 | Container GC | Partial — periodic Docker prune exists | Need task-aware cleanup (orphan detection) |
@@ -3511,10 +3529,9 @@ The doc references TOML config, manual ReAct loop, and Phase 0-only features. Re
 | Secret delivery via tmpfs | Implemented — docker exec writes to /run/secrets/ | Working correctly |
 | Resource limits | Implemented — memory, CPU, PID limits in SandboxConfig | Working correctly |
 
-### 22c. Deferred (Not In Scope)
+### 22d. Deferred (Not In Scope)
 
 - ~~IronBox / Firecracker sandbox~~ — Docker containers only
 - ~~WASM runtime~~ — not needed
 - ~~SPIFFE/SPIRE identity~~ — JWT is sufficient for now
 - ~~Native Rust plugin SDK~~ — all tools via MCP
-- ~~DLP taint tracking~~ — hook infrastructure ready, implementation later
