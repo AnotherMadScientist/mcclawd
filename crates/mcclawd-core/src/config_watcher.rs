@@ -139,12 +139,13 @@ mod tests {
         let mut f = std::fs::File::create(path).unwrap();
         writeln!(
             f,
-            r#"
-[agent]
-max_turns = 10
-model = "claude-sonnet-4-5"
-default_workspace = "test"
-"#
+            r#"{{
+    "agent": {{
+        "max_turns": 10,
+        "model": "claude-sonnet-4-5",
+        "default_workspace": "test"
+    }}
+}}"#
         )
         .unwrap();
     }
@@ -153,25 +154,26 @@ default_workspace = "test"
         let mut f = std::fs::File::create(path).unwrap();
         writeln!(
             f,
-            r#"
-[agent]
-max_turns = 42
-model = "gpt-4"
-default_workspace = "updated"
-"#
+            r#"{{
+    "agent": {{
+        "max_turns": 42,
+        "model": "gpt-4",
+        "default_workspace": "updated"
+    }}
+}}"#
         )
         .unwrap();
     }
 
     fn write_invalid_config(path: &std::path::Path) {
         let mut f = std::fs::File::create(path).unwrap();
-        writeln!(f, "this is {{ not valid toml").unwrap();
+        writeln!(f, "this is {{ not valid json").unwrap();
     }
 
     #[test]
     fn new_creates_with_initial_config() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
+        let config_path = dir.path().join("mcclawd.json");
         write_valid_config(&config_path);
 
         let (watcher, rx) = ConfigWatcher::new(config_path.clone()).unwrap();
@@ -184,7 +186,7 @@ default_workspace = "updated"
     #[test]
     fn new_with_missing_file_uses_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("nonexistent.toml");
+        let config_path = dir.path().join("nonexistent.json");
 
         let (_watcher, rx) = ConfigWatcher::new(config_path).unwrap();
         let config = rx.borrow();
@@ -196,7 +198,7 @@ default_workspace = "updated"
     #[test]
     fn trigger_reload_updates_config() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
+        let config_path = dir.path().join("mcclawd.json");
         write_valid_config(&config_path);
 
         let (watcher, rx) = ConfigWatcher::new(config_path.clone()).unwrap();
@@ -213,7 +215,7 @@ default_workspace = "updated"
     #[test]
     fn trigger_reload_invalid_config_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
+        let config_path = dir.path().join("mcclawd.json");
         write_valid_config(&config_path);
 
         let (watcher, rx) = ConfigWatcher::new(config_path.clone()).unwrap();
@@ -231,7 +233,7 @@ default_workspace = "updated"
     #[test]
     fn reload_config_invalid_keeps_old() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
+        let config_path = dir.path().join("mcclawd.json");
         write_valid_config(&config_path);
 
         let (watcher, rx) = ConfigWatcher::new(config_path.clone()).unwrap();
@@ -248,7 +250,7 @@ default_workspace = "updated"
     #[test]
     fn reload_config_valid_publishes_new() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
+        let config_path = dir.path().join("mcclawd.json");
         write_valid_config(&config_path);
 
         let (watcher, rx) = ConfigWatcher::new(config_path.clone()).unwrap();
@@ -263,7 +265,7 @@ default_workspace = "updated"
     #[test]
     fn is_relevant_event_modify() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
+        let config_path = dir.path().join("mcclawd.json");
         write_valid_config(&config_path);
 
         let (watcher, _rx) = ConfigWatcher::new(config_path.clone()).unwrap();
@@ -281,7 +283,7 @@ default_workspace = "updated"
     #[test]
     fn is_relevant_event_wrong_file() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
+        let config_path = dir.path().join("mcclawd.json");
         write_valid_config(&config_path);
 
         let (watcher, _rx) = ConfigWatcher::new(config_path).unwrap();
@@ -290,7 +292,7 @@ default_workspace = "updated"
             kind: EventKind::Modify(notify::event::ModifyKind::Data(
                 notify::event::DataChange::Content,
             )),
-            paths: vec![dir.path().join("other.toml")],
+            paths: vec![dir.path().join("other.json")],
             attrs: Default::default(),
         };
         assert!(!watcher.is_relevant_event(&event));
@@ -299,7 +301,7 @@ default_workspace = "updated"
     #[test]
     fn is_relevant_event_remove_ignored() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
+        let config_path = dir.path().join("mcclawd.json");
         write_valid_config(&config_path);
 
         let (watcher, _rx) = ConfigWatcher::new(config_path.clone()).unwrap();

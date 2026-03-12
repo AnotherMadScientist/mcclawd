@@ -1,18 +1,18 @@
 //! `mc import openclaw [path]` — import OpenClaw config into McClawd.
 
 use mcclawd_core::compat::{
-    load_mcp_json, load_openclaw_config, migrate_channels, migrate_mcp_servers, migrate_skills,
+    extract_channel_secrets, load_mcp_json, load_openclaw_config, skill_install_commands,
+    validate_mcp_servers,
 };
 use std::path::PathBuf;
 
 /// Execute the `mc import openclaw` command.
 ///
 /// 1. Determine config path: explicit argument, or `~/.openclaw/openclaw.json`.
-/// 2. Load and migrate channels, MCP servers, and skills.
-/// 3. Check for `.mcp.json` in the current directory.
-/// 4. Print TOML config, secrets to import, and warnings.
+/// 2. Extract secrets from channel configs for secure storage.
+/// 3. Validate MCP server configs (warn about command-based servers).
+/// 4. Print secrets to import and skill install commands.
 pub async fn import_openclaw(path: Option<&str>) -> anyhow::Result<()> {
-    // Resolve the config file path
     let config_path = resolve_config_path(path)?;
 
     println!("Importing OpenClaw config from: {}", config_path.display());
@@ -22,38 +22,28 @@ pub async fn import_openclaw(path: Option<&str>) -> anyhow::Result<()> {
 
     let mut all_warnings: Vec<String> = Vec::new();
     let mut all_secrets: Vec<(String, String)> = Vec::new();
-    let mut toml_sections: Vec<String> = Vec::new();
 
-    // Migrate channels
+    // Extract secrets from channels
     if let Some(ref channels) = config.channels {
-        let result = migrate_channels(channels);
-        if !result.toml_config.is_empty() {
-            toml_sections.push(result.toml_config);
-        }
-        all_secrets.extend(result.secrets_to_import);
+        let result = extract_channel_secrets(channels);
+        all_secrets.extend(result.secrets);
         all_warnings.extend(result.warnings);
     }
 
-    // Migrate MCP servers from openclaw.json
+    // Validate MCP servers (warn about command-based servers)
     if let Some(ref servers) = config.mcp_servers {
-        let result = migrate_mcp_servers(servers);
-        if !result.toml_config.is_empty() {
-            toml_sections.push(result.toml_config);
-        }
-        all_warnings.extend(result.warnings);
+        let warnings = validate_mcp_servers(servers);
+        all_warnings.extend(warnings);
     }
 
     // Also check for .mcp.json in the current directory
     let mcp_json_path = PathBuf::from(".mcp.json");
     if mcp_json_path.exists() {
-        println!("Found .mcp.json in current directory, importing MCP servers...");
+        println!("Found .mcp.json in current directory, validating MCP servers...");
         match load_mcp_json(&mcp_json_path) {
             Ok(servers) => {
-                let result = migrate_mcp_servers(&servers);
-                if !result.toml_config.is_empty() {
-                    toml_sections.push(result.toml_config);
-                }
-                all_warnings.extend(result.warnings);
+                let warnings = validate_mcp_servers(&servers);
+                all_warnings.extend(warnings);
             }
             Err(e) => {
                 all_warnings.push(format!("Failed to parse .mcp.json: {}", e));
@@ -61,9 +51,9 @@ pub async fn import_openclaw(path: Option<&str>) -> anyhow::Result<()> {
         }
     }
 
-    // Migrate skills
+    // Print skill install commands
     if let Some(ref skills) = config.skills {
-        let skill_cmds = migrate_skills(skills);
+        let skill_cmds = skill_install_commands(skills);
         if !skill_cmds.is_empty() {
             println!("--- Skills to install ---");
             for cmd in &skill_cmds {
@@ -71,17 +61,6 @@ pub async fn import_openclaw(path: Option<&str>) -> anyhow::Result<()> {
             }
             println!();
         }
-    }
-
-    // Print generated TOML config
-    if !toml_sections.is_empty() {
-        println!("--- Generated TOML config (add to mcclawd.toml) ---");
-        println!();
-        for section in &toml_sections {
-            println!("{}", section);
-        }
-    } else {
-        println!("No channel or MCP server configs found to migrate.");
     }
 
     // Print secrets to import
@@ -99,6 +78,14 @@ pub async fn import_openclaw(path: Option<&str>) -> anyhow::Result<()> {
         );
         println!();
     }
+
+    // Print config adoption note
+    println!("--- Config ---");
+    println!(
+        "OpenClaw JSON5 is McClawd's native format. Copy to ~/.mcclawd/mcclawd.json"
+    );
+    println!("or use directly: mc run --config {}", config_path.display());
+    println!();
 
     // Print warnings
     if !all_warnings.is_empty() {

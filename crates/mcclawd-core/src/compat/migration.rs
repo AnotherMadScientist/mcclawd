@@ -1,54 +1,32 @@
-//! Config migration — convert OpenClaw configs to McClawd TOML format.
+//! OpenClaw config adoption — extract secrets and merge configs.
 //!
-//! Each `migrate_*` function returns a result struct containing:
-//! - Generated TOML config snippets
-//! - Secrets that must be imported (name + plaintext value)
-//! - Warnings about unsupported or partially-supported features
+//! OpenClaw JSON5 is the native config format. No conversion needed.
+//! This module extracts secrets (bot tokens, credentials) from OpenClaw
+//! channel configs so they can be stored securely via SecretStore.
 
 use super::openclaw_config::*;
 use std::collections::HashMap;
 
-/// Result of migrating channel configs.
+/// Result of extracting secrets from channel configs.
 #[derive(Debug, Clone)]
-pub struct ChannelMigrationResult {
-    /// TOML config snippet for channels.
-    pub toml_config: String,
+pub struct SecretExtractionResult {
     /// Secrets that need to be imported: `(secret_name, plaintext_value)`.
-    pub secrets_to_import: Vec<(String, String)>,
+    pub secrets: Vec<(String, String)>,
     /// Warnings about unsupported features.
     pub warnings: Vec<String>,
 }
 
-/// Result of migrating MCP server configs.
-#[derive(Debug, Clone)]
-pub struct McpMigrationResult {
-    /// TOML config snippet for MCP servers.
-    pub toml_config: String,
-    /// Warnings about servers that couldn't be fully migrated.
-    pub warnings: Vec<String>,
-}
-
-/// Migrate OpenClaw channel configs to McClawd TOML format.
+/// Extract secrets from OpenClaw channel configs for secure storage.
 ///
-/// For each channel with a bot_token, the token is extracted into
-/// `secrets_to_import` and the TOML references the secret name instead
-/// of embedding the raw token.
-pub fn migrate_channels(channels: &OpenClawChannels) -> ChannelMigrationResult {
-    let mut toml_lines = Vec::new();
+/// Bot tokens and credentials are extracted so they can be stored via
+/// McClawd's SecretStore (AES-256-GCM-SIV) instead of sitting in plaintext config.
+pub fn extract_channel_secrets(channels: &OpenClawChannels) -> SecretExtractionResult {
     let mut secrets = Vec::new();
     let mut warnings = Vec::new();
 
-    // Telegram
     if let Some(ref tg) = channels.telegram {
-        toml_lines.push("[channels.telegram]".to_string());
-        toml_lines.push("enabled = true".to_string());
         if let Some(ref token) = tg.bot_token {
             secrets.push(("TELEGRAM_BOT_TOKEN".to_string(), token.clone()));
-            toml_lines.push("bot_token_secret = \"TELEGRAM_BOT_TOKEN\"".to_string());
-        }
-        if let Some(ref ids) = tg.allowed_ids {
-            let quoted: Vec<String> = ids.iter().map(|id| format!("\"{}\"", id)).collect();
-            toml_lines.push(format!("allowed_ids = [{}]", quoted.join(", ")));
         }
         for key in tg.extra.keys() {
             warnings.push(format!(
@@ -56,20 +34,11 @@ pub fn migrate_channels(channels: &OpenClawChannels) -> ChannelMigrationResult {
                 key
             ));
         }
-        toml_lines.push(String::new());
     }
 
-    // Discord
     if let Some(ref dc) = channels.discord {
-        toml_lines.push("[channels.discord]".to_string());
-        toml_lines.push("enabled = true".to_string());
         if let Some(ref token) = dc.bot_token {
             secrets.push(("DISCORD_BOT_TOKEN".to_string(), token.clone()));
-            toml_lines.push("bot_token_secret = \"DISCORD_BOT_TOKEN\"".to_string());
-        }
-        if let Some(ref ids) = dc.allowed_ids {
-            let quoted: Vec<String> = ids.iter().map(|id| format!("\"{}\"", id)).collect();
-            toml_lines.push(format!("allowed_ids = [{}]", quoted.join(", ")));
         }
         for key in dc.extra.keys() {
             warnings.push(format!(
@@ -77,24 +46,14 @@ pub fn migrate_channels(channels: &OpenClawChannels) -> ChannelMigrationResult {
                 key
             ));
         }
-        toml_lines.push(String::new());
     }
 
-    // Slack
     if let Some(ref sl) = channels.slack {
-        toml_lines.push("[channels.slack]".to_string());
-        toml_lines.push("enabled = true".to_string());
         if let Some(ref token) = sl.bot_token {
             secrets.push(("SLACK_BOT_TOKEN".to_string(), token.clone()));
-            toml_lines.push("bot_token_secret = \"SLACK_BOT_TOKEN\"".to_string());
         }
         if let Some(ref app_token) = sl.app_token {
             secrets.push(("SLACK_APP_TOKEN".to_string(), app_token.clone()));
-            toml_lines.push("app_token_secret = \"SLACK_APP_TOKEN\"".to_string());
-        }
-        if let Some(ref ids) = sl.allowed_ids {
-            let quoted: Vec<String> = ids.iter().map(|id| format!("\"{}\"", id)).collect();
-            toml_lines.push(format!("allowed_ids = [{}]", quoted.join(", ")));
         }
         for key in sl.extra.keys() {
             warnings.push(format!(
@@ -102,20 +61,11 @@ pub fn migrate_channels(channels: &OpenClawChannels) -> ChannelMigrationResult {
                 key
             ));
         }
-        toml_lines.push(String::new());
     }
 
-    // WhatsApp
     if let Some(ref wa) = channels.whatsapp {
-        toml_lines.push("[channels.whatsapp]".to_string());
-        toml_lines.push("enabled = true".to_string());
         if let Some(ref token) = wa.bot_token {
             secrets.push(("WHATSAPP_BOT_TOKEN".to_string(), token.clone()));
-            toml_lines.push("bot_token_secret = \"WHATSAPP_BOT_TOKEN\"".to_string());
-        }
-        if let Some(ref ids) = wa.allowed_ids {
-            let quoted: Vec<String> = ids.iter().map(|id| format!("\"{}\"", id)).collect();
-            toml_lines.push(format!("allowed_ids = [{}]", quoted.join(", ")));
         }
         for key in wa.extra.keys() {
             warnings.push(format!(
@@ -123,79 +73,39 @@ pub fn migrate_channels(channels: &OpenClawChannels) -> ChannelMigrationResult {
                 key
             ));
         }
-        toml_lines.push(String::new());
     }
 
-    // Email
     if let Some(ref em) = channels.email {
-        toml_lines.push("[channels.email]".to_string());
-        toml_lines.push("enabled = true".to_string());
-        if let Some(ref host) = em.imap_host {
-            toml_lines.push(format!("imap_host = \"{}\"", host));
-        }
-        if let Some(port) = em.imap_port {
-            toml_lines.push(format!("imap_port = {}", port));
-        }
-        if let Some(ref host) = em.smtp_host {
-            toml_lines.push(format!("smtp_host = \"{}\"", host));
-        }
-        if let Some(port) = em.smtp_port {
-            toml_lines.push(format!("smtp_port = {}", port));
-        }
-        if let Some(ref from) = em.from_address {
-            toml_lines.push(format!("from_address = \"{}\"", from));
-        }
         if let Some(ref user) = em.username {
             secrets.push(("EMAIL_USERNAME".to_string(), user.clone()));
-            toml_lines.push("username_secret = \"EMAIL_USERNAME\"".to_string());
         }
         if let Some(ref pass) = em.password {
             secrets.push(("EMAIL_PASSWORD".to_string(), pass.clone()));
-            toml_lines.push("password_secret = \"EMAIL_PASSWORD\"".to_string());
         }
-        toml_lines.push(String::new());
     }
 
-    ChannelMigrationResult {
-        toml_config: toml_lines.join("\n"),
-        secrets_to_import: secrets,
-        warnings,
-    }
+    SecretExtractionResult { secrets, warnings }
 }
 
-/// Migrate OpenClaw MCP server configs to McClawd TOML format.
-///
-/// Servers with a `url` map directly. Servers with `command` + `args`
-/// generate a warning since McClawd uses Docker images for MCP servers.
-pub fn migrate_mcp_servers(servers: &HashMap<String, OpenClawMcpServer>) -> McpMigrationResult {
-    let mut toml_lines = Vec::new();
+/// Validate MCP server configs — warn about command-based servers
+/// that should use AgentGateway instead of direct execution.
+pub fn validate_mcp_servers(servers: &HashMap<String, OpenClawMcpServer>) -> Vec<String> {
     let mut warnings = Vec::new();
 
     for (name, server) in servers {
-        if let Some(ref url) = server.url {
-            // URL-based server maps directly
-            toml_lines.push(format!("[[mcp.servers]]"));
-            toml_lines.push(format!("name = \"{}\"", name));
-            toml_lines.push(format!("url = \"{}\"", url));
-
-            if let Some(ref env) = server.env {
-                let env_strs: Vec<String> = env
-                    .iter()
-                    .map(|(k, v)| format!("\"{}={}\"", k, v))
-                    .collect();
-                toml_lines.push(format!("env = [{}]", env_strs.join(", ")));
-            }
-            toml_lines.push(String::new());
-        } else if let Some(ref cmd) = server.command {
-            // Command-based server — warn that McClawd uses Docker
+        if server.url.is_some() {
+            // URL-based servers route through AgentGateway — good
+            continue;
+        }
+        if let Some(ref cmd) = server.command {
             let args_str = server
                 .args
                 .as_ref()
                 .map(|a| a.join(" "))
                 .unwrap_or_default();
             warnings.push(format!(
-                "MCP server '{}' uses command '{}{}'. McClawd runs MCP servers in Docker containers. \
-                 Consider containerizing this server and configuring via [mcp.servers] with an image.",
+                "MCP server '{}' uses command '{}{}'. McClawd routes all MCP \
+                 through AgentGateway — containerize this server or provide a URL.",
                 name,
                 cmd,
                 if args_str.is_empty() {
@@ -204,13 +114,6 @@ pub fn migrate_mcp_servers(servers: &HashMap<String, OpenClawMcpServer>) -> McpM
                     format!(" {}", args_str)
                 }
             ));
-            // Still emit a commented-out config for reference
-            toml_lines.push(format!("# MCP server '{}' (needs containerization)", name));
-            toml_lines.push(format!("# command: {} {}", cmd, args_str));
-            toml_lines.push(format!("# [[mcp.servers]]"));
-            toml_lines.push(format!("# name = \"{}\"", name));
-            toml_lines.push(format!("# image = \"<docker-image-for-{}>\"", name));
-            toml_lines.push(String::new());
         } else {
             warnings.push(format!(
                 "MCP server '{}' has neither url nor command — skipped",
@@ -219,14 +122,11 @@ pub fn migrate_mcp_servers(servers: &HashMap<String, OpenClawMcpServer>) -> McpM
         }
     }
 
-    McpMigrationResult {
-        toml_config: toml_lines.join("\n"),
-        warnings,
-    }
+    warnings
 }
 
-/// Migrate skill references to `mc skills install` commands.
-pub fn migrate_skills(skills: &[String]) -> Vec<String> {
+/// Generate `mc skills install` commands for skill references.
+pub fn skill_install_commands(skills: &[String]) -> Vec<String> {
     skills
         .iter()
         .map(|s| format!("mc skills install {}", s))
@@ -253,20 +153,15 @@ mod tests {
     }
 
     #[test]
-    fn migrate_telegram_extracts_token() {
-        let result = migrate_channels(&make_channels());
-        assert_eq!(result.secrets_to_import.len(), 1);
-        assert_eq!(result.secrets_to_import[0].0, "TELEGRAM_BOT_TOKEN");
-        assert_eq!(result.secrets_to_import[0].1, "tg-token-123");
-        assert!(result.toml_config.contains("[channels.telegram]"));
-        assert!(result
-            .toml_config
-            .contains("bot_token_secret = \"TELEGRAM_BOT_TOKEN\""));
-        assert!(result.toml_config.contains("allowed_ids"));
+    fn extract_telegram_token() {
+        let result = extract_channel_secrets(&make_channels());
+        assert_eq!(result.secrets.len(), 1);
+        assert_eq!(result.secrets[0].0, "TELEGRAM_BOT_TOKEN");
+        assert_eq!(result.secrets[0].1, "tg-token-123");
     }
 
     #[test]
-    fn migrate_empty_channels() {
+    fn extract_empty_channels() {
         let channels = OpenClawChannels {
             telegram: None,
             discord: None,
@@ -274,14 +169,13 @@ mod tests {
             whatsapp: None,
             email: None,
         };
-        let result = migrate_channels(&channels);
-        assert!(result.secrets_to_import.is_empty());
+        let result = extract_channel_secrets(&channels);
+        assert!(result.secrets.is_empty());
         assert!(result.warnings.is_empty());
-        assert!(result.toml_config.is_empty());
     }
 
     #[test]
-    fn migrate_slack_with_app_token() {
+    fn extract_slack_with_app_token() {
         let channels = OpenClawChannels {
             telegram: None,
             discord: None,
@@ -294,21 +188,20 @@ mod tests {
             whatsapp: None,
             email: None,
         };
-        let result = migrate_channels(&channels);
-        assert_eq!(result.secrets_to_import.len(), 2);
+        let result = extract_channel_secrets(&channels);
+        assert_eq!(result.secrets.len(), 2);
         assert!(result
-            .secrets_to_import
+            .secrets
             .iter()
             .any(|(k, v)| k == "SLACK_BOT_TOKEN" && v == "sl-bot"));
         assert!(result
-            .secrets_to_import
+            .secrets
             .iter()
             .any(|(k, v)| k == "SLACK_APP_TOKEN" && v == "sl-app"));
-        assert!(result.toml_config.contains("[channels.slack]"));
     }
 
     #[test]
-    fn migrate_email_extracts_credentials() {
+    fn extract_email_credentials() {
         let channels = OpenClawChannels {
             telegram: None,
             discord: None,
@@ -324,26 +217,20 @@ mod tests {
                 from_address: Some("bot@test.com".to_string()),
             }),
         };
-        let result = migrate_channels(&channels);
-        assert_eq!(result.secrets_to_import.len(), 2);
+        let result = extract_channel_secrets(&channels);
+        assert_eq!(result.secrets.len(), 2);
         assert!(result
-            .secrets_to_import
+            .secrets
             .iter()
             .any(|(k, _)| k == "EMAIL_USERNAME"));
         assert!(result
-            .secrets_to_import
+            .secrets
             .iter()
             .any(|(k, _)| k == "EMAIL_PASSWORD"));
-        assert!(result.toml_config.contains("imap_host = \"imap.test.com\""));
-        assert!(result.toml_config.contains("imap_port = 993"));
-        assert!(result.toml_config.contains("smtp_port = 587"));
-        assert!(result
-            .toml_config
-            .contains("from_address = \"bot@test.com\""));
     }
 
     #[test]
-    fn migrate_channel_warns_on_extra_fields() {
+    fn channel_warns_on_extra_fields() {
         let mut extra = HashMap::new();
         extra.insert("guildId".to_string(), serde_json::json!("12345"));
         let channels = OpenClawChannels {
@@ -358,14 +245,14 @@ mod tests {
             whatsapp: None,
             email: None,
         };
-        let result = migrate_channels(&channels);
+        let result = extract_channel_secrets(&channels);
         assert_eq!(result.warnings.len(), 1);
         assert!(result.warnings[0].contains("guildId"));
         assert!(result.warnings[0].contains("Discord"));
     }
 
     #[test]
-    fn migrate_mcp_url_passthrough() {
+    fn validate_mcp_url_passthrough() {
         let mut servers = HashMap::new();
         servers.insert(
             "search".to_string(),
@@ -376,18 +263,12 @@ mod tests {
                 url: Some("http://localhost:8001".to_string()),
             },
         );
-        let result = migrate_mcp_servers(&servers);
-        assert!(result.toml_config.contains("[[mcp.servers]]"));
-        assert!(result.toml_config.contains("name = \"search\""));
-        assert!(result
-            .toml_config
-            .contains("url = \"http://localhost:8001\""));
-        assert!(result.toml_config.contains("env = [\"KEY=val\"]"));
-        assert!(result.warnings.is_empty());
+        let warnings = validate_mcp_servers(&servers);
+        assert!(warnings.is_empty());
     }
 
     #[test]
-    fn migrate_mcp_command_warns() {
+    fn validate_mcp_command_warns() {
         let mut servers = HashMap::new();
         servers.insert(
             "local-tool".to_string(),
@@ -398,17 +279,15 @@ mod tests {
                 url: None,
             },
         );
-        let result = migrate_mcp_servers(&servers);
-        assert_eq!(result.warnings.len(), 1);
-        assert!(result.warnings[0].contains("local-tool"));
-        assert!(result.warnings[0].contains("node"));
-        assert!(result.warnings[0].contains("Docker"));
-        // Should have commented-out config
-        assert!(result.toml_config.contains("# command: node server.js"));
+        let warnings = validate_mcp_servers(&servers);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("local-tool"));
+        assert!(warnings[0].contains("node"));
+        assert!(warnings[0].contains("AgentGateway"));
     }
 
     #[test]
-    fn migrate_mcp_empty_server_warns() {
+    fn validate_mcp_empty_server_warns() {
         let mut servers = HashMap::new();
         servers.insert(
             "broken".to_string(),
@@ -419,20 +298,20 @@ mod tests {
                 url: None,
             },
         );
-        let result = migrate_mcp_servers(&servers);
-        assert_eq!(result.warnings.len(), 1);
-        assert!(result.warnings[0].contains("broken"));
-        assert!(result.warnings[0].contains("neither url nor command"));
+        let warnings = validate_mcp_servers(&servers);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("broken"));
+        assert!(warnings[0].contains("neither url nor command"));
     }
 
     #[test]
-    fn migrate_skills_generates_install_commands() {
+    fn skill_install_commands_generates() {
         let skills = vec![
             "web-search".to_string(),
             "code-review".to_string(),
             "summarizer".to_string(),
         ];
-        let cmds = migrate_skills(&skills);
+        let cmds = skill_install_commands(&skills);
         assert_eq!(cmds.len(), 3);
         assert_eq!(cmds[0], "mc skills install web-search");
         assert_eq!(cmds[1], "mc skills install code-review");
@@ -440,13 +319,13 @@ mod tests {
     }
 
     #[test]
-    fn migrate_skills_empty() {
-        let cmds = migrate_skills(&[]);
+    fn skill_install_commands_empty() {
+        let cmds = skill_install_commands(&[]);
         assert!(cmds.is_empty());
     }
 
     #[test]
-    fn migrate_all_channels_together() {
+    fn extract_all_channels_together() {
         let channels = OpenClawChannels {
             telegram: Some(OpenClawChannelConfig {
                 bot_token: Some("tg".to_string()),
@@ -474,16 +353,12 @@ mod tests {
             }),
             email: None,
         };
-        let result = migrate_channels(&channels);
-        assert_eq!(result.secrets_to_import.len(), 4);
-        assert!(result.toml_config.contains("[channels.telegram]"));
-        assert!(result.toml_config.contains("[channels.discord]"));
-        assert!(result.toml_config.contains("[channels.slack]"));
-        assert!(result.toml_config.contains("[channels.whatsapp]"));
+        let result = extract_channel_secrets(&channels);
+        assert_eq!(result.secrets.len(), 4);
     }
 
     #[test]
-    fn migrate_multiple_mcp_servers() {
+    fn validate_multiple_mcp_servers() {
         let mut servers = HashMap::new();
         servers.insert(
             "url-server".to_string(),
@@ -503,10 +378,9 @@ mod tests {
                 url: None,
             },
         );
-        let result = migrate_mcp_servers(&servers);
-        // One URL server migrates clean, one command server warns
-        assert_eq!(result.warnings.len(), 1);
-        assert!(result.warnings[0].contains("cmd-server"));
-        assert!(result.toml_config.contains("name = \"url-server\""));
+        let warnings = validate_mcp_servers(&servers);
+        // One URL server passes, one command server warns
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("cmd-server"));
     }
 }

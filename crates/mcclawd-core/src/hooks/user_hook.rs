@@ -1,26 +1,31 @@
 //! User-defined hooks — shell commands or HTTP calls triggered before/after tool use.
 //!
-//! # Config (TOML)
-//! ```toml
-//! [[hooks]]
-//! name = "notify-slack"
-//! trigger = "after_tool_call"
-//! type = "http"
-//! url = "https://hooks.slack.com/services/..."
-//! method = "POST"
-//! action = "allow"
-//! timeout_ms = 5000
-//! enabled = true
-//!
-//! [[hooks]]
-//! name = "block-write-tools"
-//! trigger = "before_tool_call"
-//! type = "shell"
-//! command = "echo 'write blocked' >> /tmp/mc-audit.log"
-//! pattern = "^write_"
-//! action = "block"
-//! message = "Write tools are not permitted in this workspace"
-//! enabled = true
+//! # Config (JSON5 — in mcclawd.json)
+//! ```json5
+//! {
+//!   "hooks": [
+//!     {
+//!       "name": "notify-slack",
+//!       "trigger": "after_tool_call",
+//!       "type": "http",
+//!       "url": "https://hooks.slack.com/services/...",
+//!       "method": "POST",
+//!       "action": "allow",
+//!       "timeout_ms": 5000,
+//!       "enabled": true
+//!     },
+//!     {
+//!       "name": "block-write-tools",
+//!       "trigger": "before_tool_call",
+//!       "type": "shell",
+//!       "command": "echo 'write blocked' >> /tmp/mc-audit.log",
+//!       "pattern": "^write_",
+//!       "action": "block",
+//!       "message": "Write tools are not permitted in this workspace",
+//!       "enabled": true
+//!     }
+//!   ]
+//! }
 //! ```
 
 use async_trait::async_trait;
@@ -545,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn test_serde_toml_roundtrip() {
+    fn test_serde_json5_roundtrip() {
         let cfg = UserHookConfig {
             name: "shell-hook".to_string(),
             trigger: UserHookTrigger::BeforeToolCall,
@@ -560,8 +565,8 @@ mod tests {
             timeout_ms: 5000,
             enabled: true,
         };
-        let toml_str = toml::to_string(&cfg).unwrap();
-        let decoded: UserHookConfig = toml::from_str(&toml_str).unwrap();
+        let json_str = serde_json::to_string(&cfg).unwrap();
+        let decoded: UserHookConfig = json5::from_str(&json_str).unwrap();
         assert_eq!(decoded.name, cfg.name);
         assert_eq!(decoded.command, cfg.command);
     }

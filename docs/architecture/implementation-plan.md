@@ -1,8 +1,8 @@
 # Implementation Plan: Unified Architecture
 
 > Phased plan to implement the unified architecture from `unified-architecture.md`.
-> Incorporates McClawd v5, IronClaw, OpenBrowserClaw, Pi/pi_agent_rust, and OpenClaw.
-> All code runs in containers. Firecracker-first. DLP on everything.
+> OpenClaw-native. AgentGateway-first. McClawd's 3-tier scanner (not iron-verify).
+> All code runs in containers. DLP on everything.
 
 ## Phase 0: Container Runtime Abstraction (Foundation)
 
@@ -76,16 +76,12 @@ between workers unscanned.
 **Depends on**: Nothing
 **Size**: XS
 
-### 8. iron-verify skill verification (from IronClaw)
-**Crate**: `mcclawd-core` (new: verify.rs)
-**What**: Static analysis on SKILL.md install steps before execution:
-- Capability audit (network, shell, root access)
-- Data flow analysis (curl to unknown domains, non-PyPI pip sources)
-- Known vulnerability patterns (injection, traversal)
-- Capability declaration check against `## Capabilities` section
-**Why**: IronClaw's key insight — verify before trust, not trust-then-sandbox.
-**Depends on**: Nothing
-**Size**: M
+### ~~8. iron-verify~~ (DONE — McClawd's 3-tier scanner is more comprehensive)
+McClawd already has a 3-tier security scanner in `scanner.rs`:
+- Tier 1: Security sidecar (POST /scan/skill)
+- Tier 2: snyk-agent-scan (uvx, 120s timeout)
+- Tier 3: Built-in 28-pattern static analysis (E-codes/W-codes)
+No need to build iron-verify separately.
 
 ### 9. Resource limits on containers
 **Crate**: `mcclawd-runner`
@@ -171,13 +167,8 @@ shell commands or HTTP calls per UserHookConfig.
 
 ## Phase 3: Browser Tier + Scale
 
-### 20. Browser execution tier (from OpenBrowserClaw)
-**Crate**: New `mcclawd-browser` crate or `ui/` integration
-**What**: Web Worker agent loop, OPFS file storage, IndexedDB state,
-v86-emulated bash, DLP patterns compiled to JS regex,
-AES-256-GCM key management. Can connect to remote Tier 2 via WebSocket.
-**Depends on**: Phase 2 complete
-**Size**: XL
+### ~~20. Browser execution tier~~ (REMOVED)
+AgentGateway + Docker/Firecracker covers all use cases. No need for browser-native execution.
 
 ### 21. PostgreSQL scratchboard
 **Crate**: `mcclawd-swarm` (new: pg_memory.rs)
@@ -185,11 +176,7 @@ AES-256-GCM key management. Can connect to remote Tier 2 via WebSocket.
 **Depends on**: #3 (GuardedSharedMemory abstraction)
 **Size**: M
 
-### 22. Cross-tier shared memory (WebSocket)
-**Crate**: `mcclawd-api` (server/), `ui/`
-**What**: WebSocket pub/sub for browser ↔ server scratchboard sync.
-**Depends on**: #20, #21
-**Size**: L
+### ~~22. Cross-tier shared memory~~ (REMOVED — depended on browser tier)
 
 ### 23. QuickJS/WASM extension runtime for Pi TS extensions
 **Crate**: `mcclawd-tools` (new: quickjs_wasm.rs)
@@ -218,7 +205,7 @@ Phase 1A (parallel):
 Phase 1B (parallel with 1A):
   #6  Shell injection fix
   #7  Remove host fallback
-  #8  iron-verify
+  #8  ~~iron-verify~~ (DONE — McClawd 3-tier scanner)
   #9  Resource limits (after #0)
   #10 Progressive disclosure
   #11 Workspace files
@@ -233,7 +220,6 @@ Phase 2 (after 1A/1B):
   #19 Swarm UI
 
 Phase 3 (after Phase 2):
-  #20 Browser tier ──► #22 Cross-tier sync
   #21 PG scratchboard
   #23 QuickJS/WASM extensions (after #15)
 ```
@@ -251,7 +237,7 @@ Phase 3 (after Phase 2):
 - #3 GuardedSharedMemory (S)
 - #5 Channel DLP (S)
 - #10 Progressive disclosure (M — biggest context quality win)
-- #8 iron-verify (M — security gate on skill install)
+- ~~#8 iron-verify~~ (DONE — McClawd 3-tier scanner already built)
 
 **Sprint 3** (OpenClaw compat + persistence):
 - #9 Resource limits (S)
@@ -269,10 +255,8 @@ Phase 3 (after Phase 2):
 - #14 Remote execution (L)
 - #19 Swarm UI (L)
 
-**Sprint 6+** (browser + scale):
-- #20 Browser tier (XL)
+**Sprint 6+** (persistence + extensions):
 - #21 PG scratchboard (M)
-- #22 Cross-tier sync (L)
 - #23 QuickJS/WASM extensions (L)
 
 ---
@@ -288,14 +272,10 @@ Phase 3 (after Phase 2):
 | SKILL.md parser | McClawd | Already built |
 | ClawHub client | McClawd | Already built |
 | Capability permissions | IronClaw | Build (inspired by, not forked) |
-| iron-verify static analysis | IronClaw | Build (pattern, not library) |
+| 3-tier security scanner | McClawd | Already built (replaces iron-verify) |
 | WASM sandbox model | IronClaw | Build with Wasmtime |
 | Credential injection | IronClaw | Build (McClawd SecretStore already close) |
 | Firecracker runtime | IronClaw concept + AWS Firecracker | Build on raw Firecracker API |
 | Progressive disclosure | Pi | Build (algorithm, not library) |
 | JSONL sessions | Pi | Build (file format, not library) |
 | QuickJS extensions | pi_agent_rust | Evaluate as dependency for Phase 3 |
-| Browser agent loop | OpenBrowserClaw | Build (Web Worker pattern) |
-| OPFS + IndexedDB | OpenBrowserClaw | Build (browser APIs) |
-| AES-256-GCM browser keys | OpenBrowserClaw | Build (Web Crypto API) |
-| v86 bash emulation | OpenBrowserClaw | Dependency (v86 is a library) |

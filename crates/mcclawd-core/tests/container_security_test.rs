@@ -8,7 +8,7 @@ use mcclawd_core::config::{McclawdConfig, SandboxConfig};
 #[test]
 fn strict_sandbox_default_is_false() {
     // Default is false for development convenience (Docker image may not exist).
-    // Production deployments should set strict_sandbox = true in config.toml.
+    // Production deployments should set strict_sandbox = true in mcclawd.json.
     let config = SandboxConfig::default();
     assert!(
         !config.strict_sandbox,
@@ -61,11 +61,8 @@ fn full_config_includes_sandbox_defaults() {
 
 #[test]
 fn sandbox_config_deserializes_strict_false() {
-    let toml_str = r#"
-[sandbox]
-strict_sandbox = false
-"#;
-    let config: McclawdConfig = toml::from_str(toml_str).unwrap();
+    let json_str = r#"{ "sandbox": { "strict_sandbox": false } }"#;
+    let config: McclawdConfig = json5::from_str(json_str).unwrap();
     assert!(
         !config.sandbox.strict_sandbox,
         "strict_sandbox=false must be respected"
@@ -76,11 +73,8 @@ strict_sandbox = false
 
 #[test]
 fn sandbox_config_deserializes_custom_pids_limit() {
-    let toml_str = r#"
-[sandbox]
-pids_limit = 512
-"#;
-    let config: McclawdConfig = toml::from_str(toml_str).unwrap();
+    let json_str = r#"{ "sandbox": { "pids_limit": 512 } }"#;
+    let config: McclawdConfig = json5::from_str(json_str).unwrap();
     assert_eq!(config.sandbox.pids_limit, Some(512));
     // strict_sandbox should still default to true
     assert!(config.sandbox.strict_sandbox);

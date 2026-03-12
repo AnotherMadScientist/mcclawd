@@ -194,12 +194,8 @@ fn skill_context_empty_when_no_context() {
 #[test]
 fn sandbox_config_no_mode_field() {
     // Verify SandboxMode is gone — config parses without mode field
-    let toml_str = r#"
-[sandbox]
-base_image = "custom:latest"
-network = "my_network"
-"#;
-    let config: mcclawd_core::McclawdConfig = toml::from_str(toml_str).unwrap();
+    let json_str = r#"{ "sandbox": { "base_image": "custom:latest", "network": "my_network" } }"#;
+    let config: mcclawd_core::McclawdConfig = json5::from_str(json_str).unwrap();
     assert_eq!(config.sandbox.base_image, "custom:latest");
     assert_eq!(config.sandbox.network, "my_network");
 }
@@ -213,7 +209,7 @@ fn sandbox_config_default_network_is_mcclawd_tools() {
 #[test]
 fn sandbox_config_roundtrip_without_mode() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
+    let path = dir.path().join("mcclawd.json");
 
     let mut config = mcclawd_core::McclawdConfig::default();
     config.sandbox.base_image = "test-sandbox:v2".to_string();
@@ -226,13 +222,8 @@ fn sandbox_config_roundtrip_without_mode() {
 }
 
 #[test]
-fn old_config_with_mode_field_still_parses() {
-    // Backward compat: old configs may have mode = "host" — serde should ignore unknown fields
-    // Note: toml strict mode may reject this. If so, this test documents the behavior.
-    let toml_str = r#"
-[sandbox]
-base_image = "old:latest"
-"#;
-    let config: mcclawd_core::McclawdConfig = toml::from_str(toml_str).unwrap();
+fn old_config_parses_without_mode_field() {
+    let json_str = r#"{ "sandbox": { "base_image": "old:latest" } }"#;
+    let config: mcclawd_core::McclawdConfig = json5::from_str(json_str).unwrap();
     assert_eq!(config.sandbox.base_image, "old:latest");
 }

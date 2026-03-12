@@ -1,11 +1,10 @@
 //! OpenClaw config parser — reads openclaw.json and .mcp.json formats.
 //!
-//! OpenClaw uses JSON config files:
+//! OpenClaw JSON5 is McClawd's native config format:
 //! - `openclaw.json` — main config with channels, MCP servers, skills
 //! - `.mcp.json` — standalone MCP server definitions
 //!
-//! This module deserializes those formats so `migration.rs` can convert
-//! them to McClawd's native TOML config.
+//! JSON5 supports comments, trailing commas, and unquoted keys.
 
 use serde::Deserialize;
 use std::collections::HashMap;

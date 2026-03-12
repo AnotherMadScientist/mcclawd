@@ -1,18 +1,16 @@
 # McClawd Unified Architecture
 
-> Combines the best of McClawd v5, IronClaw, OpenBrowserClaw, Pi/pi_agent_rust, and the
-> OpenClaw ecosystem into a single extensible platform. All code runs in containers.
-> Skills auto-install from ClawHub. DLP on everything. Firecracker or Docker isolation.
+> OpenClaw-native platform. AgentGateway-first MCP routing. McClawd's 3-tier security scanner.
+> All code runs in containers. Skills auto-install from ClawHub. DLP on everything.
 
 ## Heritage: What We Take From Each Project
 
 | Source | What we adopt | What we skip |
 |---|---|---|
-| **McClawd v5** | Rig agent loop, MCP-first tools via AgentGateway, HookPipeline DLP (109 patterns), ClawHub client/installer, SKILL.md parser, workspace files, channel architecture (5 transports), swarm DAG + wave scheduler | Manual ReAct loop (Rig handles it) |
-| **[IronClaw](https://github.com/nearai/ironclaw)** | WASM sandbox for lightweight tools, capability-based permissions, `iron-verify` static analysis on skill install, credential injection at execution boundary, leak detection on outbound HTTP, **Firecracker microVM as Docker alternative** | NEAR AI default provider (we use Rig multi-provider), PostgreSQL-only storage |
-| **[OpenBrowserClaw](https://github.com/sachaa/openbrowserclaw)** | Browser-native execution model (Web Worker agent, OPFS files, IndexedDB state), AES-256-GCM key management, v86-emulated Linux for bash-in-browser, zero-infrastructure offline mode | `eval()` in Worker (security risk), no DLP |
+| **McClawd v5** | Rig agent loop, MCP-first tools via AgentGateway, HookPipeline DLP (109 patterns), ClawHub client/installer, SKILL.md parser, workspace files, channel architecture (5 transports), swarm DAG + wave scheduler, **3-tier security scanner** (sidecar → snyk → 28-pattern static analysis) | Manual ReAct loop (Rig handles it) |
+| **[IronClaw](https://github.com/nearai/ironclaw)** | WASM sandbox for lightweight tools, capability-based permissions, credential injection at execution boundary, leak detection on outbound HTTP, **Firecracker microVM as Docker alternative** | NEAR AI default provider (we use Rig multi-provider), PostgreSQL-only storage, `iron-verify` (McClawd's scanner is more comprehensive) |
 | **[Pi/pi_agent_rust](https://github.com/Dicklesworthstone/pi_agent_rust)** | Progressive skill disclosure (97-char summaries, inject full context on demand), JSONL session persistence with tree branching, embedded QuickJS for OpenClaw TS extensions (224 verified) | Pi's custom agent loop (Rig is better), no MCP support, Pi's TUI |
-| **[OpenClaw](https://github.com/openclaw/openclaw)** | SKILL.md format (5,700 skills on ClawHub), workspace files (SOUL/AGENTS/USER/IDENTITY/TOOLS/HEARTBEAT.md), JSON5 config, mcporter concept, channel integrations | TypeScript runtime (we're Rust), permissive security model |
+| **[OpenClaw](https://github.com/openclaw/openclaw)** | SKILL.md format (5,700 skills on ClawHub), workspace files (SOUL/AGENTS/USER/IDENTITY/TOOLS/HEARTBEAT.md), **JSON5 as native config format**, mcporter concept, channel integrations | TypeScript runtime (we're Rust), permissive security model |
 
 ## Design Principles
 
@@ -23,7 +21,7 @@
 5. **OpenClaw-first** — Workspace files, SKILL.md format, JSON5 config, ClawHub registry are the native interface
 6. **Swarm-native** — Single agent and swarm are the same code path (swarm of 1 = single agent)
 7. **Firecracker-first, Docker-fallback** — microVMs for production isolation (168ms boot), Docker for development convenience
-8. **Skill verification before execution** — `iron-verify` static analysis on install, capability-based permissions at runtime
+8. **Skill verification before execution** — McClawd's 3-tier scanner (sidecar → snyk-agent-scan → 28-pattern static analysis), capability-based permissions at runtime
 9. **Progressive disclosure** — Skill summaries in prompt, full context injected on demand (from Pi)
 10. **Runs anywhere** — Local machine, OVH KS-1, any bare-metal with KVM, or cloud VMs with nested virt
 
@@ -387,7 +385,7 @@ runtime = "docker"
 │                                                             │
 │  Skills auto-install:                                       │
 │  1. ClawHub download → SKILL.md                             │
-│  2. iron-verify static analysis (from IronClaw)             │
+│  2. McClawd 3-tier security scan (sidecar/snyk/static)      │
 │  3. McPorter builds rootfs/image from install steps         │
 │  4. Container starts with MCP server                        │
 │  5. AgentGateway discovers tools automatically              │
@@ -397,21 +395,7 @@ runtime = "docker"
 └─────────────────────────────────────────────────────────────┘
          │
          ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Tier 3: Browser (from OpenBrowserClaw)                     │
-│  ──────────────────────────────────────                     │
-│  Tools: JS-native, WASM-compiled, v86-emulated bash         │
-│  Runtime: Web Worker + OPFS + IndexedDB                     │
-│  DLP: Same 109 patterns compiled to JS regex                │
-│  Security: AES-256-GCM keys in IndexedDB (from OBC)        │
-│  Sandbox: Browser origin sandbox + CSP                      │
-│                                                             │
-│  Use case: Offline mode, zero-server edge deployment        │
-│  Can connect to remote Tier 2 containers via WebSocket      │
-│                                                             │
-│  From OpenBrowserClaw: OPFS file storage, IndexedDB state,  │
-│  v86 Alpine Linux for bash, fetch API for HTTP tools        │
-└─────────────────────────────────────────────────────────────┘
+  (Browser tier removed — AgentGateway + Docker/Firecracker covers all use cases)
 ```
 
 ### 3.4 Remote Execution (OVH KS-1 / Bare Metal)
@@ -469,9 +453,9 @@ fn select_tier(skill: &LoadedSkill, config: &McclawdConfig) -> ExecutionTier {
 }
 ```
 
-### 3.6 Skill Verification Pipeline (from IronClaw)
+### 3.6 Skill Verification Pipeline (McClawd 3-Tier Scanner)
 
-Before any skill runs, it passes through verification:
+Before any skill runs, it passes through McClawd's 3-tier security scanner:
 
 ```
 mc skills install langextract
@@ -482,32 +466,27 @@ mc skills install langextract
 └────────────┬───────────────────────────────────────────────┘
              │
              ▼
-┌─ iron-verify Static Analysis (from IronClaw) ──────────────┐
+┌─ McClawd Security Scanner (3-tier fallback) ──────────────┐
 │                                                             │
-│  1. Capability audit:                                       │
-│     Does install step request network? ── log + warn        │
-│     Does it install a shell? ── flag for review             │
-│     Does it run as root? ── block unless --allow-root       │
+│  Tier 1: Security sidecar (if running)                     │
+│     POST /scan/skill with SKILL.md content                 │
+│     Full static analysis + capability audit                │
 │                                                             │
-│  2. Data flow analysis:                                     │
-│     Scan install steps for:                                 │
-│     • curl/wget to unknown domains ── warn                  │
-│     • pip install from non-PyPI sources ── block            │
-│     • git clone from non-verified repos ── warn             │
+│  Tier 2: snyk-agent-scan (fallback)                        │
+│     uvx snyk-agent-scan@latest --json --skills <path>      │
+│     External security analysis with 120s timeout           │
 │                                                             │
-│  3. Known vulnerability patterns:                           │
-│     • SQL injection in config templates                     │
-│     • Command injection in shell scripts                    │
-│     • Path traversal in file operations                     │
+│  Tier 3: Built-in static analysis (always available)       │
+│     28 security patterns across 4 categories:              │
+│     • Critical (E-codes): curl|sh, chmod 777, nc -l,      │
+│       /etc/shadow, keylogger, reverse shell                │
+│     • Warning (W-codes): sudo, eval(), exec(), .env,      │
+│       API keys, passwords, base64 decode, SSH keys,        │
+│       tokens, credentials, os.system, subprocess           │
+│     • Stub detection: SKILL.md < 500 bytes → NotScanned   │
 │                                                             │
-│  4. Capability declaration check:                           │
-│     SKILL.md ## Capabilities section must declare:          │
-│     - http: [list of allowed domains]                       │
-│     - fs: [list of allowed paths]                           │
-│     - exec: [list of allowed commands]                      │
-│     Missing declarations ── skill runs with zero access     │
-│                                                             │
-│  Result: PASS / WARN (install with warnings) / BLOCK        │
+│  Result: Pass / Warning / Critical / NotScanned            │
+│  Critical → blocks install (user can override with flag)   │
 └─────────────────────────────────────────────────────────────┘
              │
              ▼
@@ -1268,9 +1247,8 @@ This creates a new execution tier between Tier 0 (native Rust) and Tier 1 (Docke
 ```
 Tier 0:   Native Rust builtins (memory_store, memory_recall)
 Tier 0.5: QuickJS extensions (Pi/OpenClaw TS extensions) ← NEW
-Tier 1:   Docker MCP containers (langextract, etc.)
+Tier 1:   Docker MCP containers via AgentGateway (langextract, etc.)
 Tier 2:   WASM MCP servlets
-Tier 3:   Browser
 ```
 
 Benefits:

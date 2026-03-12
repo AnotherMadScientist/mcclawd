@@ -198,7 +198,7 @@ async fn connect_postgres(database_url: &str) -> anyhow::Result<PgTaskStore> {
     }
     Err(anyhow::anyhow!(
         "PostgreSQL is required but unavailable after 3 attempts: {}. \
-         Set database_url in ~/.mcclawd/config.toml or run: docker compose up -d postgres",
+         Set database_url in ~/.mcclawd/mcclawd.json or run: docker compose up -d postgres",
         last_err.unwrap_or_default()
     ))
 }
@@ -209,11 +209,11 @@ pub async fn execute(port: u16) -> anyhow::Result<()> {
     let config_path = dirs::home_dir()
         .unwrap_or_default()
         .join(".mcclawd")
-        .join("config.toml");
+        .join("mcclawd.json");
     let config = McclawdConfig::load(&config_path)?;
 
     // PostgreSQL is a required dependency — fail loudly if unavailable.
-    // Priority: DATABASE_URL env var > config.toml > constructed from POSTGRES_* env vars.
+    // Priority: DATABASE_URL env var > mcclawd.json > constructed from POSTGRES_* env vars.
     // In Docker Compose, set DATABASE_URL=postgresql://user:pass@postgres:5432/mcclawd
     // to use the service name on the internal network.
     let database_url = std::env::var("DATABASE_URL")

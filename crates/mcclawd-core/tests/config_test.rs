@@ -10,15 +10,16 @@ fn test_default_config() {
 }
 
 #[test]
-fn test_load_config_from_toml() {
+fn test_load_config_from_json5() {
     let mut f = NamedTempFile::new().unwrap();
     writeln!(
         f,
-        r#"
-[agent]
-max_turns = 10
-model = "claude-opus-4-5"
-"#
+        r#"{{
+            "agent": {{
+                "max_turns": 10,
+                "model": "claude-opus-4-5"
+            }}
+        }}"#
     )
     .unwrap();
 
@@ -30,7 +31,7 @@ model = "claude-opus-4-5"
 #[test]
 fn test_load_missing_config_returns_default() {
     let config =
-        McclawdConfig::load(std::path::Path::new("/nonexistent/config.toml")).unwrap();
+        McclawdConfig::load(std::path::Path::new("/nonexistent/mcclawd.json")).unwrap();
     assert_eq!(config.agent.max_turns, 20);
 }
 
@@ -42,11 +43,8 @@ fn config_has_agentgateway_url_default() {
 
 #[test]
 fn config_parses_agentgateway_url() {
-    let toml_str = r#"
-[mcp]
-agentgateway_url = "http://custom-host:9090"
-"#;
-    let config: McclawdConfig = toml::from_str(toml_str).unwrap();
+    let json_str = r#"{ "mcp": { "agentgateway_url": "http://custom-host:9090" } }"#;
+    let config: McclawdConfig = json5::from_str(json_str).unwrap();
     assert_eq!(config.mcp.agentgateway_url, "http://custom-host:9090");
 }
 

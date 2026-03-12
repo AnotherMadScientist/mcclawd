@@ -1,16 +1,16 @@
 # McClawd Architecture Overview
 
-> Docker-first. OpenClaw compatible. DLP on everything. Swarm-native.
+> OpenClaw-native. AgentGateway-first. DLP on everything. Swarm-native.
 > Abstract WASM/Firecracker later. Pluggable memory. Self-improving skills.
 
 ---
 
 ## What We Cherry-Pick and Why
 
-### From OpenClaw (ecosystem compatibility)
+### From OpenClaw (native format — not just compatibility)
 - **SKILL.md format** — 5,700 skills on ClawHub. Our native skill format.
 - **Workspace files** — SOUL.md, AGENTS.md, USER.md (+ IDENTITY.md, TOOLS.md, HEARTBEAT.md)
-- **JSON5 config** — openclaw.json / .mcp.json import path
+- **JSON5 config** — openclaw.json / .mcp.json is McClawd's native config format (no TOML)
 - **ClawHub registry** — skill search, download, versioning, dependency resolution
 - **mcporter concept** — skills declare install steps, runtime builds containers automatically
 
@@ -24,10 +24,10 @@
 - **Channel architecture** — 5 transport patterns behind uniform trait
 
 ### From IronClaw (security patterns — build, don't fork)
-- **iron-verify** — static analysis on SKILL.md install steps before running anything
 - **Capability-based permissions** — skills declare what they need (http, fs, exec, secrets)
 - **Credential injection at execution boundary** — secrets go to container, never to LLM
 - **Leak detection** — scan outbound HTTP for data exfiltration
+- ~~iron-verify~~ — McClawd's 3-tier scanner (sidecar → snyk → 28-pattern static analysis) is more comprehensive
 
 ### From Pi/pi_agent_rust (efficiency patterns)
 - **Progressive skill disclosure** — 97-char summaries in prompt, full context on demand
@@ -40,8 +40,7 @@
 | Custom ReAct loop | Pi, IronClaw | Rig handles it better with 20+ providers |
 | NEAR AI default | IronClaw | We use Rig multi-provider |
 | PostgreSQL-only storage | IronClaw | Pluggable backends instead |
-| eval() in Worker | OpenBrowserClaw | Security risk |
-| No DLP | OpenBrowserClaw | DLP is mandatory |
+| OpenBrowserClaw browser tier | OpenBrowserClaw | AgentGateway + Docker/Firecracker covers all use cases |
 | TypeScript runtime | OpenClaw | We're Rust-native |
 | Permissive security | OpenClaw | DLP on everything |
 | Pi's TUI | Pi | We have CLI + web UI |
@@ -64,7 +63,7 @@
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  │
 │  │   Channel    │  │   TaskMgr    │  │  SecretStore │  │  Config/CLI   │  │
 │  │  (inbound/   │  │  (lifecycle  │  │  (AES-256-   │  │  (clap +      │  │
-│  │   outbound)  │  │   + sched)   │  │   GCM-SIV)   │  │   mcclawd.toml│  │
+│  │   outbound)  │  │   + sched)   │  │   GCM-SIV)   │  │  mcclawd.json │  │
 │  └──────┬───────┘  └──────┬───────┘  └──────────────┘  └───────────────┘  │
 │         │                  │                                                │
 │         ▼                  ▼                                                │
@@ -170,7 +169,7 @@
    mc skills install langextract
    │
    ├──► ClawHub API: search, resolve version, download SKILL.md
-   ├──► iron-verify: static analysis on install steps (shell injection? root? unsafe URLs?)
+   ├──► McClawd 3-tier scanner: security scan on SKILL.md (sidecar → snyk → 28-pattern static analysis)
    ├──► Save to .mcclawd/skills/langextract/SKILL.md
    └──► Done. No code change. No recompile.
 
@@ -406,25 +405,29 @@ not model routing.
 
 ### Provider Configuration
 
-```toml
-# mcclawd.toml
-
-[providers.anthropic]
-api_key_secret = "ANTHROPIC_API_KEY"   # from SecretStore, never plaintext
-
-[providers.openai]
-api_key_secret = "OPENAI_API_KEY"
-
-[providers.ollama]
-url = "http://localhost:11434"          # no API key needed
-
-[providers.groq]
-api_key_secret = "GROQ_API_KEY"
-
-# Any OpenAI-compatible endpoint (vLLM, LM Studio, text-generation-inference)
-[providers.openai_compatible]
-url = "http://localhost:8000/v1"
-api_key_secret = "LOCAL_API_KEY"        # optional, some don't need it
+```json5
+// mcclawd.json (OpenClaw-native JSON5 config)
+{
+  "providers": {
+    "anthropic": {
+      "api_key_secret": "ANTHROPIC_API_KEY"   // from SecretStore, never plaintext
+    },
+    "openai": {
+      "api_key_secret": "OPENAI_API_KEY"
+    },
+    "ollama": {
+      "url": "http://localhost:11434"          // no API key needed
+    },
+    "groq": {
+      "api_key_secret": "GROQ_API_KEY"
+    },
+    // Any OpenAI-compatible endpoint (vLLM, LM Studio, text-generation-inference)
+    "openai_compatible": {
+      "url": "http://localhost:8000/v1",
+      "api_key_secret": "LOCAL_API_KEY"        // optional, some don't need it
+    }
+  }
+}
 ```
 
 ### Model Selection Per Agent
@@ -643,7 +646,7 @@ enum WorkerCount {
 Cargo.toml (workspace)
 ├── crates/
 │   ├── mcclawd-core        # Config, secrets, DLP (109 patterns), hooks, SKILL.md parser,
-│   │                        # ClawHub client, ToolResolver, identity (JWT), iron-verify
+│   │                        # ClawHub client, ToolResolver, identity (JWT), 3-tier scanner
 │   │
 │   ├── mcclawd-agent       # ContextBuilder (system prompt assembly), AgentEngine (Rig builder),
 │   │                        # WorkspaceLoader, AGENTS.md parser, progressive disclosure
@@ -709,7 +712,7 @@ pub trait ContainerRuntime: Send + Sync {
 | **Wire SwarmPlanner to LLM** | **Next** | McClawd v5 wiring |
 | **Wire WorkerAgent to Rig** | **Next** | McClawd v5 wiring |
 | **Progressive disclosure** | **Next** | Pi pattern |
-| **iron-verify** | **Next** | IronClaw pattern |
+| **3-tier security scanner** | **Built** | McClawd (sidecar → snyk → static) |
 | **Channel DLP** | **Next** | New |
 | **Shell injection fix** | **Next** | Security fix |
 | **Swarm patterns in AGENTS.md** | **Next** | New (templated wave planning) |

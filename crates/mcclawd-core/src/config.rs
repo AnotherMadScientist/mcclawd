@@ -394,25 +394,27 @@ pub fn detect_openclaw_config() -> Option<PathBuf> {
 }
 
 impl McclawdConfig {
+    /// Load config from a JSON5 file (OpenClaw-compatible format).
+    /// JSON5 supports comments, trailing commas, and unquoted keys.
     pub fn load(path: &Path) -> crate::Result<Self> {
         if path.exists() {
             let content = std::fs::read_to_string(path)
                 .map_err(|e| crate::McclawdError::Config(e.to_string()))?;
-            toml::from_str(&content).map_err(|e| crate::McclawdError::Config(e.to_string()))
+            json5::from_str(&content).map_err(|e| crate::McclawdError::Config(e.to_string()))
         } else {
             Ok(Self::default())
         }
     }
 
-    /// Write the current config to a TOML file on disk.
+    /// Write the current config as pretty-printed JSON (valid JSON5).
     pub fn save(&self, path: &Path) -> crate::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| crate::McclawdError::Config(format!("Cannot create config dir: {e}")))?;
         }
-        let toml_str = toml::to_string_pretty(self)
+        let json_str = serde_json::to_string_pretty(self)
             .map_err(|e| crate::McclawdError::Config(format!("Failed to serialize config: {e}")))?;
-        std::fs::write(path, toml_str)
+        std::fs::write(path, json_str)
             .map_err(|e| crate::McclawdError::Config(format!("Failed to write config: {e}")))?;
         Ok(())
     }
@@ -458,13 +460,14 @@ mod tests {
 
     #[test]
     fn test_config_with_skills_section_parsed() {
-        let toml_str = r#"
-[skills]
-managed_dir = "/custom/skills"
-clawhub_api = "https://custom.registry.io"
-cache_dir = "/custom/cache"
-"#;
-        let config: McclawdConfig = toml::from_str(toml_str).unwrap();
+        let json_str = r#"{
+            "skills": {
+                "managed_dir": "/custom/skills",
+                "clawhub_api": "https://custom.registry.io",
+                "cache_dir": "/custom/cache"
+            }
+        }"#;
+        let config: McclawdConfig = json5::from_str(json_str).unwrap();
         assert_eq!(config.skills.managed_dir, PathBuf::from("/custom/skills"));
         assert_eq!(config.skills.clawhub_api, "https://custom.registry.io");
         assert_eq!(config.skills.cache_dir, PathBuf::from("/custom/cache"));
@@ -472,11 +475,8 @@ cache_dir = "/custom/cache"
 
     #[test]
     fn test_config_skills_defaults_applied_when_missing() {
-        let toml_str = r#"
-[agent]
-max_turns = 10
-"#;
-        let config: McclawdConfig = toml::from_str(toml_str).unwrap();
+        let json_str = r#"{ "agent": { "max_turns": 10 } }"#;
+        let config: McclawdConfig = json5::from_str(json_str).unwrap();
         assert_eq!(config.skills.clawhub_api, "https://clawhub.ai");
         assert!(config.skills.managed_dir.ends_with("skills"));
         assert!(config.skills.cache_dir.ends_with("cache"));
@@ -511,19 +511,15 @@ max_turns = 10
     }
 
     #[test]
-    fn compat_config_deserializes_from_empty_toml() {
-        let toml_str = "";
-        let config: McclawdConfig = toml::from_str(toml_str).unwrap();
+    fn compat_config_deserializes_from_empty_json() {
+        let config: McclawdConfig = json5::from_str("{}").unwrap();
         assert!(config.compat.openclaw_config);
     }
 
     #[test]
     fn compat_config_deserializes_disabled() {
-        let toml_str = r#"
-[compat]
-openclaw_config = false
-"#;
-        let config: McclawdConfig = toml::from_str(toml_str).unwrap();
+        let json_str = r#"{ "compat": { "openclaw_config": false } }"#;
+        let config: McclawdConfig = json5::from_str(json_str).unwrap();
         assert!(!config.compat.openclaw_config);
     }
 
@@ -537,7 +533,7 @@ openclaw_config = false
     #[test]
     fn test_config_save_load_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
+        let path = dir.path().join("mcclawd.json");
 
         let mut config = McclawdConfig::default();
         config.agent.model = "gpt-4o".to_string();
@@ -555,7 +551,7 @@ openclaw_config = false
     #[test]
     fn test_config_save_creates_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nested").join("deep").join("config.toml");
+        let path = dir.path().join("nested").join("deep").join("mcclawd.json");
 
         let config = McclawdConfig::default();
         config.save(&path).unwrap();
@@ -565,7 +561,7 @@ openclaw_config = false
     #[test]
     fn test_config_save_preserves_other_fields() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
+        let path = dir.path().join("mcclawd.json");
 
         let mut config = McclawdConfig::default();
         config.agent.model = "custom-model".to_string();
