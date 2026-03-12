@@ -1053,68 +1053,30 @@ Same skill combination = same hash = cached image = instant start.
 
 ---
 
-## 9. Shared Memory Hierarchy
+## 9. Shared Memory
 
-### Level 1: In-Process (Current — Phase 0-2)
-
-```rust
-// Arc<DashMap<String, serde_json::Value>>
-// All workers in same tokio runtime share this
-let mem = GuardedSharedMemory::new(pipeline);
-mem.set("key", value).await;  // DLP-scanned
-let v: T = mem.get("key");    // instant
-```
-
-**Scope**: Single `mc` process. All swarm workers share it.
-**Persistence**: None — lost on process exit.
-**Concurrency**: Lock-free via DashMap.
-
-### Level 2: Persistent Scratchboard (Phase 2+)
-
-For cross-process scenarios (multiple `mc` instances, long-running swarms):
-
-```sql
-CREATE TABLE scratchboard (
-    swarm_id    UUID NOT NULL,
-    key         TEXT NOT NULL,
-    value       JSONB NOT NULL,
-    dlp_scanned BOOLEAN DEFAULT true,
-    created_by  TEXT,       -- worker agent ID
-    created_at  TIMESTAMPTZ DEFAULT NOW(),
-    PRIMARY KEY (swarm_id, key)
-);
-```
-
-Accessed via `SharedMemory` trait with a PostgreSQL backend:
+Two backends. DashMap now, PostgreSQL when we need persistence.
 
 ```rust
 pub trait SharedMemoryBackend: Send + Sync {
     async fn set(&self, key: &str, value: serde_json::Value);
     async fn get(&self, key: &str) -> Option<serde_json::Value>;
-    fn contains(&self, key: &str) -> bool;
     fn keys(&self) -> Vec<String>;
     fn snapshot(&self) -> HashMap<String, serde_json::Value>;
 }
 
-// Implementations:
-// - DashMapBackend (current, in-process)
-// - PostgresBackend (Phase 2+, persistent)
-// - RedisBackend (Phase 3+, distributed)
+// DashMapBackend  — in-memory, fast, lost on exit (current)
+// PostgresBackend — persistent, cross-session, JSONB storage (when needed)
 ```
 
-### Level 3: Cross-Tier Sync (Phase 3+)
+**DashMap** (now): All swarm workers in the same tokio runtime share an
+`Arc<DashMap<String, Value>>`. Lock-free, zero-config, instant.
 
-Browser ↔ Server via WebSocket:
+**PostgreSQL** (when needed): Same trait, persistent storage. Crash recovery,
+cross-session skill learnings, long-running swarms. Uses existing `database_url`
+from config — no new infrastructure.
 
-```
-Browser Worker                          Axum Server
-     │                                       │
-     │  WS: {"op":"set","key":"k","val":"v"} │
-     │  ─────────────────────────────────►   │
-     │                        DLP scan → store│
-     │  WS: {"op":"notify","key":"k"}        │
-     │  ◄─────────────────────────────────   │
-```
+Both wrapped by `GuardedSharedMemory` which DLP-scans every write.
 
 ---
 

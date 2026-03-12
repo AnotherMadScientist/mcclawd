@@ -121,7 +121,7 @@
 │                              ▼                                              │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
 │  │  GuardedSharedMemory                                                  │  │
-│  │  DLP on every write │ DashMap (Phase 0) │ PG/Redis (Phase 2+)        │  │
+│  │  DLP on every write │ DashMap (now) │ PostgreSQL (when needed)        │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 │                              │                                              │
 │                              ▼                                              │
@@ -265,7 +265,9 @@ mc run --swarm "Analyze all contracts in ~/Documents and write risk report with 
 
 ---
 
-## Memory Model (Pluggable)
+## Memory Model
+
+Two layers. That's it.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -280,64 +282,82 @@ mc run --swarm "Analyze all contracts in ~/Documents and write risk report with 
 │  │  fn keys(&self) -> Vec<String>;                            │ │
 │  │  fn snapshot(&self) -> HashMap<String, Value>;             │ │
 │  └────────────────────────────────────────────────────────────┘ │
-│           │              │              │              │         │
-│           ▼              ▼              ▼              ▼         │
-│  ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐  │
-│  │  DashMap   │ │  JSONL     │ │ PostgreSQL │ │   Redis    │  │
-│  │  (default) │ │  (persist) │ │ (shared)   │ │  (distrib) │  │
-│  │            │ │            │ │            │ │            │  │
-│  │  Phase 0   │ │  Phase 1   │ │  Phase 2   │ │  Phase 3   │  │
-│  │  In-memory │ │  File-back │ │  Multi-proc│ │  Multi-host│  │
-│  └────────────┘ └────────────┘ └────────────┘ └────────────┘  │
+│           │                    │                                  │
+│           ▼                    ▼                                  │
+│  ┌────────────────┐  ┌────────────────┐                         │
+│  │  DashMap        │  │  PostgreSQL     │                         │
+│  │  (default)      │  │  (persistent)   │                         │
+│  │                 │  │                 │                         │
+│  │  In-memory      │  │  JSONB storage  │                         │
+│  │  Fast, simple   │  │  Crash recovery │                         │
+│  │  Lost on exit   │  │  Cross-session  │                         │
+│  └────────────────┘  └────────────────┘                         │
 └─────────────────────────────────────────────────────────────────┘
 
-Key naming convention for swarms:
-  "{phase}:{subtask_id}"  →  "parse:pdf1", "analysis:contracts", "report:final"
+DashMap:    what we have now. Works for single-process swarms.
+PostgreSQL: add when we need persistence. Uses existing database_url config.
 
-Self-improving skills use memory to persist learnings:
-  "skill:langextract:perf_hints" → accumulated usage patterns
-  "skill:langextract:error_log"  → failure patterns for retry logic
+Key naming convention for swarms:
+  "{step}:{subtask_id}"  →  "parse:pdf1", "analysis:contracts", "report:final"
 ```
 
 ---
 
-## Self-Improving Skills
+## Self-Improving Skills (JSONL ↔ SharedMemory)
 
-Skills improve through feedback loops stored in SharedMemory:
+Two storage systems that feed each other:
+
+- **SharedMemory** — live working state during execution (DashMap or PG)
+- **JSONL session logs** — append-only record of every execution, persisted to disk
+
+They link bidirectionally:
 
 ```
-┌─ Skill Execution ──────────────────────────────────────────────┐
-│                                                                 │
-│  1. Agent calls skill tool (e.g., langextract.extract_text)     │
-│  2. GuardedTool wraps call with HookPipeline                    │
-│  3. Tool executes in Docker container via MCP                    │
-│  4. Result returns → DLP scanned                                 │
-│  5. Agent evaluates result quality                               │
-│                                                                 │
-│  If result was good:                                            │
-│    SharedMemory.set("skill:langextract:success_patterns", ...)  │
-│    → What prompts/params worked well                            │
-│                                                                 │
-│  If result was poor:                                            │
-│    SharedMemory.set("skill:langextract:error_patterns", ...)    │
-│    → What failed, how to retry differently                      │
-│                                                                 │
-│  Next invocation:                                               │
-│    ContextBuilder reads accumulated patterns from memory         │
-│    Injects hints: "For langextract, use extract_structured for  │
-│    complex layouts (learned from 5 prior runs)"                 │
-│                                                                 │
-│  With persistent backend (JSONL/PG):                            │
-│    Learnings survive across sessions                            │
-│    Swarm workers benefit from each other's learnings            │
-└─────────────────────────────────────────────────────────────────┘
+┌─ JSONL → SharedMemory (session start) ──────────────────────────┐
+│                                                                  │
+│  On task start, SessionLoader scans past JSONL logs for this     │
+│  skill and loads accumulated learnings into SharedMemory:        │
+│                                                                  │
+│  session_2024_03_10.jsonl:                                       │
+│    {"tool":"langextract.extract_text","status":"fail",           │
+│     "error":"scanned PDF, no text layer","duration_ms":1200}     │
+│    {"tool":"langextract.extract_structured","status":"ok",       │
+│     "note":"OCR mode worked on scanned PDF","duration_ms":3400}  │
+│                                                                  │
+│  → SharedMemory.set("skill:langextract:hints",                   │
+│      "For scanned PDFs use extract_structured with OCR mode.     │
+│       extract_text fails on documents without text layers.")     │
+│                                                                  │
+│  ContextBuilder reads these hints and injects them into the      │
+│  agent's system prompt. Agent executes better on first try.      │
+└──────────────────────────────────────────────────────────────────┘
 
-Self-improvement loop:
-  Execute → Evaluate → Store patterns → Inject context → Execute better
+┌─ SharedMemory → JSONL (during execution) ────────────────────────┐
+│                                                                   │
+│  Every tool call result is appended to the session JSONL:         │
+│                                                                   │
+│  Agent calls langextract.extract_text                             │
+│  → GuardedTool logs to JSONL: tool, args, result, duration, ok/fail│
+│  → If agent retries with different approach, that's logged too    │
+│  → Swarm worker outputs logged with subtask_id and wave           │
+│                                                                   │
+│  End of session: SessionCompactor summarizes patterns:            │
+│  "langextract: 5 calls, 4 success, 1 fail (scanned PDF).        │
+│   Best approach: extract_structured for unknown doc types."       │
+│  → Appended as summary entry in JSONL                             │
+│  → Available for next session's SharedMemory hydration            │
+└───────────────────────────────────────────────────────────────────┘
 
-Skills themselves don't change. The AGENT's usage of skills improves
-through accumulated context in SharedMemory.
+The loop:
+  Past JSONL → hydrate SharedMemory → agent uses hints →
+  executes → logs to JSONL → next session reads those logs → ...
+
+Skills themselves never change. The agent gets smarter about
+USING them through accumulated execution history.
 ```
+
+JSONL files live at `.mcclawd/sessions/{session_id}.jsonl`. One file per task/swarm.
+Compaction runs at session end to keep file sizes manageable.
 
 ---
 
@@ -453,9 +473,6 @@ pub trait ContainerRuntime: Send + Sync {
 | **iron-verify** | **Next** | IronClaw pattern |
 | **Channel DLP** | **Next** | New |
 | **Shell injection fix** | **Next** | Security fix |
-| JSONL session persistence | Phase 1+ | Pi pattern |
-| SharedMemoryBackend trait | Phase 1+ | New |
+| PostgreSQL memory backend | When needed | Persistence for SharedMemory |
 | IronBox/Firecracker runtime | Phase 2+ | IronBox |
 | WASM sandbox | Phase 2+ | IronClaw pattern |
-| QuickJS TS extensions | Phase 2+ | pi_agent_rust |
-| Browser tier | Phase 3+ | OpenBrowserClaw |
