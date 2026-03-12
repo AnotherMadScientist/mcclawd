@@ -3212,3 +3212,310 @@ uuid = { version = "1", features = ["v4"] }
 | Daemon supervisor built-in | ZeroClaw lesson: agents that crash at 3am need self-healing. Systemd unit is nice but the built-in supervisor works on macOS too. |
 | AgentGateway for all external tools | Don't build tool discovery, RBAC, server lifecycle. Gateway handles it. One integration point. |
 | Secrets via tmpfs not env vars | `docker inspect` reveals env vars. tmpfs mounts don't survive container stop. This is the Docker secrets pattern. |
+
+---
+
+## 21. End-to-End Task Flow (Implemented)
+
+This section documents the **actual** execution path as built, tracing a complex agent task from user input through container execution to streamed response. This is the ground truth — not aspirational.
+
+### 21a. Flow Diagram: Single Agent Task
+
+```
+User (Web UI / CLI / Channel)
+    │
+    │ POST /api/tasks { prompt, workspace, skills, tool_profile, attachments }
+    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Axum API Server (mcclawd-api)                                   │
+│                                                                  │
+│  1. Sanitize prompt (strip injection patterns)                   │
+│  2. Agent security validation (block secret refs, shell inject)  │
+│  3. Create TaskRecord (Pending → Running), persist to Postgres   │
+│  4. Create broadcast::channel<OutboundChunk> for streaming       │
+│  5. Store per-task skill selection                               │
+│  6. Spawn async: run_agent()                                     │
+│     └─→ return 201 + TaskResponse immediately                   │
+└──────────────────────┬───────────────────────────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  run_agent() — Sandbox Decision                                  │
+│                                                                  │
+│  Try Docker (SandboxOrchestrator::new() + health_check)          │
+│  ├─ Docker available → run_agent_sandboxed()                     │
+│  ├─ Docker unavailable + strict_sandbox=true → FAIL              │
+│  └─ Docker unavailable + strict_sandbox=false → run_agent_host() │
+└──────────────────────┬───────────────────────────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  run_agent_sandboxed()                                           │
+│                                                                  │
+│  1. Persist UserMessage chunk (for WS replay)                    │
+│  2. DLP scan on inbound prompt (security_pipeline.before_tool)   │
+│  3. StatusIndicator → Processing                                 │
+│  4. Check for existing PersistentHandle (reuse container)        │
+│     ├─ EXISTS: send_chat() via stdin to running container        │
+│     └─ NEW: create persistent container ───────────────────┐     │
+│                                                             │     │
+│  Container Creation:                                        │     │
+│  ┌──────────────────────────────────────────────────────┐  │     │
+│  │ a. McpPorter: discover MCP tools from AgentGateway   │  │     │
+│  │ b. Build AgentEnvironment:                           │  │     │
+│  │    - image: mcclawd-runner:latest                    │  │     │
+│  │    - network: mcclawd_tools (isolated per-task)      │  │     │
+│  │    - gateway_url for MCP access                      │  │     │
+│  │    - allowed_tools (from ToolProfile + allow/deny)   │  │     │
+│  │    - skill_context (selected skills only)            │  │     │
+│  │    - model selection                                 │  │     │
+│  │ c. Docker create_container:                          │  │     │
+│  │    - Mounts: /run/secrets/, /workspace/, /attachments│  │     │
+│  │    - Memory limit, PID limit, CPU limit              │  │     │
+│  │    - Network: mcclawd_tools                          │  │     │
+│  │    - CMD: ["agent-runner", "--server"]                │  │     │
+│  │ d. docker exec: write API key to /run/secrets/       │  │     │
+│  │ e. PersistentHandle::connect() (attach stdin/stdout) │  │     │
+│  └──────────────────────────────────────────────────────┘  │     │
+│                                                             │     │
+│  5. stream_agent_output() — read docker logs (JSONL)  ◀────┘     │
+│     Parse each line → OutboundChunk                              │
+│     Forward to broadcast::Sender → WebSocket → UI                │
+│     Persist to Postgres (chat_events)                            │
+│                                                                  │
+│  6. On Done chunk: mark task Completed/Failed in DB              │
+└──────────────────────────────────────────────────────────────────┘
+
+                       │
+                       ▼ (inside Docker container)
+┌──────────────────────────────────────────────────────────────────┐
+│  agent-runner --server (mcclawd-runner)                          │
+│                                                                  │
+│  Startup:                                                        │
+│  1. Wait for /run/secrets/ANTHROPIC_API_KEY (up to 15s)          │
+│  2. Load workspace from /workspace/ (SOUL.md, AGENTS.md, etc.)   │
+│  3. Build ContextBuilder with skill_context_override from env    │
+│  4. Build Rig agent (AgentEngine::build_task_agent):             │
+│     - System prompt from workspace + skills                      │
+│     - MemoryStore + MemoryRecall tools (GuardedTool wrapped)     │
+│     - MCP tools from AgentGateway (if connected)                 │
+│     - HookPipeline wrapping all tools (security)                 │
+│  5. Enter stdin read loop (server mode)                          │
+│                                                                  │
+│  Per-Message:                                                    │
+│  1. Read JSON from stdin: {"type":"chat","prompt":"..."}         │
+│  2. Augment prompt with /attachments (images → multimodal)       │
+│  3. Build Rig messages (history + current prompt)                │
+│  4. agent.multi_turn_stream(messages) → streaming response       │
+│  5. For each stream item:                                        │
+│     ├─ AssistantStart → emit TextDelta                           │
+│     ├─ ToolCall → emit ToolStart{name}                           │
+│     │   └─ Rig dispatches to MCP server or builtin tool          │
+│     │      └─ MCP call goes via AgentGateway HTTP                │
+│     ├─ ToolResult → emit ToolEnd{name, summary}                  │
+│     └─ AssistantEnd → emit Done                                  │
+│  6. All output as JSONL on stdout (captured by docker logs)      │
+│  7. Tracing as JSON on stderr                                    │
+└──────────────────────────────────────────────────────────────────┘
+
+                       │
+                       ▼ (back on host)
+┌──────────────────────────────────────────────────────────────────┐
+│  WebSocket Streaming (mcclawd-api/ws.rs)                         │
+│                                                                  │
+│  Client connects: GET /api/tasks/{id}/stream (WS upgrade)        │
+│  1. Replay persisted chunks from Postgres (history)              │
+│  2. Subscribe to broadcast::Receiver<OutboundChunk>              │
+│  3. Forward chunks to WS as JSON frames:                         │
+│     {"TextDelta": "Here's what I found..."}                      │
+│     {"ToolStart": {"name": "web_search"}}                        │
+│     {"ToolEnd": {"name": "web_search", "summary": "3 results"}}  │
+│     "Done"                                                       │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### 21b. Flow Diagram: Swarm Task
+
+```
+POST /api/swarms { prompt, pattern?, agent_ids? }
+    │
+    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  SwarmCoordinator                                                │
+│                                                                  │
+│  1. SwarmPlanner: LLM decomposes task into DAG                   │
+│     Tools: CreateSubtaskTool, AddDependencyTool, FinalizePlanTool│
+│     Reads AGENTS.md → AgentSpec → decides which workers/models   │
+│                                                                  │
+│  2. TaskDag: topological sort into waves                         │
+│     Wave 0: [subtask_a]             (no deps, runs first)        │
+│     Wave 1: [subtask_b, subtask_c]  (depend on a, run parallel)  │
+│     Wave 2: [subtask_d]             (depends on b+c, merges)     │
+│                                                                  │
+│  3. Per wave: spawn WorkerAgent instances                        │
+│     Each worker gets:                                            │
+│     - Own Docker container (same sandbox flow as single agent)   │
+│     - Skills from AGENTS.md agent spec                           │
+│     - Model from agent spec                                      │
+│     - SharedMemory (Arc<DashMap>) for cross-worker state         │
+│     - Dependency outputs from completed workers                  │
+│                                                                  │
+│  4. OutputMerger: collect results, apply MergeStrategy            │
+│     Strategies: Concatenate | Summarize | StructuredReport       │
+│     Planner may replan if results are insufficient               │
+│                                                                  │
+│  5. Final result streamed back via same OutboundChunk protocol   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### 21c. Security Pipeline Flow (Per Tool Call)
+
+```
+Tool Call (from Rig agent loop)
+    │
+    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  HookPipeline (GuardedTool wrapper)                              │
+│                                                                  │
+│  Stage 1: RedactionTokenizer                                     │
+│  ├─ Scan tool input for secrets/PII                              │
+│  ├─ Replace with typed tokens: {SECRET:API_KEY:...xxxx}          │
+│  └─ Store originals in per-task RedactionVault                   │
+│                                                                  │
+│  Stage 2: DLP Hook (109 regex patterns)                          │
+│  ├─ Credit cards, SSNs, API keys, private keys, JWTs            │
+│  ├─ Score confidence per match                                   │
+│  └─ Accumulate PendingFindings in SecurityContext                │
+│                                                                  │
+│  Stage 3: SecretScanner (Shannon entropy)                        │
+│  ├─ Detect high-entropy strings that look like secrets           │
+│  └─ Flag if above threshold                                      │
+│                                                                  │
+│  Stage 4: SecuritySidecar (optional, container-based)            │
+│  ├─ External prompt injection detection                          │
+│  └─ Returns threat assessment                                    │
+│                                                                  │
+│  Stage 5: Audit Hook                                             │
+│  ├─ Persist SecurityEvents + DlpFindings to Postgres             │
+│  ├─ Emit tracing events                                          │
+│  └─ If threat_level ≥ dangerous → BLOCK call                     │
+│                                                                  │
+│  Decision:                                                       │
+│  ├─ HookAction::Allow → execute tool                             │
+│  ├─ HookAction::AllowWithWarning → execute + log warning         │
+│  └─ HookAction::Block → reject, return error to agent            │
+│                                                                  │
+│  After tool execution:                                           │
+│  ├─ Scan tool OUTPUT through same pipeline                       │
+│  ├─ Redact any secrets leaked in output                          │
+│  └─ De-tokenize (restore originals for tool dispatch only)       │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### 21d. Secret Flow (End-to-End)
+
+```
+mc secrets set ANTHROPIC_API_KEY
+    │
+    ▼
+┌────────────────────────────────────┐
+│ EncryptedFileBackend               │
+│ 1. Derive AES-256 key via argon2  │
+│    (from vault.key, fixed salt)    │
+│ 2. Encrypt JSON blob with GCM-SIV │
+│ 3. Atomic write: tmp + rename      │
+│ → ~/.mcclawd/secrets.enc           │
+└────────────────────────────────────┘
+
+Task execution needs API key:
+┌────────────────────────────────────┐
+│ SandboxOrchestrator                │
+│ 1. Read from SecretBackend         │
+│ 2. docker exec: write to container │
+│    at /run/secrets/ANTHROPIC_API_KEY│
+│ 3. Mode 0600, tmpfs mount          │
+│ 4. Container reads from file       │
+│    (NEVER from env vars)           │
+│ 5. Secret never in LLM context     │
+│ 6. Secret never in docker inspect  │
+│ 7. Audit log: secret.accessed      │
+└────────────────────────────────────┘
+```
+
+---
+
+## 22. Remaining Architecture Gaps
+
+### 22a. Must Define Now (Wave 1)
+
+**Gap 1: Secret Descriptors + Token Substitution**
+
+Secrets are flat key-value today. Need:
+- Optional descriptor/environment tag per secret (e.g. `prod`, `staging`, `dev`)
+- Token substitution in MCP server configs: `${SECRET_NAME}` → resolved value
+- Secret scoping per MCP server and per skill (as specced in §11c but not implemented)
+
+Proposed:
+```
+mc secrets set ANTHROPIC_API_KEY --descriptor prod
+mc secrets set ANTHROPIC_API_KEY --descriptor staging
+
+# List shows:
+# ANTHROPIC_API_KEY [prod] ****...****
+# ANTHROPIC_API_KEY [staging] ****...****
+
+# Config references:
+# { "env": { "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY:prod}" } }
+# Falls back to untagged if descriptor not found
+```
+
+**Gap 2: Provider Pool Failover**
+
+`providers/pool.rs` exists but needs:
+- Model selection per agent (from AGENTS.md `model` field)
+- Retry with fallback provider chain
+- Budget/rate limiting per provider
+- Streaming error recovery (reconnect mid-stream)
+
+**Gap 3: Channel → Pipeline Integration**
+
+Channel adapters (Telegram, Discord, Slack, WhatsApp, Email) are built but:
+- API routes return stubs (`GET /api/channels` → empty)
+- `InboundPipeline` is Phase 0 passthrough (no dedup, access control, routing, debounce)
+- Channel lifecycle (start/stop/health) not connected to daemon
+- Multi-channel routing via Bindings not wired
+
+**Gap 4: Redaction System Documentation**
+
+`RedactionVault` + `RedactionTokenizer` (commit 0a2aacd) needs architecture section:
+- How typed tokens (`{SECRET:API_KEY:…SUFFIX}`) flow through the pipeline
+- Per-task vault lifecycle (create on task start, destroy on task end)
+- De-tokenization rules (only for tool dispatch, never for LLM context)
+
+**Gap 5: Architecture Doc Drift**
+
+The doc references TOML config, manual ReAct loop, and Phase 0-only features. Reality:
+- Config is JSON5 (OpenClaw-native)
+- Agent loop is Rig-managed (no manual ReAct)
+- Security pipeline, UI, WebAuthn, skills, swarms all implemented
+- Doc needs reconciliation with actual codebase
+
+### 22b. Container Work (In Scope)
+
+| Item | Status | Notes |
+|------|--------|-------|
+| Per-task container networking isolation | Partial — uses shared `mcclawd_tools` network | Need per-task network or network policies |
+| Sandbox volume mounting | Implemented — /workspace, /attachments, /run/secrets | Need configurable user volumes from config |
+| Container GC | Partial — periodic Docker prune exists | Need task-aware cleanup (orphan detection) |
+| Sidecar lifecycle | Specced (WhatsApp Baileys, Signal) | Need start/stop/health management in daemon |
+| MCP server containerization | Working via AgentGateway + compose | Need dynamic MCP container spawn from config |
+| Secret delivery via tmpfs | Implemented — docker exec writes to /run/secrets/ | Working correctly |
+| Resource limits | Implemented — memory, CPU, PID limits in SandboxConfig | Working correctly |
+
+### 22c. Deferred (Not In Scope)
+
+- ~~IronBox / Firecracker sandbox~~ — Docker containers only
+- ~~WASM runtime~~ — not needed
+- ~~SPIFFE/SPIRE identity~~ — JWT is sufficient for now
+- ~~Native Rust plugin SDK~~ — all tools via MCP
+- ~~DLP taint tracking~~ — hook infrastructure ready, implementation later
