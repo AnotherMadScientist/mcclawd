@@ -398,6 +398,245 @@ Every boundary is scanned. No exceptions.
 
 ---
 
+## Multi-Model Support
+
+Rig 0.31 natively supports 20+ LLM providers. We don't need LiteLLM or vLLM
+as a proxy — Rig handles routing directly. AgentGateway is for MCP tool calls,
+not model routing.
+
+### Provider Configuration
+
+```toml
+# mcclawd.toml
+
+[providers.anthropic]
+api_key_secret = "ANTHROPIC_API_KEY"   # from SecretStore, never plaintext
+
+[providers.openai]
+api_key_secret = "OPENAI_API_KEY"
+
+[providers.ollama]
+url = "http://localhost:11434"          # no API key needed
+
+[providers.groq]
+api_key_secret = "GROQ_API_KEY"
+
+# Any OpenAI-compatible endpoint (vLLM, LM Studio, text-generation-inference)
+[providers.openai_compatible]
+url = "http://localhost:8000/v1"
+api_key_secret = "LOCAL_API_KEY"        # optional, some don't need it
+```
+
+### Model Selection Per Agent
+
+Each agent in AGENTS.md can specify its own model. This lets you use
+expensive models for planning and cheap/local models for workers:
+
+```markdown
+### planner
+- **Model:** claude-sonnet-4-20250514         ← cloud, good at planning
+- **Skills:** none
+- **Specialty:** Task decomposition
+
+### researcher
+- **Model:** claude-haiku-4-5-20251001        ← cloud, fast + cheap
+- **Skills:** web-search, fetch-url
+
+### coder
+- **Model:** ollama/deepseek-coder-v2:33b     ← local, free, good at code
+- **Skills:** filesystem, code-analysis
+
+### analyst
+- **Model:** groq/llama-3.3-70b-versatile     ← Groq, fast inference
+- **Skills:** filesystem
+```
+
+Model string format: `provider/model_name` or just `model_name` (defaults to Anthropic).
+
+### How It Works in AgentEngine
+
+```rust
+/// Resolve model string to a Rig completion model.
+/// "claude-sonnet-4-20250514"          → Anthropic (default)
+/// "ollama/deepseek-coder-v2:33b"      → Ollama at configured URL
+/// "openai/gpt-4o"                     → OpenAI
+/// "groq/llama-3.3-70b-versatile"      → Groq
+/// "openai_compatible/my-local-model"  → Custom OpenAI-compatible endpoint
+fn resolve_model(model: &str, config: &ProvidersConfig) -> Box<dyn CompletionModel> {
+    match model.split_once('/') {
+        Some(("ollama", name)) => ollama_client(config).completion_model(name),
+        Some(("openai", name)) => openai_client(config).completion_model(name),
+        Some(("groq", name))   => groq_client(config).completion_model(name),
+        Some(("openai_compatible", name)) => openai_compat_client(config).completion_model(name),
+        _ => anthropic_client(config).completion_model(model),  // default
+    }
+}
+```
+
+Rig's trait-based design means GuardedTool, HookPipeline, MCP tools — everything
+works identically regardless of which model backend is in use. The model is just
+the brain; the tooling infrastructure is model-agnostic.
+
+### When You'd Still Want LiteLLM or vLLM
+
+| Tool | When to use it | When NOT to use it |
+|---|---|---|
+| **vLLM** | Serving your own fine-tuned models on GPU | Just using Ollama or cloud APIs |
+| **LiteLLM** | Need unified cost tracking / rate limiting across many keys | Rig already handles multi-provider natively |
+| **Ollama** | Running open models locally (llama, deepseek, mistral, phi) | Need GPU-optimized batch inference (use vLLM) |
+
+If you run vLLM, just point `openai_compatible` at it — vLLM exposes an OpenAI-compatible API.
+
+---
+
+## Swarm Patterns (AGENTS.md)
+
+Swarm patterns are predefined wave templates defined in AGENTS.md.
+The SwarmPlanner pattern-matches the user prompt against triggers,
+then uses the template as scaffolding instead of planning from scratch.
+
+### AGENTS.md Format (Extended)
+
+```markdown
+# Agents
+
+## Default Skills
+- memory
+- filesystem
+
+## Available Agents
+
+### researcher
+- **Specialty:** Web research and source gathering
+- **Model:** claude-haiku-4-5-20251001
+- **Skills:**
+  - web-search
+  - fetch-url
+- **Delegate when:** User asks to find, search, or investigate
+
+### coder
+- **Specialty:** Code generation, file operations, document extraction
+- **Model:** ollama/deepseek-coder-v2:33b
+- **Skills:**
+  - filesystem
+  - langextract
+  - code-analysis
+
+### analyst
+- **Specialty:** Analysis, synthesis, report writing
+- **Model:** claude-sonnet-4-20250514
+- **Skills:**
+  - filesystem
+
+## Delegation Rules
+- Default: analyst
+- Research tasks: researcher + analyst
+- Code tasks: coder, then analyst for review
+- Complex tasks: all roles, analyst merges
+
+## Swarm Patterns
+
+### deep-research
+- **Trigger:** research, investigate, survey, compare, "what is", "how does"
+- **Waves:**
+  1. researcher × 3 (parallel, different search angles)
+  2. analyst (extract findings, identify gaps)
+  3. researcher × N (one per gap) [replan]
+  4. analyst (synthesize with citations)
+- **Replan:** up to 3 rounds on gaps
+- **Merge:** LlmSynthesis
+
+### code-review
+- **Trigger:** review, audit, check code, security review
+- **Waves:**
+  1. coder (read and analyze code)
+  2. researcher (search for known issues, best practices)
+  3. analyst (write review with recommendations)
+- **Merge:** Concatenate
+
+### extract-and-analyze
+- **Trigger:** extract, parse, analyze documents, summarize files
+- **Waves:**
+  1. coder × N (one per input file, parallel) [langextract]
+  2. analyst (cross-document analysis)
+  3. researcher (web references if needed)
+  4. analyst (final report)
+- **Merge:** LlmSynthesis
+
+### code-and-test
+- **Trigger:** implement, build, create, code
+- **Waves:**
+  1. researcher (understand requirements, find examples)
+  2. coder (implement)
+  3. coder (write tests)
+  4. analyst (review and document)
+- **Merge:** LastNode
+```
+
+### How Pattern Matching Works
+
+```
+User: "Research how modern LLM routing architectures compare"
+                │
+                ▼
+SwarmPlanner receives prompt + AgentsConfig
+                │
+                ├─ Check "## Swarm Patterns" triggers:
+                │   "deep-research" triggers: ["research", "compare"] ← MATCH
+                │
+                ├─ Load wave template from deep-research pattern
+                │   Wave 1: researcher × 3, parallel
+                │   Wave 2: analyst, extract + gap detect
+                │   Wave 3: researcher × N, replan on gaps
+                │   Wave 4: analyst, synthesize
+                │
+                ├─ LLM fills in specifics:
+                │   - What each researcher should search for
+                │   - Specific prompts for each subtask
+                │   - Input/output key names
+                │
+                └─ Returns populated TaskDag
+
+No pattern match? → LLM plans from scratch using available roles.
+Pattern match?    → LLM uses template as scaffolding (faster, more consistent).
+```
+
+### Parsed Structures
+
+```rust
+/// A predefined swarm pattern from AGENTS.md
+struct SwarmPattern {
+    name: String,
+    triggers: Vec<String>,
+    waves: Vec<WaveTemplate>,
+    max_replan_depth: usize,
+    merge_strategy: MergeStrategy,
+}
+
+/// A wave template — role + count, not yet filled with specific prompts
+struct WaveTemplate {
+    role: String,
+    count: WorkerCount,
+    replan: bool,           // is this a replan-triggered wave?
+    skills_override: Vec<String>,  // override role's default skills
+}
+
+enum WorkerCount {
+    Fixed(usize),   // "× 3" → Fixed(3)
+    PerInput,       // "× N (one per input file)" → PerInput
+}
+```
+
+### Why Markdown, Not TOML/YAML
+
+- Users already write AGENTS.md — swarm patterns are a natural extension
+- LLM-readable: the planner agent can read the raw markdown to understand patterns
+- Human-editable: no syntax errors from YAML indentation
+- Version-controlled alongside SOUL.md, USER.md
+- OpenClaw compatible: workspace files are all markdown
+
+---
+
 ## Crate Map
 
 ```
@@ -473,6 +712,9 @@ pub trait ContainerRuntime: Send + Sync {
 | **iron-verify** | **Next** | IronClaw pattern |
 | **Channel DLP** | **Next** | New |
 | **Shell injection fix** | **Next** | Security fix |
+| **Swarm patterns in AGENTS.md** | **Next** | New (templated wave planning) |
+| **Multi-model resolve_model()** | **Next** | Rig multi-provider |
+| **AGENTS.md parser: patterns + model** | **Next** | Parser extension |
 | PostgreSQL memory backend | When needed | Persistence for SharedMemory |
 | IronBox/Firecracker runtime | Phase 2+ | IronBox |
 | WASM sandbox | Phase 2+ | IronClaw pattern |
