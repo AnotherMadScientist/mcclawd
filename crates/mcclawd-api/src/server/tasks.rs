@@ -608,17 +608,23 @@ async fn run_agent_sandboxed(
         });
     }
 
-    // Check for task attachments directory
+    // Always create the attachments directory and mount it into the container.
+    // Even if no files are uploaded yet, the bind mount must exist so that
+    // files uploaded later (via POST /api/tasks/{id}/attachments) are visible
+    // inside the running container at /attachments.
     let att_dir = config
         .data_dir
         .join("tasks")
         .join(&task_id.0)
         .join("attachments");
-    let attachments_dir = if att_dir.is_dir() {
-        Some(att_dir.to_string_lossy().to_string())
-    } else {
-        None
-    };
+    if let Err(e) = std::fs::create_dir_all(&att_dir) {
+        tracing::warn!(
+            task_id = %task_id.0,
+            error = %e,
+            "Failed to create attachments dir for container mount"
+        );
+    }
+    let attachments_dir = Some(att_dir.to_string_lossy().to_string());
 
     // Generate JWT identity token for the container agent
     {
@@ -1350,6 +1356,81 @@ pub async fn upload_attachments(
     }
 
     tracing::info!(task_id = %id, count = results.len(), "Attachments uploaded");
+
+    // If a persistent container is already running for this task, copy files into it.
+    // The container may have been created before files were uploaded (no bind mount),
+    // or may have been created with an empty bind mount. For bind-mount containers,
+    // files are already visible, but docker cp ensures coverage for edge cases.
+    {
+        let task_id_typed = TaskId(id.clone());
+        let containers = state.task_containers.read().await;
+        if let Some(handle) = containers.get(&task_id_typed) {
+            let cid = handle.container_id.clone();
+            drop(containers); // Release read lock
+            if let Ok(docker) = bollard::Docker::connect_with_local_defaults() {
+                // Ensure /attachments directory exists inside the container
+                let mkdir_exec = docker
+                    .create_exec(
+                        &cid,
+                        bollard::exec::CreateExecOptions {
+                            cmd: Some(vec![
+                                "sh".to_string(),
+                                "-c".to_string(),
+                                "mkdir -p /attachments".to_string(),
+                            ]),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                if let Ok(exec) = mkdir_exec {
+                    let _ = docker
+                        .start_exec(
+                            &exec.id,
+                            Some(bollard::exec::StartExecOptions {
+                                detach: true,
+                                ..Default::default()
+                            }),
+                        )
+                        .await;
+                }
+
+                // Copy each uploaded file into the container
+                for meta in &results {
+                    let src_path = dir.join(&meta.name);
+                    if let Ok(data) = tokio::fs::read(&src_path).await {
+                        // Build a tar archive containing the single file
+                        let mut tar_buf = Vec::new();
+                        {
+                            let mut builder = tar::Builder::new(&mut tar_buf);
+                            let mut header = tar::Header::new_gnu();
+                            header.set_size(data.len() as u64);
+                            header.set_mode(0o644);
+                            header.set_cksum();
+                            builder
+                                .append_data(&mut header, &meta.name, &data[..])
+                                .ok();
+                            builder.finish().ok();
+                        }
+                        let _ = docker
+                            .upload_to_container::<String>(
+                                &cid,
+                                Some(bollard::container::UploadToContainerOptions {
+                                    path: "/attachments".to_string(),
+                                    ..Default::default()
+                                }),
+                                tar_buf.into(),
+                            )
+                            .await;
+                        tracing::debug!(
+                            container_id = %cid,
+                            file = %meta.name,
+                            "Copied attachment into running container"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     // Emit attachment event to the task stream for conversation history
     let attachment_infos: Vec<mcclawd_channels::AttachmentInfo> = results

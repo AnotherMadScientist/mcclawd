@@ -23,3 +23,6 @@ anyhow = { workspace = true }
 futures = { workspace = true }
 base64 = "0.22"
 mime_guess = "2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

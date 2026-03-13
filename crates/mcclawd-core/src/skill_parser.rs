@@ -497,4 +497,66 @@ TIMEOUT=60
         assert_eq!(skill.author, "");
         assert_eq!(skill.description, "");
     }
+
+    #[test]
+    fn test_doc_analyzer_skill_parses() {
+        let content = r#"---
+name: doc-analyzer
+version: 2.0.0
+author: mcclawd-team
+description: Use when the user uploads documents for analysis.
+tags:
+  - documents
+  - analysis
+---
+# Document Analyzer
+
+## Description
+Analyze uploaded documents by extracting content with MCP tools.
+
+## MCP Tools
+- filesystem
+- langextract
+- scrapling
+
+## Context
+You are a document analysis expert.
+
+## Instructions
+When the user uploads a document:
+1. List attachments
+2. Extract content
+3. Produce analysis
+"#;
+        let skill = parse_skill_md(content).unwrap();
+        assert_eq!(skill.name, "doc-analyzer");
+        assert_eq!(skill.version, "2.0.0");
+        assert_eq!(skill.author, "mcclawd-team");
+        // ## Description overrides frontmatter description
+        assert!(skill.description.contains("Analyze uploaded documents"));
+        assert_eq!(skill.mcp_tools, vec!["filesystem", "langextract", "scrapling"]);
+        assert!(skill.context.contains("document analysis expert"));
+        assert!(skill.instructions.contains("List attachments"));
+    }
+
+    #[test]
+    fn test_doc_analyzer_mcp_tools_match_gateway() {
+        // Verify that the doc-analyzer skill's MCP tool names match the
+        // AgentGateway target names (filesystem, langextract, scrapling)
+        let content = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join(".mcclawd/skills/doc-analyzer/SKILL.md"),
+        );
+        if let Ok(content) = content {
+            let skill = parse_skill_md(&content).unwrap();
+            assert!(skill.mcp_tools.contains(&"filesystem".to_string()));
+            assert!(skill.mcp_tools.contains(&"langextract".to_string()));
+            assert!(skill.mcp_tools.contains(&"scrapling".to_string()));
+        }
+        // Skip if file doesn't exist (CI without workspace)
+    }
 }
