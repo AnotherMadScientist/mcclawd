@@ -503,9 +503,14 @@ function CreditsCard({ credits, period, periodSpend }: { credits?: CreditsRespon
       <p className="text-[10px] text-muted-foreground mt-1">
         {isAdmin ? "via Anthropic Admin API" : "estimated from local tracking"}
       </p>
-      {!credits?.available && (
+      {credits && !credits.api_key_valid && (
+        <p className="text-[10px] text-destructive/80 mt-1">
+          {credits.api_key_status ?? "API key issue — check Secrets"}
+        </p>
+      )}
+      {credits?.api_key_valid && !isAdmin && (
         <p className="text-[10px] text-muted-foreground/60 mt-1">
-          Add ANTHROPIC_ADMIN_KEY in Secrets for real cost data
+          API key valid. Add ANTHROPIC_ADMIN_KEY for precise cost data.
         </p>
       )}
     </div>

@@ -1562,26 +1562,48 @@ pub async fn transcribe_audio(
             break;
         }
     }
-    let audio_bytes = audio_data.ok_or(StatusCode::BAD_REQUEST)?;
+    let audio_bytes = match audio_data {
+        Some(b) if !b.is_empty() => b,
+        _ => {
+            tracing::warn!("Transcribe called with no/empty audio data");
+            return Ok(Json(serde_json::json!({ "error": "No audio data received" })));
+        }
+    };
+
+    tracing::info!(size = audio_bytes.len(), "Transcribe request received");
 
     // 2. Try OpenAI Whisper first, fall back to ElevenLabs
     let secrets = state.secrets.read().await;
     let backend = match secrets.as_ref() {
         Some(b) => b,
         None => {
-            return Ok(Json(serde_json::json!({ "error": "Vault locked" })));
+            tracing::warn!("Transcribe called but vault is not loaded");
+            return Ok(Json(serde_json::json!({ "error": "Vault not loaded. Restart server or run `mc secrets init`." })));
         }
     };
 
     // Try OPENAI_API_KEY first (primary — Whisper API)
     let openai_key = match backend.get("OPENAI_API_KEY").await {
-        Ok(Some(key)) if !key.is_empty() => Some(key),
-        _ => None,
+        Ok(Some(key)) if !key.is_empty() => {
+            tracing::debug!("Found OPENAI_API_KEY in vault");
+            Some(key)
+        }
+        Ok(_) => {
+            tracing::debug!("OPENAI_API_KEY not set or empty");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to read OPENAI_API_KEY from vault");
+            None
+        }
     };
 
     // Try ELEVENLABS_API_KEY as fallback
     let elevenlabs_key = match backend.get("ELEVENLABS_API_KEY").await {
-        Ok(Some(key)) if !key.is_empty() => Some(key),
+        Ok(Some(key)) if !key.is_empty() => {
+            tracing::debug!("Found ELEVENLABS_API_KEY in vault");
+            Some(key)
+        }
         _ => None,
     };
 
@@ -1589,15 +1611,18 @@ pub async fn transcribe_audio(
     drop(secrets);
 
     if openai_key.is_none() && elevenlabs_key.is_none() {
+        tracing::warn!("No STT API key configured");
         return Ok(Json(serde_json::json!({
-            "error": "No speech-to-text API key configured. Set OPENAI_API_KEY or ELEVENLABS_API_KEY in secrets."
+            "error": "No speech-to-text API key configured. Set OPENAI_API_KEY or ELEVENLABS_API_KEY in Secrets."
         })));
     }
 
     let client = reqwest::Client::new();
+    let mut last_error: Option<String> = None;
 
     // 3a. Try OpenAI Whisper API
     if let Some(api_key) = openai_key {
+        tracing::info!("Attempting OpenAI Whisper transcription");
         let part = reqwest::multipart::Part::bytes(audio_bytes.clone())
             .file_name("audio.webm")
             .mime_str("audio/webm")
@@ -1618,21 +1643,25 @@ pub async fn transcribe_audio(
             Ok(r) if r.status().is_success() => {
                 let body: serde_json::Value = r.json().await.unwrap_or_default();
                 let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                tracing::info!(text_len = text.len(), "Whisper transcription succeeded");
                 return Ok(Json(serde_json::json!({ "text": text })));
             }
             Ok(r) => {
                 let status = r.status().as_u16();
                 let body = r.text().await.unwrap_or_default();
                 tracing::warn!(status, body = %body, "OpenAI Whisper failed, trying fallback");
+                last_error = Some(format!("OpenAI Whisper {status}: {body}"));
             }
             Err(e) => {
                 tracing::warn!(error = %e, "OpenAI Whisper network error, trying fallback");
+                last_error = Some(format!("OpenAI network error: {e}"));
             }
         }
     }
 
     // 3b. Fallback to ElevenLabs STT
     if let Some(api_key) = elevenlabs_key {
+        tracing::info!("Attempting ElevenLabs STT transcription");
         let part = reqwest::multipart::Part::bytes(audio_bytes)
             .file_name("audio.webm")
             .mime_str("application/octet-stream")
@@ -1653,28 +1682,25 @@ pub async fn transcribe_audio(
             Ok(r) if r.status().is_success() => {
                 let body: serde_json::Value = r.json().await.unwrap_or_default();
                 let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                tracing::info!(text_len = text.len(), "ElevenLabs transcription succeeded");
                 return Ok(Json(serde_json::json!({ "text": text })));
             }
             Ok(r) => {
                 let status = r.status().as_u16();
                 let body = r.text().await.unwrap_or_default();
                 tracing::error!(status, body = %body, "ElevenLabs STT failed");
-                return Ok(Json(
-                    serde_json::json!({ "error": format!("ElevenLabs {status}: {body}") }),
-                ));
+                last_error = Some(format!("ElevenLabs {status}: {body}"));
             }
             Err(e) => {
                 tracing::error!(error = %e, "ElevenLabs STT network error");
-                return Ok(Json(
-                    serde_json::json!({ "error": format!("Network error: {e}") }),
-                ));
+                last_error = Some(format!("ElevenLabs network error: {e}"));
             }
         }
     }
 
-    Ok(Json(
-        serde_json::json!({ "error": "All speech-to-text backends failed" }),
-    ))
+    let err_msg = last_error.unwrap_or_else(|| "All speech-to-text backends failed".to_string());
+    tracing::error!(error = %err_msg, "Transcription failed");
+    Ok(Json(serde_json::json!({ "error": err_msg })))
 }
 
 pub async fn get_container_info(

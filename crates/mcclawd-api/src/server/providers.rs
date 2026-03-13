@@ -124,9 +124,15 @@ pub async fn budget_info(State(state): State<AppState>) -> Json<BudgetInfo> {
 /// Response for the credits endpoint.
 #[derive(Debug, Serialize)]
 pub struct CreditsResponse {
+    /// Whether cost data is available (admin API or local tracking).
     pub available: bool,
     pub monthly_cost_usd: f64,
     pub source: String,
+    /// Whether the primary LLM API key is valid and has credits.
+    pub api_key_valid: bool,
+    /// Human-readable status of the API key check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_status: Option<String>,
     /// Admin API error message, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -134,53 +140,109 @@ pub struct CreditsResponse {
 
 /// GET /api/providers/credits -- account credit/cost info.
 ///
-/// If ANTHROPIC_ADMIN_KEY is set in secrets, attempts to fetch real cost data
-/// from the Anthropic Admin API. Otherwise falls back to local usage tracking.
+/// Returns cost data from Admin API (if key set) or local tracking, plus
+/// a lightweight validation of the primary ANTHROPIC_API_KEY.
 pub async fn provider_credits(State(state): State<AppState>) -> Json<CreditsResponse> {
-    // Try admin key from secrets
-    let admin_key = {
+    // Grab both keys from secrets
+    let (admin_key, api_key) = {
         let secrets = state.secrets.read().await;
         match secrets.as_ref() {
-            Some(backend) => backend.get("ANTHROPIC_ADMIN_KEY").await.ok().flatten(),
-            None => None,
+            Some(backend) => {
+                let admin = backend.get("ANTHROPIC_ADMIN_KEY").await.ok().flatten();
+                let api = backend.get("ANTHROPIC_API_KEY").await.ok().flatten();
+                (admin, api)
+            }
+            None => (None, None),
         }
     };
 
+    // Validate the primary API key with a lightweight call
+    let (api_key_valid, api_key_status) = match &api_key {
+        Some(key) => validate_anthropic_api_key(key).await,
+        None => (false, Some("ANTHROPIC_API_KEY not set in secrets".to_string())),
+    };
+
+    // Try admin API for cost data
     if let Some(key) = admin_key {
-        // Attempt Anthropic Admin API call
         match fetch_admin_cost_report(&key).await {
             Ok(cost) => {
                 return Json(CreditsResponse {
                     available: true,
                     monthly_cost_usd: cost,
                     source: "admin_api".to_string(),
+                    api_key_valid,
+                    api_key_status,
                     error: None,
                 });
             }
             Err(e) => {
                 tracing::warn!("Anthropic Admin API failed, falling back to local tracking: {e}");
-                // Fall through to local tracking — don't surface error to UI
-                let pool = state.provider_pool.read().await;
-                let info = pool.get_budget_info();
-                return Json(CreditsResponse {
-                    available: true,
-                    monthly_cost_usd: info.monthly_spent_usd,
-                    source: "local_tracking".to_string(),
-                    error: None,
-                });
             }
         }
     }
 
-    // No admin key — return local tracking
+    // Local tracking fallback (always available)
     let pool = state.provider_pool.read().await;
     let info = pool.get_budget_info();
     Json(CreditsResponse {
-        available: false,
+        available: true,
         monthly_cost_usd: info.monthly_spent_usd,
         source: "local_tracking".to_string(),
+        api_key_valid,
+        api_key_status,
         error: None,
     })
+}
+
+/// Lightweight validation of the Anthropic API key.
+///
+/// Sends a minimal count_tokens request to check if the key is valid and
+/// the account has credits. Returns (is_valid, optional status message).
+async fn validate_anthropic_api_key(api_key: &str) -> (bool, Option<String>) {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return (false, Some(format!("HTTP client error: {e}"))),
+    };
+
+    // Use the count_tokens endpoint — it's cheap and validates auth + credits
+    let resp = client
+        .post("https://api.anthropic.com/v1/messages/count_tokens")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .body(r#"{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":"hi"}]}"#)
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) => {
+            let status = r.status().as_u16();
+            match status {
+                200 => (true, None),
+                401 => (false, Some("Invalid API key".to_string())),
+                403 => (false, Some("API key lacks permissions".to_string())),
+                402 | 429 => {
+                    let body = r.text().await.unwrap_or_default();
+                    if body.contains("credit") || body.contains("billing") {
+                        (false, Some("No credits — check billing at console.anthropic.com".to_string()))
+                    } else if status == 429 {
+                        // Rate limited but key is valid
+                        (true, Some("Rate limited — key is valid".to_string()))
+                    } else {
+                        (false, Some(format!("Payment required: {body}")))
+                    }
+                }
+                _ => {
+                    let body = r.text().await.unwrap_or_default();
+                    (false, Some(format!("API returned {status}: {body}")))
+                }
+            }
+        }
+        Err(e) => (false, Some(format!("Network error: {e}"))),
+    }
 }
 
 /// Fetch cost report from Anthropic Admin API for the current month.

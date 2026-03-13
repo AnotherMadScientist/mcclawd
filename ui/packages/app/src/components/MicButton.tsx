@@ -19,7 +19,16 @@ async function transcribe(blob: Blob): Promise<{ text?: string; error?: string }
     headers: token ? { Authorization: `Bearer ${token}` } : {},
     body: form,
   });
-  return res.json();
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    console.error("[MicButton] Transcribe HTTP error:", res.status, body);
+    return { error: `Transcribe failed (${res.status}): ${body || res.statusText}` };
+  }
+  const data = await res.json();
+  if (data.error) {
+    console.error("[MicButton] Transcribe API error:", data.error);
+  }
+  return data;
 }
 
 export function MicButton({

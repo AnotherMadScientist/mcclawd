@@ -167,6 +167,8 @@ export interface CreditsResponse {
   available: boolean;
   monthly_cost_usd: number;
   source: "admin_api" | "local_tracking";
+  api_key_valid: boolean;
+  api_key_status?: string;
   error?: string;
 }
 
