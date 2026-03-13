@@ -3469,6 +3469,23 @@ TaintTrace wired into HookPipeline (session-level):
 - Trace persists per task (not cleared between tool calls); findings are per-call
 - `to_invariant_messages()` converts trace to OpenAI format for policy evaluation
 
+**~~DLP E2E Test Suite~~ — RESOLVED**
+
+Comprehensive integration test suite (`dlp_e2e_test.rs`) validates the full security pipeline:
+- 10 passing tests covering: PII detection (SSN, credit card, API keys), tokenization,
+  round-trip resolve, no-leak verification, entropy-based secret scanning, after-tool-call
+  scanning, taint trace across tool calls, database URL detection, selective detection
+- Fixed field mismatch: tests now correctly use `pattern_name` (detection pattern)
+  vs `tag` (context label like "tool 'x' args")
+
+**~~File Access Bug~~ — RESOLVED**
+
+Task agents could not access uploaded PDFs — reported "cannot access binary files":
+- Root cause: `augment_prompt_with_attachments()` treated PDFs as opaque binary (metadata only)
+- Fix: PDFs now sent as `UserContent::Document` with base64-encoded content via Rig's
+  native document support (`DocumentMediaType::PDF`), same pattern as image attachments
+- Container `/attachments` mount and host-side upload pipeline were already correct
+
 ### 22b. Active Gaps
 
 **Gap 2: Provider Pool Failover**
@@ -3500,7 +3517,18 @@ Channel adapters (Telegram, Discord, Slack, WhatsApp, Email) are built but:
 | Secret delivery via tmpfs | Implemented — docker exec writes to /run/secrets/ | Working correctly |
 | Resource limits | Implemented — memory, CPU, PID limits in SandboxConfig | Working correctly |
 
-### 22d. Deferred (Not In Scope)
+### 22d. Skills System Status
+
+Skills pipeline is **fully implemented**:
+- `skill_parser.rs`: Parses both legacy (`# Skill: name`) and frontmatter (`---`) SKILL.md formats
+- `skill_loader.rs`: Discovers from `.mcclawd/skills/`, resolves per-agent from AGENTS.md
+- `context.rs`: Injects skills into system prompt with 50K char budget, relevance filtering
+- `agents_parser.rs`: Parses `## Skills` sections, supports `default_skills` + per-agent overrides
+- Container injection: `MCCLAWD_SKILL_CONTEXT` env var for selective skill mounting
+- DB persistence: `selected_skills`, `skill_context` columns in tasks table
+- OpenClaw-compatible SKILL.md format with sections: Description, MCP Tools, Install, Context, Instructions, Examples, Config, Dependencies
+
+### 22e. Deferred (Not In Scope)
 
 - ~~IronBox / Firecracker sandbox~~ — Docker containers only
 - ~~WASM runtime~~ — not needed

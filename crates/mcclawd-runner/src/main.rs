@@ -22,7 +22,7 @@ use rig::agent::MultiTurnStreamItem;
 use base64::Engine;
 use rig::OneOrMany;
 use rig::completion::message::Message as RigMessage;
-use rig::completion::message::{DocumentSourceKind, Image, ImageMediaType, MimeType, ToolResultContent, UserContent};
+use rig::completion::message::{Document, DocumentMediaType, DocumentSourceKind, Image, ImageMediaType, MimeType, ToolResultContent, UserContent};
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncBufReadExt;
@@ -187,8 +187,30 @@ fn augment_prompt_with_attachments(prompt: &str) -> (String, Vec<UserContent>) {
                         .push_str(&format!("### File: {} (could not read)\n\n", name));
                 }
             }
+        } else if let Some(doc_media_type) = DocumentMediaType::from_mime_type(&mime) {
+            // Document files (PDF, etc.): base64-encode and send as Document content
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    image_parts.push(UserContent::Document(Document {
+                        data: DocumentSourceKind::Base64(b64),
+                        media_type: Some(doc_media_type),
+                        additional_params: None,
+                    }));
+                    text_augmented.push_str(&format!(
+                        "### Document: {} ({}, {}KB — sent as document content)\n\n",
+                        name,
+                        mime,
+                        bytes.len() / 1024
+                    ));
+                }
+                Err(_) => {
+                    text_augmented
+                        .push_str(&format!("### File: {} (could not read)\n\n", name));
+                }
+            }
         } else {
-            // Binary files: metadata only
+            // Other binary files: metadata only
             let size_str = match std::fs::metadata(&path) {
                 Ok(m) => format!("{}KB", m.len() / 1024),
                 Err(_) => "unknown size".to_string(),
