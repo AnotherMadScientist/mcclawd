@@ -37,8 +37,8 @@ pub struct Turn {
 
 /// Trait for session + turn persistence backends.
 ///
-/// Phase 0: `InMemorySessionStore` (dev/testing).
-/// Future: Postgres-backed implementation via sqlx.
+/// Production: `PgSessionStore` in `mcclawd-api::server::pg_store`.
+/// Testing: `InMemorySessionStore` in `persistence::memory` (cfg(test) only).
 #[async_trait]
 pub trait SessionStore: Send + Sync {
     /// Create a new session for the given channel/peer/platform.

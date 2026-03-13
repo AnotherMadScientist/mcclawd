@@ -46,6 +46,7 @@ mime_guess = "2"
 base64 = { workspace = true }
 libc = "0.2"
 dotenvy = "0.15"
+async-trait = { workspace = true }
 async-stream = "0.3"
 tokio-stream = "0.1"
 

@@ -73,7 +73,7 @@ What Rig does NOT provide (we build these):
                     │      Channel Adapters (data plane)    │
                     │                                      │
                     │  CLI  Web/WS  Telegram  Discord      │
-                    │  Email  WhatsApp  Signal  Matrix ... │
+                    │  Email  WhatsApp ...                   │
                     │  (each implements Channel trait)      │
                     │  (Transport A-E hidden inside)        │
                     └──────────────┬───────────────────────┘
@@ -208,9 +208,7 @@ mcclawd/
 │   ├── mcclawd-channel-discord/       # Discord channel (Phase 3)
 │   ├── mcclawd-channel-slack/         # Slack channel (Phase 3)
 │   ├── mcclawd-channel-whatsapp/      # WhatsApp channel (Phase 3+, Baileys sidecar)
-│   ├── mcclawd-channel-signal/        # Signal channel (Phase 3+, signal-cli sidecar)
 │   ├── mcclawd-channel-email/         # Email IMAP+SMTP channel (Phase 3+)
-│   ├── mcclawd-channel-matrix/        # Matrix channel (Phase 3+)
 │   │
 │   └── mcclawd-api/                    # control plane + daemon (NOT the data plane)
 │       ├── src/
@@ -510,8 +508,6 @@ Every agent has a **workspace directory** containing markdown files that define 
 │   │   └── main.enc               # session_id + seq + resume_url
 │   ├── email/
 │   │   └── personal.enc           # IMAP UID validity + last seen UID
-│   └── matrix/
-│       └── home.enc               # since sync token
 ```
 
 **Skill resolution order** (per agent):
@@ -1181,9 +1177,9 @@ McClawd's channel system reverse-engineers OpenClaw's channel monitor pattern bu
 
 **Principle 1: The app sees only events.** Every channel — regardless of whether it internally polls, holds a persistent WebSocket, manages an IMAP session, or reads stdin — presents the same interface to the pipeline: an async stream of `InboundMessage` in and an async sink of `OutboundChunk` out. The transport mechanism is the channel adapter's private concern. The pipeline never polls, never manages connections, never knows whether it's talking to Telegram or an email inbox. It `recv()`s.
 
-**Principle 2: Some channels own long-lived client sessions.** This is the critical pattern that most agent frameworks get wrong. WhatsApp (Baileys WebSocket with cryptographic session keys), Email (IMAP IDLE with UID validity state), Discord (Gateway WebSocket with sequence numbers and resume tokens), Matrix (sync loop with `since` token) — these all maintain persistent connections where outbound messages *must be routed through the same live connection* that receives inbound events. Contrast with Telegram Bot API where inbound (getUpdates or webhook) and outbound (sendMessage) are independent HTTP paths. The Channel trait must accommodate both models: stateless-API channels where `send_chunk()` is an independent HTTP call, and persistent-session channels where `send_chunk()` routes through the adapter's live connection state.
+**Principle 2: Some channels own long-lived client sessions.** This is the critical pattern that most agent frameworks get wrong. WhatsApp (Baileys WebSocket with cryptographic session keys), Email (IMAP IDLE with UID validity state), Discord (Gateway WebSocket with sequence numbers and resume tokens) — these all maintain persistent connections where outbound messages *must be routed through the same live connection* that receives inbound events. Contrast with Telegram Bot API where inbound (getUpdates or webhook) and outbound (sendMessage) are independent HTTP paths. The Channel trait must accommodate both models: stateless-API channels where `send_chunk()` is an independent HTTP call, and persistent-session channels where `send_chunk()` routes through the adapter's live connection state.
 
-**Principle 3: Connection state survives daemon restarts.** WhatsApp needs its Baileys session keys to avoid re-scanning the QR code. Email needs its IMAP UID validity to resume from where it left off. Discord needs its session ID + sequence number to RESUME the gateway connection instead of re-IDENTIFYing. Matrix needs its `since` token to avoid re-syncing the entire room history. This state is *mutable session data*, distinct from secrets (which are static credentials). The Channel trait provides `save_state()` / `restore_state()` lifecycle methods and the framework persists this state encrypted alongside secrets.
+**Principle 3: Connection state survives daemon restarts.** WhatsApp needs its Baileys session keys to avoid re-scanning the QR code. Email needs its IMAP UID validity to resume from where it left off. Discord needs its session ID + sequence number to RESUME the gateway connection instead of re-IDENTIFYing. This state is *mutable session data*, distinct from secrets (which are static credentials). The Channel trait provides `save_state()` / `restore_state()` lifecycle methods and the framework persists this state encrypted alongside secrets.
 
 **Principle 4: Reconnection is the channel's job.** If Discord's WebSocket drops, the Discord adapter reconnects internally with exponential backoff. If the IMAP connection times out, the Email adapter re-opens it. The pipeline only sees a `ChannelHealth` status change — it never "restarts" a channel. The adapter's `start()` method is conceptually an infinite loop that handles all reconnection logic internally, yielding `InboundMessage`s whenever the connection is live.
 
@@ -1223,7 +1219,7 @@ The app sees one interface. Internally, channels use five distinct transport pat
 │                                                                       │
 │  Transport C: Persistent Connection (shared inbound/outbound path)    │
 │  ┌───────────────────────────────────────────────────────────┐       │
-│  │ Discord (Gateway WS), WhatsApp (Baileys WS), Matrix       │       │
+│  │ Discord (Gateway WS), WhatsApp (Baileys WS)               │       │
 │  │ Inbound:  events arrive on persistent connection          │       │
 │  │ Outbound: MUST route through same connection / session    │       │
 │  │ State to persist: auth keys, sync token, sequence ID,     │       │
@@ -1233,7 +1229,7 @@ The app sees one interface. Internally, channels use five distinct transport pat
 │                                                                       │
 │  Transport D: Sidecar Process (separate runtime manages connection)   │
 │  ┌───────────────────────────────────────────────────────────┐       │
-│  │ Signal (signal-cli Java), WhatsApp (Baileys Node sidecar) │       │
+│  │ WhatsApp (Baileys Node sidecar)                           │       │
 │  │ Inbound:  SSE/HTTP from sidecar → normalize               │       │
 │  │ Outbound: HTTP POST to sidecar                            │       │
 │  │ State to persist: sidecar owns it, McClawd manages        │       │
@@ -1328,8 +1324,6 @@ pub enum ChannelKind {
     WhatsApp,
     Discord,
     Slack,
-    Signal,
-    Matrix,
     Email,        // IMAP inbound + SMTP outbound
     Custom(String),  // extensible for future channels
 }
@@ -1366,7 +1360,7 @@ pub trait Channel: Send + Sync + 'static {
     /// Send a streaming chunk to a specific peer/chat.
     ///
     /// For stateless-API channels (Telegram, Slack): makes an independent HTTP call.
-    /// For persistent-connection channels (Discord, WhatsApp, Matrix): routes through
+    /// For persistent-connection channels (Discord, WhatsApp): routes through
     /// the adapter's live connection. If connection is down, queues or errors.
     async fn send_chunk(
         &self,
@@ -1382,7 +1376,7 @@ pub trait Channel: Send + Sync + 'static {
 
     // --- Connection State Lifecycle ---
     // These methods support channels that maintain long-lived client sessions
-    // (Discord WS, WhatsApp Baileys, IMAP, Matrix sync) that must survive
+    // (Discord WS, WhatsApp Baileys, IMAP) that must survive
     // daemon restarts without re-authentication.
 
     /// Save mutable connection state for persistence across daemon restarts.
@@ -1396,7 +1390,6 @@ pub trait Channel: Send + Sync + 'static {
     ///   - Discord: session_id + sequence number + resume_gateway_url
     ///   - WhatsApp/Baileys: full auth session keys (multi-device pairing state)
     ///   - Email/IMAP: UID validity + last seen UID per folder
-    ///   - Matrix: sync since token
     ///   - Telegram (poll): last update_id offset
     async fn save_state(&self) -> Result<Option<Vec<u8>>> {
         Ok(None)  // default: stateless, nothing to persist
@@ -1463,11 +1456,11 @@ pub enum ConnectionModel {
 
     /// Long-lived connection that carries both inbound and outbound.
     /// Connection state must be persisted across restarts.
-    /// Channels: Discord (Gateway WS), WhatsApp (Baileys), Matrix (sync)
+    /// Channels: Discord (Gateway WS), WhatsApp (Baileys)
     PersistentSession,
 
     /// Managed sidecar process. McClawd starts/monitors the sidecar container.
-    /// Channels: Signal (signal-cli), WhatsApp (Baileys Node sidecar)
+    /// Channels: WhatsApp (Baileys Node sidecar)
     Sidecar,
 
     /// Local I/O, no network. Process lifetime.
@@ -1827,9 +1820,7 @@ impl ChannelChunker {
 | Discord | C: Persistent | Yes | `editMessage` | 2000 | 500ms | session_id, seq, resume_url |
 | Slack | A: Stateless | Yes | `chat.update` | 40000 | 1000ms | None (webhook secret only) |
 | WhatsApp | C/D: Persistent/Sidecar | No | Buffer → send on Done | 65536 | N/A | Baileys auth session keys |
-| Signal | D: Sidecar | No | Buffer → send on Done | 6000 | N/A | Sidecar owns state |
 | Email | B: Poll | No | Buffer → SMTP send | Unlimited | N/A | IMAP UID validity + last UID |
-| Matrix | C: Persistent | Yes | Room event | 65536 | 500ms | `since` sync token |
 
 **Channel lifecycle orchestration:**
 
@@ -2172,7 +2163,7 @@ pub struct TelegramChannel {
 }
 ```
 
-**Phase 3: Discord, Slack, WhatsApp, Signal, Email** — each as separate crates
+**Phase 3: Discord, Slack, WhatsApp, Email** — each as separate crates
 
 | Channel | Rust Crate | Transport Pattern | Auth | Persisted State |
 |---------|-----------|-------------------|------|-----------------|
@@ -2180,9 +2171,7 @@ pub struct TelegramChannel {
 | Discord | `serenity` | C: Persistent (Gateway WS) | Bot token | session_id + seq + resume_url |
 | Slack | `slack-morphism` | A: Socket Mode or Events API | App + Bot tokens | None |
 | WhatsApp | Baileys sidecar (Node) | D: Sidecar → C: Persistent (inside sidecar) | QR session | Baileys auth keys (sidecar persists) |
-| Signal | `signal-cli` sidecar (Java) | D: Sidecar | Registered phone | Sidecar owns state |
 | Email | `async-imap` + `lettre` | B: Poll (IMAP IDLE / interval poll) | IMAP + SMTP creds (OAuth or password) | UID validity + last seen UID + folder list |
-| Matrix | `matrix-sdk` | C: Persistent (sync loop) | Access token | `since` sync token |
 
 **Email Channel Sketch** — IMAP IDLE inbound, SMTP outbound (Transport B: Poll):
 
@@ -2335,9 +2324,7 @@ crates/
 ├── mcclawd-channel-discord/        # Discord channel (Phase 3)
 ├── mcclawd-channel-slack/          # Slack channel (Phase 3)
 ├── mcclawd-channel-whatsapp/       # WhatsApp channel (Phase 3+)
-├── mcclawd-channel-signal/         # Signal channel (Phase 3+)
 ├── mcclawd-channel-email/          # Email IMAP+SMTP channel (Phase 3+)
-└── mcclawd-channel-matrix/         # Matrix channel (Phase 3+)
 ```
 
 Each channel is a separate crate → separate feature flag → only compiled/loaded if configured. This is how we avoid OpenClaw's "load all 20 SDKs on startup" problem.
@@ -2459,7 +2446,6 @@ pub trait SecretBackend: Send + Sync {
 | **Encrypted file** (`secrets.enc`) | Phase 0 | Dev / single machine | `aes-gcm-siv` + `argon2` key derivation |
 | **OS keychain** | Phase 1 | Desktop dev | `keyring` (macOS Keychain, Linux secret-service) |
 | **HashiCorp Vault** | Phase 2 | Production self-hosted | `vaultrs`, KV v2 + Transit engine |
-| **AWS Secrets Manager / KMS** | Phase 3+ | AWS production | `aws-sdk-secretsmanager` |
 
 Phase 0 default: encrypted file backend. Master key from `MCCLAWD_MASTER_KEY` env var or derived from passphrase via argon2.
 
@@ -2982,19 +2968,6 @@ services:
     restart: unless-stopped
     profiles: ["whatsapp"]
 
-  # Signal via signal-cli (Java sidecar)
-  signal-sidecar:
-    image: mcclawd/signal-cli:latest
-    volumes:
-      - signal-data:/data/signal        # signal-cli registration data
-    environment:
-      - HTTP_PORT=3101
-    ports:
-      - "3101:3101"                     # SSE events + HTTP API
-    networks:
-      - mcclawd-internal
-    restart: unless-stopped
-    profiles: ["signal"]
 
 networks:
   mcclawd-internal:
@@ -3006,10 +2979,9 @@ networks:
 volumes:
   ollama-data:
   whatsapp-auth:                        # Baileys session persistence
-  signal-data:                          # signal-cli registration data
 ```
 
-McClawd binary runs on host during dev (`cargo run`), in a container in prod. Channel adapters for Telegram, Discord, Slack, Email, and Matrix run inside the McClawd process (native Rust crates). WhatsApp and Signal use sidecar containers (Transport D) because they require Node.js/Java runtimes — enable them with `docker compose --profile whatsapp up`.
+McClawd binary runs on host during dev (`cargo run`), in a container in prod. Channel adapters for Telegram, Discord, Slack, and Email run inside the McClawd process (native Rust crates). WhatsApp uses a sidecar container (Transport D) because it requires a Node.js runtime — enable it with `docker compose --profile whatsapp up`.
 
 Sandbox containers are created as siblings — they join `mcclawd-egress` (filtered) but NOT `mcclawd-internal` (where the gateway, proxy, and channel sidecars live).
 
@@ -3088,17 +3060,13 @@ Sandbox containers are created as siblings — they join `mcclawd-egress` (filte
 - `mcclawd-channel-discord`: Discord via `serenity` (Gateway WS, Transport C — persistent session with resume)
 - `mcclawd-channel-slack`: Slack via `slack-morphism` (Socket Mode, threads)
 - `mcclawd-channel-whatsapp`: WhatsApp via Baileys sidecar (Transport D — sidecar owns Baileys WS session)
-- `mcclawd-channel-signal`: Signal via `signal-cli` sidecar (Transport D — SSE inbound, HTTP outbound)
 - `mcclawd-channel-email`: Email via `async-imap` + `lettre` (Transport B — IMAP IDLE/poll inbound, SMTP outbound)
-- `mcclawd-channel-matrix`: Matrix via `matrix-sdk` (Transport C — persistent sync loop with `since` token)
 - Channel state persistence: encrypted `save_state()` / `restore_state()` for all Transport B/C channels
 - Postgres persistence (sessions, turns, agent configs)
 - Security hooks: DLP (regex + entropy), secret scanning, audit log to DB
 - OpenClaw config compat (`~/.openclaw/openclaw.json`, `.mcp.json`, channel migration)
 - Provider pool metrics + budget controls
-- Composio integration for managed SaaS tools
 - Hot-reload config via file watcher
-- AWS/GCP/Azure secret backends
 - LINE, Mattermost, Nostr channels (community contributed)
 
 ---
@@ -3167,7 +3135,6 @@ uuid = { version = "1", features = ["v4"] }
 # slack-morphism = "2"         # Slack
 # async-imap = "0.10"          # Email (IMAP IDLE + poll)
 # lettre = "0.11"              # Email (SMTP outbound)
-# matrix-sdk = "0.7"           # Matrix (persistent sync)
 
 # Future (Phase 2+):
 # vaultrs = "0.7"           # HashiCorp Vault
@@ -3217,9 +3184,9 @@ uuid = { version = "1", features = ["v4"] }
 | Session keys include channel + peer | Forces isolation. No accidental context sharing between DM senders (OpenClaw's `dmScope: "main"` default leaked context). McClawd defaults to per-channel-peer isolation. |
 | Channel secrets via SecretBackend not env vars | Bot tokens, OAuth tokens are secrets. They go through the same encrypted backend as API keys. No plaintext JSON files like OpenClaw's approach. |
 | Bindings route channels to agents | Same concept as OpenClaw but in TOML. Specificity-based matching: peer > group > account > channel. Default agent catches unmatched messages. |
-| WhatsApp/Signal as sidecars not native | WhatsApp (Baileys) and Signal (signal-cli) require Node.js/Java runtimes. Run them as sidecar containers, communicate via HTTP/SSE. Don't pull Node.js into a Rust binary. |
+| WhatsApp as sidecar not native | WhatsApp (Baileys) requires a Node.js runtime. Run it as a sidecar container, communicate via HTTP/SSE. Don't pull Node.js into a Rust binary. |
 | Five transport patterns, one trait | Stateless API, long-poll, persistent connection, sidecar, local I/O — all hidden behind Channel trait. Pipeline only sees InboundMessage/OutboundChunk. Channel owns reconnection, polling, session management internally. |
-| Channel state persistence (save_state/restore_state) | Discord resume tokens, WhatsApp Baileys keys, IMAP UID cursors, Matrix sync tokens must survive daemon restarts. Without this, every restart means re-QR-scanning WhatsApp, re-syncing Matrix rooms, missing emails. Framework encrypts + persists opaque bytes per channel. |
+| Channel state persistence (save_state/restore_state) | Discord resume tokens, WhatsApp Baileys keys, IMAP UID cursors must survive daemon restarts. Without this, every restart means re-QR-scanning WhatsApp, missing emails. Framework encrypts + persists opaque bytes per channel. |
 | Email as a first-class channel | IMAP IDLE for inbound (looks event-driven to pipeline), SMTP for outbound. Non-streaming (buffer then send). Threading via In-Reply-To headers. Same Channel trait, same pipeline, same bindings — just Transport B internally. |
 | ChannelStartContext bundles deps | Instead of passing (inbound_tx, lifecycle) separately, pass a context struct. Allows adding secrets, state persistence callback without changing trait signature. Channels that need credentials get them from ctx.secrets, not constructor args. |
 | No native Rust plugin SDK (Phase 4+) | All tools via MCP through AgentGateway. Don't design plugin API surface before knowing what agents actually need. |
@@ -3524,7 +3491,7 @@ Channel adapters (Telegram, Discord, Slack, WhatsApp, Email) are built but:
 | Per-task container networking isolation | Partial — uses shared `mcclawd_tools` network | Need per-task network or network policies |
 | Sandbox volume mounting | Implemented — /workspace, /attachments, /run/secrets | Need configurable user volumes from config |
 | Container GC | Partial — periodic Docker prune exists | Need task-aware cleanup (orphan detection) |
-| Sidecar lifecycle | Specced (WhatsApp Baileys, Signal) | Need start/stop/health management in daemon |
+| Sidecar lifecycle | Specced (WhatsApp Baileys) | Need start/stop/health management in daemon |
 | MCP server containerization | Working via AgentGateway + compose | Need dynamic MCP container spawn from config |
 | Secret delivery via tmpfs | Implemented — docker exec writes to /run/secrets/ | Working correctly |
 | Resource limits | Implemented — memory, CPU, PID limits in SandboxConfig | Working correctly |

@@ -17,8 +17,8 @@ pub struct AgentConfig {
 
 /// Trait for agent configuration persistence backends.
 ///
-/// Phase 0: `InMemoryAgentConfigStore` (dev/testing).
-/// Future: Postgres-backed implementation via sqlx.
+/// Production: `PgAgentConfigStore` in `mcclawd-api::server::pg_store`.
+/// Testing: `InMemoryAgentConfigStore` in `persistence::memory` (cfg(test) only).
 #[async_trait]
 pub trait AgentConfigStore: Send + Sync {
     /// Save (upsert) an agent configuration.

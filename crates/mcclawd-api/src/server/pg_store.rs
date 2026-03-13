@@ -1475,6 +1475,316 @@ impl PgTaskStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PgSessionStore — Postgres-backed SessionStore implementation
+// ---------------------------------------------------------------------------
+
+use async_trait::async_trait;
+use mcclawd_core::persistence::sessions::{Session, SessionStore, Turn, TurnRole};
+use mcclawd_core::persistence::agent_configs::{AgentConfig, AgentConfigStore};
+
+/// Postgres-backed session store. Wraps a `PgPool` and implements the
+/// `SessionStore` trait from mcclawd-core for durable persistence.
+#[derive(Clone)]
+pub struct PgSessionStore {
+    pool: PgPool,
+}
+
+impl PgSessionStore {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl SessionStore for PgSessionStore {
+    async fn create_session(
+        &self,
+        channel_id: &str,
+        peer_id: &str,
+        platform: &str,
+    ) -> mcclawd_core::Result<Session> {
+        let row = sqlx::query_as::<_, (String, chrono::DateTime<chrono::Utc>)>(
+            "INSERT INTO sessions (channel_id, peer_id, platform)
+             VALUES ($1, $2, $3)
+             RETURNING id::text, started_at",
+        )
+        .bind(channel_id)
+        .bind(peer_id)
+        .bind(platform)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(pg_err)?;
+
+        Ok(Session {
+            id: row.0,
+            channel_id: channel_id.to_string(),
+            peer_id: peer_id.to_string(),
+            platform: platform.to_string(),
+            started_at: row.1,
+            ended_at: None,
+            metadata: serde_json::json!({}),
+        })
+    }
+
+    async fn end_session(&self, session_id: &str) -> mcclawd_core::Result<()> {
+        sqlx::query("UPDATE sessions SET ended_at = NOW() WHERE id = $1::uuid")
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .map_err(pg_err)?;
+        Ok(())
+    }
+
+    async fn get_session(&self, session_id: &str) -> mcclawd_core::Result<Option<Session>> {
+        let row = sqlx::query_as::<_, (
+            String,
+            String,
+            String,
+            String,
+            chrono::DateTime<chrono::Utc>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            serde_json::Value,
+        )>(
+            "SELECT id::text, channel_id, peer_id, platform, started_at, ended_at, metadata
+             FROM sessions WHERE id = $1::uuid",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(pg_err)?;
+
+        Ok(row.map(|r| Session {
+            id: r.0,
+            channel_id: r.1,
+            peer_id: r.2,
+            platform: r.3,
+            started_at: r.4,
+            ended_at: r.5,
+            metadata: r.6,
+        }))
+    }
+
+    async fn add_turn(
+        &self,
+        session_id: &str,
+        role: TurnRole,
+        content: &str,
+        tool_calls: Option<serde_json::Value>,
+    ) -> mcclawd_core::Result<Turn> {
+        let role_str = match role {
+            TurnRole::User => "user",
+            TurnRole::Assistant => "assistant",
+            TurnRole::System => "system",
+            TurnRole::Tool => "tool",
+        };
+
+        let row = sqlx::query_as::<_, (String, chrono::DateTime<chrono::Utc>)>(
+            "INSERT INTO turns (session_id, role, content, tool_calls)
+             VALUES ($1::uuid, $2, $3, $4)
+             RETURNING id::text, created_at",
+        )
+        .bind(session_id)
+        .bind(role_str)
+        .bind(content)
+        .bind(&tool_calls)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(pg_err)?;
+
+        Ok(Turn {
+            id: row.0,
+            session_id: session_id.to_string(),
+            role,
+            content: content.to_string(),
+            tool_calls,
+            created_at: row.1,
+        })
+    }
+
+    async fn get_turns(&self, session_id: &str) -> mcclawd_core::Result<Vec<Turn>> {
+        let rows = sqlx::query_as::<_, (
+            String,
+            String,
+            String,
+            Option<serde_json::Value>,
+            chrono::DateTime<chrono::Utc>,
+        )>(
+            "SELECT id::text, role, content, tool_calls, created_at
+             FROM turns WHERE session_id = $1::uuid ORDER BY created_at ASC",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(pg_err)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| Turn {
+                id: r.0,
+                session_id: session_id.to_string(),
+                role: match r.1.as_str() {
+                    "assistant" => TurnRole::Assistant,
+                    "system" => TurnRole::System,
+                    "tool" => TurnRole::Tool,
+                    _ => TurnRole::User,
+                },
+                content: r.2,
+                tool_calls: r.3,
+                created_at: r.4,
+            })
+            .collect())
+    }
+
+    async fn get_recent_sessions(
+        &self,
+        peer_id: &str,
+        limit: usize,
+    ) -> mcclawd_core::Result<Vec<Session>> {
+        let rows = sqlx::query_as::<_, (
+            String,
+            String,
+            String,
+            String,
+            chrono::DateTime<chrono::Utc>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            serde_json::Value,
+        )>(
+            "SELECT id::text, channel_id, peer_id, platform, started_at, ended_at, metadata
+             FROM sessions WHERE peer_id = $1
+             ORDER BY started_at DESC LIMIT $2",
+        )
+        .bind(peer_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(pg_err)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| Session {
+                id: r.0,
+                channel_id: r.1,
+                peer_id: r.2,
+                platform: r.3,
+                started_at: r.4,
+                ended_at: r.5,
+                metadata: r.6,
+            })
+            .collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PgAgentConfigStore — Postgres-backed AgentConfigStore implementation
+// ---------------------------------------------------------------------------
+
+/// Postgres-backed agent configuration store.
+#[derive(Clone)]
+pub struct PgAgentConfigStore {
+    pool: PgPool,
+}
+
+impl PgAgentConfigStore {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl AgentConfigStore for PgAgentConfigStore {
+    async fn save_config(&self, config: &AgentConfig) -> mcclawd_core::Result<()> {
+        sqlx::query(
+            "INSERT INTO agent_configs (name, soul_md, agents_md, user_md, model_config)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (name) DO UPDATE
+                SET soul_md = $2, agents_md = $3, user_md = $4, model_config = $5, updated_at = NOW()",
+        )
+        .bind(&config.name)
+        .bind(&config.soul_md)
+        .bind(&config.agents_md)
+        .bind(&config.user_md)
+        .bind(&config.model_config)
+        .execute(&self.pool)
+        .await
+        .map_err(pg_err)?;
+        Ok(())
+    }
+
+    async fn get_config(&self, name: &str) -> mcclawd_core::Result<Option<AgentConfig>> {
+        let row = sqlx::query_as::<_, (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            serde_json::Value,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        )>(
+            "SELECT id::text, name, soul_md, agents_md, user_md, model_config, created_at, updated_at
+             FROM agent_configs WHERE name = $1",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(pg_err)?;
+
+        Ok(row.map(|r| AgentConfig {
+            id: r.0,
+            name: r.1,
+            soul_md: r.2,
+            agents_md: r.3,
+            user_md: r.4,
+            model_config: r.5,
+            created_at: r.6,
+            updated_at: r.7,
+        }))
+    }
+
+    async fn list_configs(&self) -> mcclawd_core::Result<Vec<AgentConfig>> {
+        let rows = sqlx::query_as::<_, (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            serde_json::Value,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        )>(
+            "SELECT id::text, name, soul_md, agents_md, user_md, model_config, created_at, updated_at
+             FROM agent_configs ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(pg_err)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| AgentConfig {
+                id: r.0,
+                name: r.1,
+                soul_md: r.2,
+                agents_md: r.3,
+                user_md: r.4,
+                model_config: r.5,
+                created_at: r.6,
+                updated_at: r.7,
+            })
+            .collect())
+    }
+
+    async fn delete_config(&self, name: &str) -> mcclawd_core::Result<()> {
+        sqlx::query("DELETE FROM agent_configs WHERE name = $1")
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .map_err(pg_err)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

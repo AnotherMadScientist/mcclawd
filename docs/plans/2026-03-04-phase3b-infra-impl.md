@@ -216,19 +216,7 @@ Enhanced `AuditHook`:
 - `after_tool_call`: runs all hooks, collects all results
 - Builder pattern: `HookPipeline::new().add(AuditHook).add(DlpHook::new(config))`
 
-### Task C5: AWS Secrets Manager backend
-
-**Files:**
-- Create `crates/mcclawd-core/src/secrets/aws.rs`
-- Modify `crates/mcclawd-core/Cargo.toml` (add aws-sdk-secretsmanager behind feature flag)
-
-`AwsSecretBackend` implements `SecretBackend`:
-- Uses `aws-sdk-secretsmanager` client
-- `get()`: GetSecretValue, `set()`: CreateSecret/UpdateSecret, `delete()`: DeleteSecret, `list()`: ListSecrets with prefix filter
-- Configurable prefix: `mcclawd/{env}/` to namespace secrets
-- Feature-gated: `aws-secrets` feature flag
-
-### Task C6: Environment variable backend
+### Task C5: Environment variable backend
 
 **Files:**
 - Create `crates/mcclawd-core/src/secrets/env.rs`

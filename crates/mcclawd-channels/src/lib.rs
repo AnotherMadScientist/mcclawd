@@ -10,6 +10,6 @@ pub mod types;
 pub use cli::CliChannel;
 pub use pipeline::InboundPipeline;
 pub use session::{SessionKey, SessionManager};
-pub use state_store::{ChannelStateStore, FileStateStore, InMemoryStateStore};
+pub use state_store::{ChannelStateStore, FileStateStore};
 pub use traits::{Channel, ChannelStartContext};
 pub use types::*;

@@ -345,6 +345,6 @@ mod tests {
         assert_eq!(ChannelKind::Slack.to_string(), "slack");
         assert_eq!(ChannelKind::WhatsApp.to_string(), "whatsapp");
         assert_eq!(ChannelKind::Email.to_string(), "email");
-        assert_eq!(ChannelKind::Custom("matrix".into()).to_string(), "matrix");
+        assert_eq!(ChannelKind::Custom("custom-bot".into()).to_string(), "custom-bot");
     }
 }

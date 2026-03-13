@@ -3,12 +3,10 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
-pub mod aws;
 pub mod encrypted_file;
 pub mod env;
 pub mod vault;
 
-pub use aws::AwsSecretBackend;
 pub use encrypted_file::EncryptedFileBackend;
 pub use env::EnvSecretBackend;
 pub use vault::VaultSecretBackend;
@@ -25,7 +23,8 @@ pub struct SecretMeta {
 
 /// Trait for secret storage backends.
 /// Phase 0: EncryptedFileBackend (AES-256-GCM-SIV + argon2).
-/// Phase 3: EnvSecretBackend (read-only), AwsSecretBackend (stub).
+/// EnvSecretBackend: read-only from environment variables.
+/// VaultSecretBackend: HashiCorp Vault (Phase 2+).
 #[async_trait]
 pub trait SecretBackend: Send + Sync {
     async fn get(&self, key: &str) -> crate::Result<Option<String>>;
