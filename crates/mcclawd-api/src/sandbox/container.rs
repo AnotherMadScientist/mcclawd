@@ -307,6 +307,41 @@ impl SandboxOrchestrator {
         })
     }
 
+    /// Write a JWT identity token to /run/identity/token inside the container.
+    async fn write_identity_token(
+        &self,
+        container_id: &str,
+        token: &str,
+    ) -> anyhow::Result<()> {
+        let cmd_str = "printf '%s' \"$TOKEN_VALUE\" > /run/identity/token".to_string();
+        let env_str = format!("TOKEN_VALUE={token}");
+
+        let exec = self
+            .docker
+            .create_exec(
+                container_id,
+                CreateExecOptions {
+                    cmd: Some(vec!["sh".to_string(), "-c".to_string(), cmd_str]),
+                    env: Some(vec![env_str]),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        self.docker
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: true,
+                    ..Default::default()
+                }),
+            )
+            .await?;
+
+        tracing::debug!(container_id, "Identity token written to /run/identity/token");
+        Ok(())
+    }
+
     async fn write_secret_file(
         &self,
         container_id: &str,
@@ -849,6 +884,9 @@ impl SandboxOrchestrator {
             env.push(format!("MCCLAWD_SKILL_CONTEXT={}", agent_env.skill_context));
         }
 
+        // Identity token path for agent-to-host JWT authentication
+        env.push("MCCLAWD_IDENTITY_TOKEN_PATH=/run/identity/token".to_string());
+
         let mut mounts = vec![Mount {
             target: Some("/workspace".to_string()),
             source: Some(workspace_dir.to_string()),
@@ -860,6 +898,13 @@ impl SandboxOrchestrator {
         // Always need tmpfs for secrets
         mounts.push(Mount {
             target: Some("/run/secrets".to_string()),
+            typ: Some(MountTypeEnum::TMPFS),
+            ..Default::default()
+        });
+
+        // Identity token mount — JWT for agent-to-host authentication
+        mounts.push(Mount {
+            target: Some("/run/identity".to_string()),
             typ: Some(MountTypeEnum::TMPFS),
             ..Default::default()
         });
@@ -925,9 +970,17 @@ impl SandboxOrchestrator {
             .start_container::<String>(&response.id, None)
             .await?;
 
-        // Write secrets into tmpfs
+        // Write secrets into tmpfs (skip internal keys)
         for (key, value) in secrets {
+            if key.starts_with("__") {
+                continue;
+            }
             self.write_secret_file(&response.id, key, value).await?;
+        }
+
+        // Write identity token to /run/identity/token if provided
+        if let Some(token) = secrets.get("__identity_token") {
+            self.write_identity_token(&response.id, token).await?;
         }
 
         tracing::info!(

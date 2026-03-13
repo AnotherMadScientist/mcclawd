@@ -9,7 +9,7 @@ use base64::Engine;
 use mcclawd_agent::engine::AgentEngine;
 use mcclawd_agent::workspace::WorkspaceLoader;
 use mcclawd_channels::{ChannelStatus, OutboundChunk};
-use mcclawd_core::types::TaskId;
+use mcclawd_core::types::{AgentId, TaskId};
 use mcclawd_tasks::manager::{TaskRecord, TaskStatus};
 use futures::StreamExt;
 use rig::agent::MultiTurnStreamItem;
@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use tokio_util::io::ReaderStream;
 
 use mcclawd_core::hooks::SecurityHook;
+use mcclawd_core::identity::{IdentityProvider, JwtIdentityProvider};
 use mcclawd_tools::agent_security;
 
 use super::state::AppState;
@@ -618,6 +619,20 @@ async fn run_agent_sandboxed(
     } else {
         None
     };
+
+    // Generate JWT identity token for the container agent
+    {
+        let identity = JwtIdentityProvider::new(&state.jwt_secret);
+        let agent_id = AgentId(format!("task-{}", &task_id.0));
+        match identity.issue(&agent_id).await {
+            Ok(token) => {
+                secrets_map.insert("__identity_token".to_string(), token);
+            }
+            Err(e) => {
+                tracing::warn!(task_id = %task_id.0, error = %e, "Failed to generate identity token — container will run without identity");
+            }
+        }
+    }
 
     let _ = tx.send(OutboundChunk::TextDelta(
         "Creating runner container...".to_string(),

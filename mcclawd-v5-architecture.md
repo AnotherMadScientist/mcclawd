@@ -203,7 +203,7 @@ mcclawd/
 │   │   │   └── compat.rs             # OpenClaw channel config import
 │   │   └── Cargo.toml
 │   │
-│   ├── mcclawd-channel-web/           # Web/WS channel (Phase 1)
+│   ├── # Web channel: inline in mcclawd-api (Axum REST + WebSocket)
 │   ├── mcclawd-channel-telegram/      # Telegram channel (Phase 2)
 │   ├── mcclawd-channel-discord/       # Discord channel (Phase 3)
 │   ├── mcclawd-channel-slack/         # Slack channel (Phase 3)
@@ -2137,19 +2137,26 @@ impl Channel for CliChannel {
 }
 ```
 
-**Phase 1: Web/WS Channel** — axum WebSocket, full streaming, web UI
+**Phase 1: Web/WS Channel** — implemented inline in `mcclawd-api`
 
-```rust
-// Sketch — streams via WebSocket frames
-pub struct WebChannel { /* axum WS upgrade handler */ }
+The web channel does NOT use a separate `WebChannel` struct or the `Channel` trait.
+Instead, the Axum API server in `mcclawd-api::server` directly handles:
+- REST endpoints for task CRUD (`POST /api/tasks`, `GET /api/tasks/:id`, etc.)
+- WebSocket streaming at `/api/tasks/:id/ws` for real-time agent output
+- Event persistence and replay for late-connecting clients
 
-// WS frame protocol:
-// Client → Server: { "type": "message", "text": "..." }
-// Server → Client: { "type": "delta", "text": "..." }
-// Server → Client: { "type": "tool_start", "name": "..." }
-// Server → Client: { "type": "tool_end", "name": "...", "summary": "..." }
-// Server → Client: { "type": "done" }
-// Server → Client: { "type": "error", "message": "..." }
+This is intentional: the HTTP/WS model (request/response + push) doesn't fit the
+Channel trait's `start() + send_chunk()` pattern, which is designed for long-lived
+bidirectional connections (Telegram, Discord, etc.).
+
+WS frame protocol (OutboundChunk serialized as JSON):
+```
+Client → Server: { "type": "message", "text": "..." }
+Server → Client: { "TextDelta": "..." }
+Server → Client: { "ToolStart": {"name": "..."} }
+Server → Client: { "ToolEnd": {"name": "...", "summary": "..."} }
+Server → Client: "Done"
+Server → Client: { "Error": "..." }
 ```
 
 **Phase 2: Telegram Channel** — `teloxide` crate, long-polling, edit-based streaming
@@ -2311,10 +2318,7 @@ crates/
 │   │   └── cli.rs                  # CLI channel (Phase 0)
 │   └── Cargo.toml
 │
-├── mcclawd-channel-web/            # Web/WS channel (Phase 1)
-│   ├── src/
-│   │   └── lib.rs
-│   └── Cargo.toml
+├── # Web channel: inline in mcclawd-api (Axum REST + WebSocket)
 │
 ├── mcclawd-channel-telegram/       # Telegram channel (Phase 2)
 │   ├── src/
@@ -3022,8 +3026,8 @@ Sandbox containers are created as siblings — they join `mcclawd-egress` (filte
 
 - `mcclawd-tools/sandbox.rs`: Docker sibling container execution
 - `mcclawd-tools/skills.rs`: ClawHub SKILL.md parser + loader + per-agent resolver
-- `mcclawd-channel-web`: WebSocket channel (web UI + REST API)
-- `mcclawd-api`: daemon supervisor + serves web channel
+- Web channel: implemented inline in `mcclawd-api` (Axum REST + WebSocket streaming)
+- `mcclawd-api`: daemon supervisor + web channel + REST API
 - `mcclawd-api/daemon.rs`: fork, monitor, restart with backoff
 - Skills installed via `mc skills install <slug>`
 - Per-agent skill assignment driven by AGENTS.md (skills listed under each agent)

@@ -13,6 +13,7 @@ use crate::supervisor::AgentSupervisor;
 use mcclawd_core::hooks::{
     AuditHook, DlpHook, HookPipeline, PgAuditSink, SecretScannerHook, SecuritySidecarHook,
 };
+use mcclawd_core::identity::IdentityProvider;
 use mcclawd_core::secrets::{EncryptedFileBackend, SecretBackend};
 use mcclawd_core::skills::SandboxConfig;
 use mcclawd_core::types::TaskId;
@@ -948,13 +949,39 @@ async fn reconcile_containers_and_tasks(state: AppState, pg_store: PgTaskStore) 
                             pids_limit: config.sandbox.pids_limit,
                             ..Default::default()
                         };
+
+                        // Build secrets map for restarted container (API key + identity token)
+                        let mut restart_secrets = std::collections::HashMap::new();
+                        {
+                            let vault_key = if let Some(backend) = state.secrets.read().await.as_ref() {
+                                backend.get("ANTHROPIC_API_KEY").await.ok().flatten()
+                            } else {
+                                None
+                            };
+                            if let Some(k) = vault_key
+                                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+                                .map(|k| k.trim().to_string())
+                                .filter(|k| !k.is_empty())
+                            {
+                                restart_secrets.insert("ANTHROPIC_API_KEY".to_string(), k);
+                            }
+                        }
+                        // Generate identity token for restarted container
+                        {
+                            let identity = mcclawd_core::identity::JwtIdentityProvider::new(&state.jwt_secret);
+                            let agent_id = mcclawd_core::types::AgentId(format!("task-{}", &tid.0));
+                            if let Ok(token) = identity.issue(&agent_id).await {
+                                restart_secrets.insert("__identity_token".to_string(), token);
+                            }
+                        }
+
                         match orch
                             .create_persistent_runner_container(
                                 tid,
                                 &agent_env,
                                 &sandbox_cfg.workspace_dir,
                                 &sandbox_cfg,
-                                &std::collections::HashMap::new(),
+                                &restart_secrets,
                                 25, // default max_turns
                                 None, // agent_type
                                 None, // attachments_dir
