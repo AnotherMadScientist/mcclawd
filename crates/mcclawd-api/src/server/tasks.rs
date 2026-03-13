@@ -991,6 +991,10 @@ pub struct SendMessageRequest {
     /// Used for edit/retry: discard everything after the edited message.
     #[serde(default)]
     pub truncate_history_to: Option<usize>,
+    /// Optional skill names to add to this task (merged with existing skills).
+    /// Used when files are attached in follow-ups to auto-inject doc-analyzer.
+    #[serde(default)]
+    pub add_skills: Option<Vec<String>>,
 }
 
 /// POST /api/tasks/{id}/message — send a follow-up message to an existing task
@@ -1070,6 +1074,19 @@ pub async fn send_message(
         mgr.running(&task_id);
     }
     state.pg_update_status(&task_id, "Running", None).await;
+
+    // Merge any additional skills requested (e.g. doc-analyzer for file attachments)
+    if let Some(ref new_skills) = body.add_skills {
+        if !new_skills.is_empty() {
+            let mut skills_map = state.task_skills.write().await;
+            let existing = skills_map.entry(task_id.clone()).or_default();
+            for s in new_skills {
+                if !existing.contains(s) {
+                    existing.push(s.clone());
+                }
+            }
+        }
+    }
 
     // Spawn agent execution for the follow-up message
     let workspace_name = "default".to_string();

@@ -99,10 +99,14 @@ export const api = {
     clearAll: () => apiFetch<{ deleted: number }>("/api/tasks", { method: "DELETE" }),
     deleteByTag: (tag: string) =>
       apiFetch<{ deleted: number }>(`/api/tasks?tag=${encodeURIComponent(tag)}`, { method: "DELETE" }),
-    sendMessage: (id: string, message: string, truncateHistoryTo?: number) =>
+    sendMessage: (id: string, message: string, truncateHistoryTo?: number, addSkills?: string[]) =>
       apiFetch<void>(`/api/tasks/${id}/message`, {
         method: "POST",
-        body: JSON.stringify({ message, truncate_history_to: truncateHistoryTo ?? null }),
+        body: JSON.stringify({
+          message,
+          truncate_history_to: truncateHistoryTo ?? null,
+          add_skills: addSkills ?? null,
+        }),
       }),
     uploadAttachments: async (taskId: string, files: File[]) => {
       if (!files.length) return [] as AttachmentMeta[];

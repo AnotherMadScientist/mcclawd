@@ -63,7 +63,7 @@ export function NewTaskPage() {
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [selectedToolProfile, setSelectedToolProfile] = useState<string>("");
   const [tagsInput, setTagsInput] = useState("");
-  const { files, addFiles, removeFile, clear: clearFiles } = useFileAttachments();
+  const { files, addFiles: rawAddFiles, removeFile, clear: clearFiles } = useFileAttachments();
   const navigate = useNavigate();
 
   const { data: config } = useQuery({
@@ -99,6 +99,22 @@ export function NewTaskPage() {
     queryKey: ["installed-skills"],
     queryFn: api.skills.list,
   });
+
+  // Auto-select doc-analyzer skill when files are attached (provides langextract MCP tool)
+  const installedSkillsRef = useRef(installedSkills);
+  installedSkillsRef.current = installedSkills;
+
+  const addFiles = useCallback((newFiles: FileList | File[]) => {
+    rawAddFiles(newFiles);
+    const count = newFiles instanceof FileList ? newFiles.length : newFiles.length;
+    if (count > 0) {
+      setSelectedSkills((prev) => {
+        if (prev.includes("doc-analyzer")) return prev;
+        if (!installedSkillsRef.current.some((s) => s.name === "doc-analyzer")) return prev;
+        return [...prev, "doc-analyzer"];
+      });
+    }
+  }, [rawAddFiles]);
 
   // Resolve effective model/workspace (from selectors, falling back to config)
   const effectiveModel = selectedModel || config?.agent.model;

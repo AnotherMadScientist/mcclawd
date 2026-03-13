@@ -92,7 +92,9 @@ export function TaskDetailPage() {
       if (attachedFiles.length > 0) {
         await api.tasks.uploadAttachments(id, attachedFiles.map((f) => f.file));
       }
-      await api.tasks.sendMessage(id, message);
+      // Auto-inject doc-analyzer skill when files are attached (provides langextract MCP tool)
+      const addSkills = attachedFiles.length > 0 ? ["doc-analyzer"] : undefined;
+      await api.tasks.sendMessage(id, message, undefined, addSkills);
       setFollowUp("");
       followUpBeforeMicRef.current = "";
       micActiveRef.current = false;
