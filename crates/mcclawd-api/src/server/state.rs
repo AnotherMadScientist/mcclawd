@@ -143,7 +143,8 @@ impl AppState {
             Ok(s) if !s.trim().is_empty() => return Ok(s.trim().to_string()),
             Ok(_) | Err(_) => {} // missing or empty — generate below
         }
-        let secret = uuid::Uuid::new_v4().to_string();
+        let bytes: [u8; 32] = rand::random();
+        let secret: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }

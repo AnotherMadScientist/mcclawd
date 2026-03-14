@@ -5,6 +5,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use mcclawd_swarm::{SwarmConfig, SwarmCoordinator, SwarmPlanner};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -74,16 +75,72 @@ pub async fn create_swarm(
     // Spawn background swarm execution
     let registry = state.swarm_registry.clone();
     let pg_store = state.pg_store.clone();
+    let secrets = state.secrets.clone();
     let sid = swarm_id.clone();
     let prompt = payload.prompt.clone();
 
     tokio::spawn(async move {
-        // Update status to Running
+        // Resolve API key: try secrets vault first, then env var
+        let api_key = {
+            let secrets_guard = secrets.read().await;
+            match secrets_guard.as_ref() {
+                Some(backend) => backend
+                    .get("ANTHROPIC_API_KEY")
+                    .await
+                    .ok()
+                    .flatten(),
+                None => None,
+            }
+        };
+        let api_key = api_key
+            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok());
+
+        let api_key = match api_key {
+            Some(key) if !key.is_empty() => key,
+            _ => {
+                tracing::error!(swarm_id = %sid, "No API key available for swarm execution");
+                registry.update_status(&sid, SwarmRunStatus::Failed {
+                    error: "No API key available".into(),
+                });
+                let store = pg_store.clone();
+                let sid_c = sid.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = store.update_swarm_run(&sid_c, "failed", Some("No API key available")).await {
+                        tracing::warn!(error = %e, "Failed to persist swarm failed status");
+                    }
+                });
+                return;
+            }
+        };
+
+        // Plan: decompose the prompt into a TaskDag
+        let planner = SwarmPlanner::new(None, api_key);
+        let dag = match planner.decompose(&prompt, &[]).await {
+            Ok(dag) => dag,
+            Err(e) => {
+                let error_msg = format!("Planning failed: {e}");
+                tracing::error!(swarm_id = %sid, error = %e, "Swarm planning failed");
+                registry.update_status(&sid, SwarmRunStatus::Failed {
+                    error: error_msg.clone(),
+                });
+                let store = pg_store.clone();
+                let sid_c = sid.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = store.update_swarm_run(&sid_c, "failed", Some(&error_msg)).await {
+                        tracing::warn!(error = %e, "Failed to persist swarm failed status");
+                    }
+                });
+                return;
+            }
+        };
+
+        // Update status to Running with wave count from the DAG
+        let total_waves = dag.topological_waves().map(|w| w.len()).unwrap_or(0);
         registry.update_status(
             &sid,
             SwarmRunStatus::Running {
                 wave: 0,
-                total_waves: 0,
+                total_waves,
             },
         );
         // Persist running status (fire-and-forget)
@@ -95,9 +152,7 @@ pub async fn create_swarm(
             }
         });
 
-        // Build a DAG and execute via SwarmCoordinator
-        // Phase 2: This would use SwarmPlanner to build a real DAG from the prompt
-        // For now, log that we would execute
+        // Execute the DAG via SwarmCoordinator
         tokio::select! {
             _ = cancel_token.cancelled() => {
                 tracing::info!(swarm_id = %sid, "Swarm cancelled by user");
@@ -110,24 +165,41 @@ pub async fn create_swarm(
                     }
                 });
             }
-            _ = async {
-                tracing::info!(swarm_id = %sid, prompt = %prompt, "Swarm execution started (stub)");
-                // Simulate some work
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-                registry.update_status(&sid, SwarmRunStatus::Completed);
-                registry.set_result(&sid, format!("Swarm completed for: {prompt}"));
-                tracing::info!(swarm_id = %sid, "Swarm execution completed");
-                // Persist completed status + result
-                let result_text = format!("Swarm completed for: {prompt}");
-                let store = pg_store.clone();
-                let sid_c = sid.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = store.update_swarm_run(&sid_c, "completed", Some(&result_text)).await {
-                        tracing::warn!(error = %e, "Failed to persist swarm completed status");
+            result = async {
+                let coordinator = SwarmCoordinator::new(SwarmConfig::default());
+                coordinator.execute(&prompt, &dag).await
+            } => {
+                match result {
+                    Ok(swarm_result) => {
+                        registry.update_status(&sid, SwarmRunStatus::Completed);
+                        registry.set_result(&sid, swarm_result.final_output.clone());
+                        tracing::info!(swarm_id = %sid, "Swarm execution completed");
+                        // Persist completed status + result
+                        let result_text = swarm_result.final_output;
+                        let store = pg_store.clone();
+                        let sid_c = sid.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = store.update_swarm_run(&sid_c, "completed", Some(&result_text)).await {
+                                tracing::warn!(error = %e, "Failed to persist swarm completed status");
+                            }
+                        });
                     }
-                });
-            } => {}
+                    Err(e) => {
+                        let error_msg = format!("Swarm execution failed: {e}");
+                        tracing::error!(swarm_id = %sid, error = %e, "Swarm execution failed");
+                        registry.update_status(&sid, SwarmRunStatus::Failed {
+                            error: error_msg.clone(),
+                        });
+                        let store = pg_store.clone();
+                        let sid_c = sid.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = store.update_swarm_run(&sid_c, "failed", Some(&error_msg)).await {
+                                tracing::warn!(error = %e, "Failed to persist swarm failed status");
+                            }
+                        });
+                    }
+                }
+            }
         }
     });
 

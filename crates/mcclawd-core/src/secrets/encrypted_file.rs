@@ -20,23 +20,41 @@ struct SecretRecord {
     descriptor: Option<String>,
 }
 
+/// Legacy fixed salt used by the original format (pre-random-salt).
+const LEGACY_FIXED_SALT: &[u8] = b"mcclawd-secrets-v1";
+
+/// Salt length for the new format.
+const SALT_LEN: usize = 16;
+
+/// Nonce length for AES-256-GCM-SIV.
+const NONCE_LEN: usize = 12;
+
 /// Encrypted file-based secret storage.
 /// Secrets are stored as JSON encrypted with AES-256-GCM-SIV.
 /// The encryption key is derived from a passphrase via argon2.
 ///
-/// Storage format v2: `HashMap<String, SecretRecord>` (value + descriptor).
-/// Automatically migrates from v1 format (`HashMap<String, String>`).
+/// File format (current): `[16 bytes salt][12 bytes nonce][ciphertext]`
+/// Legacy format: `[12 bytes nonce][ciphertext]` (uses fixed salt)
+///
+/// Storage payload v2: `HashMap<String, SecretRecord>` (value + descriptor).
+/// Automatically migrates from v1 payload (`HashMap<String, String>`)
+/// and from legacy file format (fixed salt).
 pub struct EncryptedFileBackend {
     path: PathBuf,
+    passphrase: Zeroizing<String>,
+    salt: [u8; SALT_LEN],
     key: Zeroizing<[u8; 32]>,
     cache: RwLock<HashMap<String, SecretRecord>>,
 }
 
 impl EncryptedFileBackend {
     pub fn new(path: &Path, passphrase: &str) -> Result<Self> {
-        let key = derive_key(passphrase)?;
+        let salt: [u8; SALT_LEN] = rand::random();
+        let key = derive_key(passphrase, &salt)?;
         let mut backend = Self {
             path: path.to_path_buf(),
+            passphrase: Zeroizing::new(passphrase.to_string()),
+            salt,
             key: Zeroizing::new(key),
             cache: RwLock::new(HashMap::new()),
         };
@@ -46,9 +64,12 @@ impl EncryptedFileBackend {
 
     /// Create backend without loading from disk (for when vault doesn't exist yet).
     pub fn new_empty(path: &Path, passphrase: &str) -> Result<Self> {
-        let key = derive_key(passphrase)?;
+        let salt: [u8; SALT_LEN] = rand::random();
+        let key = derive_key(passphrase, &salt)?;
         Ok(Self {
             path: path.to_path_buf(),
+            passphrase: Zeroizing::new(passphrase.to_string()),
+            salt,
             key: Zeroizing::new(key),
             cache: RwLock::new(HashMap::new()),
         })
@@ -58,20 +79,43 @@ impl EncryptedFileBackend {
         if !self.path.exists() {
             return Ok(());
         }
-        let ciphertext = std::fs::read(&self.path)
+        let data = std::fs::read(&self.path)
             .map_err(|e| McclawdError::Secret(format!("Failed to read secrets file: {e}")))?;
-        if ciphertext.len() < 12 {
+        if data.len() < NONCE_LEN {
             return Err(McclawdError::Secret("Secrets file too short".into()));
         }
-        let (nonce_bytes, encrypted) = ciphertext.split_at(12);
-        let nonce = Nonce::from_slice(nonce_bytes);
-        let cipher = Aes256GcmSiv::new_from_slice(self.key.as_ref())
-            .map_err(|e| McclawdError::Secret(format!("Cipher init error: {e}")))?;
-        let plaintext = cipher
-            .decrypt(nonce, encrypted)
-            .map_err(|e| McclawdError::Secret(format!("Decryption failed: {e}")))?;
 
-        // Try v2 format first (HashMap<String, SecretRecord>),
+        // Try new format first: [16-byte salt][12-byte nonce][ciphertext]
+        let plaintext = if data.len() >= SALT_LEN + NONCE_LEN {
+            let (salt_bytes, rest) = data.split_at(SALT_LEN);
+            let (nonce_bytes, encrypted) = rest.split_at(NONCE_LEN);
+
+            let mut file_salt = [0u8; SALT_LEN];
+            file_salt.copy_from_slice(salt_bytes);
+            let key = derive_key(&self.passphrase, &file_salt)?;
+
+            let cipher = Aes256GcmSiv::new_from_slice(&key)
+                .map_err(|e| McclawdError::Secret(format!("Cipher init error: {e}")))?;
+            let nonce = Nonce::from_slice(nonce_bytes);
+
+            match cipher.decrypt(nonce, encrypted) {
+                Ok(pt) => {
+                    // New format succeeded — adopt the file's salt and key
+                    self.salt = file_salt;
+                    self.key = Zeroizing::new(key);
+                    pt
+                }
+                Err(_) => {
+                    // New format failed — try legacy format: [12-byte nonce][ciphertext]
+                    self.try_legacy_decrypt(&data)?
+                }
+            }
+        } else {
+            // File too short for new format but >= 12 bytes — must be legacy
+            self.try_legacy_decrypt(&data)?
+        };
+
+        // Try v2 payload first (HashMap<String, SecretRecord>),
         // fall back to v1 (HashMap<String, String>) and migrate.
         let map: HashMap<String, SecretRecord> =
             match serde_json::from_slice::<HashMap<String, SecretRecord>>(&plaintext) {
@@ -96,6 +140,26 @@ impl EncryptedFileBackend {
         Ok(())
     }
 
+    /// Attempt to decrypt using the legacy fixed salt format: [12-byte nonce][ciphertext].
+    fn try_legacy_decrypt(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        let legacy_key = derive_key(&self.passphrase, LEGACY_FIXED_SALT)?;
+        let (nonce_bytes, encrypted) = data.split_at(NONCE_LEN);
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let cipher = Aes256GcmSiv::new_from_slice(&legacy_key)
+            .map_err(|e| McclawdError::Secret(format!("Cipher init error: {e}")))?;
+        let plaintext = cipher
+            .decrypt(nonce, encrypted)
+            .map_err(|e| McclawdError::Secret(format!("Decryption failed: {e}")))?;
+
+        // Legacy format succeeded — generate a fresh random salt for future writes
+        let new_salt: [u8; SALT_LEN] = rand::random();
+        let new_key = derive_key(&self.passphrase, &new_salt)?;
+        self.salt = new_salt;
+        self.key = Zeroizing::new(new_key);
+
+        Ok(plaintext)
+    }
+
     async fn save_to_disk(&self) -> Result<()> {
         let cache = self.cache.read().await;
         let plaintext = serde_json::to_vec(&*cache)?;
@@ -106,7 +170,10 @@ impl EncryptedFileBackend {
         let ciphertext = cipher
             .encrypt(nonce, plaintext.as_ref())
             .map_err(|e| McclawdError::Secret(format!("Encryption failed: {e}")))?;
-        let mut output = nonce_bytes.to_vec();
+
+        // New format: [16-byte salt][12-byte nonce][ciphertext]
+        let mut output = self.salt.to_vec();
+        output.extend_from_slice(&nonce_bytes);
         output.extend_from_slice(&ciphertext);
 
         if let Some(parent) = self.path.parent() {
@@ -210,8 +277,7 @@ impl SecretBackend for EncryptedFileBackend {
     }
 }
 
-fn derive_key(passphrase: &str) -> Result<[u8; 32]> {
-    let salt = b"mcclawd-secrets-v1"; // Fixed salt — acceptable for local-only use
+fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; 32]> {
     let mut key = [0u8; 32];
     Argon2::default()
         .hash_password_into(passphrase.as_bytes(), salt, &mut key)
