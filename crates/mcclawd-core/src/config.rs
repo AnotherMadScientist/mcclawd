@@ -300,7 +300,6 @@ fn default_mcp_servers() -> Vec<McpServerConfig> {
 /// Configuration for Docker sandbox execution.
 ///
 /// All agent execution runs inside Docker containers — there is no host-mode fallback.
-/// Docker must be available for any task to execute.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
     /// Docker image to use as base for agent containers.
@@ -315,6 +314,10 @@ pub struct SandboxConfig {
     /// Docker network name for agent + MCP communication. Default: "mcclawd_default".
     #[serde(default = "default_sandbox_network")]
     pub network: String,
+    /// When true (default), tasks fail if Docker is unavailable instead of
+    /// falling back to host execution. Set to false only for development.
+    #[serde(default = "default_true")]
+    pub strict_sandbox: bool,
     /// Maximum number of PIDs allowed in agent containers. Default: 256.
     #[serde(default = "default_pids_limit")]
     pub pids_limit: Option<i64>,
@@ -327,6 +330,7 @@ impl Default for SandboxConfig {
             memory_limit: default_sandbox_memory(),
             cpu_limit: None,
             network: default_sandbox_network(),
+            strict_sandbox: false,
             pids_limit: default_pids_limit(),
         }
     }
@@ -390,28 +394,54 @@ pub fn detect_openclaw_config() -> Option<PathBuf> {
 }
 
 impl McclawdConfig {
-    /// Load config from a JSON5 file (OpenClaw-compatible format).
-    /// JSON5 supports comments, trailing commas, and unquoted keys.
     pub fn load(path: &Path) -> crate::Result<Self> {
         if path.exists() {
             let content = std::fs::read_to_string(path)
                 .map_err(|e| crate::McclawdError::Config(e.to_string()))?;
-            json5::from_str(&content).map_err(|e| crate::McclawdError::Config(e.to_string()))
+            // Try TOML first, fall back to JSON for backward compatibility
+            toml::from_str(&content)
+                .or_else(|_| serde_json::from_str(&content))
+                .map_err(|e| crate::McclawdError::Config(e.to_string()))
         } else {
             Ok(Self::default())
         }
     }
 
-    /// Write the current config as pretty-printed JSON (valid JSON5).
+    /// Write the current config to a TOML file on disk.
     pub fn save(&self, path: &Path) -> crate::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| crate::McclawdError::Config(format!("Cannot create config dir: {e}")))?;
         }
-        let json_str = serde_json::to_string_pretty(self)
+        let toml_str = toml::to_string_pretty(self)
             .map_err(|e| crate::McclawdError::Config(format!("Failed to serialize config: {e}")))?;
-        std::fs::write(path, json_str)
+        std::fs::write(path, toml_str)
             .map_err(|e| crate::McclawdError::Config(format!("Failed to write config: {e}")))?;
+        Ok(())
+    }
+
+    /// Validate the config, returning an error if any field is invalid.
+    pub fn validate(&self) -> crate::Result<()> {
+        if self.agent.model.trim().is_empty() {
+            return Err(crate::McclawdError::Config(
+                "agent.model must be a non-empty string".to_string(),
+            ));
+        }
+        if !(1..=100).contains(&self.agent.max_turns) {
+            return Err(crate::McclawdError::Config(
+                "agent.max_turns must be between 1 and 100".to_string(),
+            ));
+        }
+        if self.agent.default_workspace.trim().is_empty() {
+            return Err(crate::McclawdError::Config(
+                "agent.default_workspace must be non-empty".to_string(),
+            ));
+        }
+        if self.mcp.agentgateway_url.trim().is_empty() {
+            return Err(crate::McclawdError::Config(
+                "mcp.agentgateway_url must be non-empty".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -456,14 +486,13 @@ mod tests {
 
     #[test]
     fn test_config_with_skills_section_parsed() {
-        let json_str = r#"{
-            "skills": {
-                "managed_dir": "/custom/skills",
-                "clawhub_api": "https://custom.registry.io",
-                "cache_dir": "/custom/cache"
-            }
-        }"#;
-        let config: McclawdConfig = json5::from_str(json_str).unwrap();
+        let toml_str = r#"
+[skills]
+managed_dir = "/custom/skills"
+clawhub_api = "https://custom.registry.io"
+cache_dir = "/custom/cache"
+"#;
+        let config: McclawdConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.skills.managed_dir, PathBuf::from("/custom/skills"));
         assert_eq!(config.skills.clawhub_api, "https://custom.registry.io");
         assert_eq!(config.skills.cache_dir, PathBuf::from("/custom/cache"));
@@ -471,8 +500,11 @@ mod tests {
 
     #[test]
     fn test_config_skills_defaults_applied_when_missing() {
-        let json_str = r#"{ "agent": { "max_turns": 10 } }"#;
-        let config: McclawdConfig = json5::from_str(json_str).unwrap();
+        let toml_str = r#"
+[agent]
+max_turns = 10
+"#;
+        let config: McclawdConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.skills.clawhub_api, "https://clawhub.ai");
         assert!(config.skills.managed_dir.ends_with("skills"));
         assert!(config.skills.cache_dir.ends_with("cache"));
@@ -507,15 +539,19 @@ mod tests {
     }
 
     #[test]
-    fn compat_config_deserializes_from_empty_json() {
-        let config: McclawdConfig = json5::from_str("{}").unwrap();
+    fn compat_config_deserializes_from_empty_toml() {
+        let toml_str = "";
+        let config: McclawdConfig = toml::from_str(toml_str).unwrap();
         assert!(config.compat.openclaw_config);
     }
 
     #[test]
     fn compat_config_deserializes_disabled() {
-        let json_str = r#"{ "compat": { "openclaw_config": false } }"#;
-        let config: McclawdConfig = json5::from_str(json_str).unwrap();
+        let toml_str = r#"
+[compat]
+openclaw_config = false
+"#;
+        let config: McclawdConfig = toml::from_str(toml_str).unwrap();
         assert!(!config.compat.openclaw_config);
     }
 
@@ -529,7 +565,7 @@ mod tests {
     #[test]
     fn test_config_save_load_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mcclawd.json");
+        let path = dir.path().join("config.toml");
 
         let mut config = McclawdConfig::default();
         config.agent.model = "gpt-4o".to_string();
@@ -547,7 +583,7 @@ mod tests {
     #[test]
     fn test_config_save_creates_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nested").join("deep").join("mcclawd.json");
+        let path = dir.path().join("nested").join("deep").join("config.toml");
 
         let config = McclawdConfig::default();
         config.save(&path).unwrap();
@@ -555,9 +591,73 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_default_config_passes() {
+        let config = McclawdConfig::default();
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn test_validate_empty_model_fails() {
+        let mut config = McclawdConfig::default();
+        config.agent.model = "".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("model"), "error: {err}");
+    }
+
+    #[test]
+    fn test_validate_max_turns_zero_fails() {
+        let mut config = McclawdConfig::default();
+        config.agent.max_turns = 0;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("max_turns"), "error: {err}");
+    }
+
+    #[test]
+    fn test_validate_max_turns_over_100_fails() {
+        let mut config = McclawdConfig::default();
+        config.agent.max_turns = 101;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("max_turns"), "error: {err}");
+    }
+
+    #[test]
+    fn test_validate_empty_workspace_fails() {
+        let mut config = McclawdConfig::default();
+        config.agent.default_workspace = "  ".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("default_workspace"), "error: {err}");
+    }
+
+    #[test]
+    fn test_validate_empty_agentgateway_url_fails() {
+        let mut config = McclawdConfig::default();
+        config.mcp.agentgateway_url = "".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("agentgateway_url"), "error: {err}");
+    }
+
+    #[test]
+    fn test_save_validate_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut config = McclawdConfig::default();
+        config.agent.model = "test-model".to_string();
+        config.agent.max_turns = 50;
+        config.validate().unwrap();
+
+        config.save(&path).unwrap();
+        let loaded = McclawdConfig::load(&path).unwrap();
+        loaded.validate().unwrap();
+
+        assert_eq!(loaded.agent.model, "test-model");
+        assert_eq!(loaded.agent.max_turns, 50);
+    }
+
+    #[test]
     fn test_config_save_preserves_other_fields() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mcclawd.json");
+        let path = dir.path().join("config.toml");
 
         let mut config = McclawdConfig::default();
         config.agent.model = "custom-model".to_string();

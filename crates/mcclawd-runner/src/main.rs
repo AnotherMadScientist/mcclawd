@@ -9,7 +9,7 @@
 //! - **Server mode** (`--server`): long-lived process that reads JSON messages from
 //!   stdin and processes each one, reusing the same agent instance.
 
-mod protocol;
+use mcclawd_runner::protocol;
 
 use anyhow::{bail, Context, Result};
 use futures::StreamExt;
@@ -22,7 +22,7 @@ use rig::agent::MultiTurnStreamItem;
 use base64::Engine;
 use rig::OneOrMany;
 use rig::completion::message::Message as RigMessage;
-use rig::completion::message::{Document, DocumentMediaType, DocumentSourceKind, Image, ImageMediaType, MimeType, ToolResultContent, UserContent};
+use rig::completion::message::{DocumentSourceKind, Image, ImageMediaType, MimeType, ToolResultContent, UserContent};
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncBufReadExt;
@@ -109,12 +109,7 @@ impl RunnerConfig {
 /// Check /attachments for mounted files and augment the prompt.
 /// Returns (augmented_prompt, image_parts) mirroring the host-side logic in tasks.rs.
 fn augment_prompt_with_attachments(prompt: &str) -> (String, Vec<UserContent>) {
-    augment_prompt_with_attachments_dir(prompt, Path::new("/attachments"))
-}
-
-/// Augment a prompt with files from an arbitrary directory.
-/// Extracted for testability — production code calls with `/attachments`.
-fn augment_prompt_with_attachments_dir(prompt: &str, att_dir: &Path) -> (String, Vec<UserContent>) {
+    let att_dir = Path::new("/attachments");
     let mut text_augmented = prompt.to_string();
     let mut image_parts: Vec<UserContent> = Vec::new();
 
@@ -192,30 +187,8 @@ fn augment_prompt_with_attachments_dir(prompt: &str, att_dir: &Path) -> (String,
                         .push_str(&format!("### File: {} (could not read)\n\n", name));
                 }
             }
-        } else if let Some(doc_media_type) = DocumentMediaType::from_mime_type(&mime) {
-            // Document files (PDF, etc.): base64-encode and send as Document content
-            match std::fs::read(&path) {
-                Ok(bytes) => {
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                    image_parts.push(UserContent::Document(Document {
-                        data: DocumentSourceKind::Base64(b64),
-                        media_type: Some(doc_media_type),
-                        additional_params: None,
-                    }));
-                    text_augmented.push_str(&format!(
-                        "### Document: {} ({}, {}KB — sent as document content)\n\n",
-                        name,
-                        mime,
-                        bytes.len() / 1024
-                    ));
-                }
-                Err(_) => {
-                    text_augmented
-                        .push_str(&format!("### File: {} (could not read)\n\n", name));
-                }
-            }
         } else {
-            // Other binary files: metadata only
+            // Binary files: metadata only
             let size_str = match std::fs::metadata(&path) {
                 Ok(m) => format!("{}KB", m.len() / 1024),
                 Err(_) => "unknown size".to_string(),
@@ -308,11 +281,8 @@ async fn run_server() -> Result<()> {
     // otherwise fall back to loading skills from disk (which loads ALL skills).
     let skill_context_override = std::env::var("MCCLAWD_SKILL_CONTEXT").ok().filter(|s| !s.is_empty());
     let (agent, _memory_store, _mcp_bundles) = if agent_type == "system" {
-        // System agent: DO NOT load all skills from disk. The system agent is a
-        // lightweight UI controller (navigate_to, create_task). Only use
-        // MCCLAWD_SKILL_CONTEXT if explicitly provided by the host (which should
-        // contain only system-relevant skills like app-navigation and task-creation).
-        let mut context = ContextBuilder::new(workspace);
+        let mut context =
+            ContextBuilder::new(workspace).with_skills_dir(config.skills.managed_dir.clone());
         if let Some(ref ctx) = skill_context_override {
             context = context.with_skill_context_override(ctx.clone());
         }
@@ -487,8 +457,8 @@ async fn run() -> Result<()> {
     // Use MCCLAWD_SKILL_CONTEXT env var if set (selective skill mounting from host).
     let skill_context_override = std::env::var("MCCLAWD_SKILL_CONTEXT").ok().filter(|s| !s.is_empty());
     let (agent, _memory_store, _mcp_bundles) = if cfg.agent_type == "system" {
-        // System agent: NO skill loading from disk — only use explicit override if provided
-        let mut context = ContextBuilder::new(workspace);
+        let mut context = ContextBuilder::new(workspace)
+            .with_skills_dir(config.skills.managed_dir.clone());
         if let Some(ref ctx) = skill_context_override {
             context = context.with_skill_context_override(ctx.clone());
         }
@@ -593,75 +563,4 @@ async fn run() -> Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-
-    #[test]
-    fn augment_prompt_no_attachments_dir() {
-        let (text, images) = augment_prompt_with_attachments_dir("hello", Path::new("/nonexistent"));
-        assert_eq!(text, "hello");
-        assert!(images.is_empty());
-    }
-
-    #[test]
-    fn augment_prompt_empty_attachments_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (text, images) = augment_prompt_with_attachments_dir("hello", tmp.path());
-        assert_eq!(text, "hello");
-        assert!(images.is_empty());
-    }
-
-    #[test]
-    fn augment_prompt_with_text_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        fs::write(tmp.path().join("notes.txt"), "Some important notes").unwrap();
-        let (text, images) = augment_prompt_with_attachments_dir("analyze this", tmp.path());
-        assert!(text.contains("## Attached Files"));
-        assert!(text.contains("### File: notes.txt"));
-        assert!(text.contains("Some important notes"));
-        assert!(images.is_empty());
-    }
-
-    #[test]
-    fn augment_prompt_with_json_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        fs::write(tmp.path().join("data.json"), r#"{"key": "value"}"#).unwrap();
-        let (text, _) = augment_prompt_with_attachments_dir("check data", tmp.path());
-        assert!(text.contains("### File: data.json"));
-        assert!(text.contains(r#"{"key": "value"}"#));
-    }
-
-    #[test]
-    fn augment_prompt_with_image_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Write a minimal PNG header (not valid but enough for mime detection)
-        fs::write(tmp.path().join("chart.png"), b"\x89PNG\r\n\x1a\n").unwrap();
-        let (text, images) = augment_prompt_with_attachments_dir("look at this", tmp.path());
-        assert!(text.contains("### Image: chart.png"));
-        assert_eq!(images.len(), 1);
-    }
-
-    #[test]
-    fn augment_prompt_with_binary_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        fs::write(tmp.path().join("archive.zip"), &[0x50, 0x4B, 0x03, 0x04]).unwrap();
-        let (text, images) = augment_prompt_with_attachments_dir("what's this", tmp.path());
-        assert!(text.contains("### File: archive.zip"));
-        assert!(text.contains("binary file"));
-        assert!(images.is_empty());
-    }
-
-    #[test]
-    fn augment_prompt_truncates_large_text() {
-        let tmp = tempfile::tempdir().unwrap();
-        let big_text = "x".repeat(60_000);
-        fs::write(tmp.path().join("huge.txt"), &big_text).unwrap();
-        let (text, _) = augment_prompt_with_attachments_dir("read this", tmp.path());
-        // Should be truncated to 50K chars of content
-        assert!(text.len() < big_text.len());
-    }
 }

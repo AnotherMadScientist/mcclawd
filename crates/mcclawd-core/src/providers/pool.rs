@@ -191,6 +191,16 @@ pub struct BudgetAlerts {
     pub daily: Option<BudgetAlertDetail>,
     pub monthly: Option<BudgetAlertDetail>,
     pub per_task_limit_usd: Option<f64>,
+    /// Per-task alerts for tasks approaching or exceeding per-task limit.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub per_task: Vec<TaskBudgetAlert>,
+}
+
+/// Budget alert for a specific task's accumulated spend.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskBudgetAlert {
+    pub task_id: String,
+    pub detail: BudgetAlertDetail,
 }
 
 /// Estimate cost in USD for a given model and token counts.
@@ -319,6 +329,8 @@ pub struct ProviderPool {
     daily_history: Mutex<Vec<DailyUsage>>,
     /// Optional path to persist usage data as JSON file (fallback when no DB).
     data_dir: Option<PathBuf>,
+    /// Per-task accumulated cost in millicents (task_id -> cost_millicents).
+    task_cost_millicents: DashMap<String, AtomicU64>,
 }
 
 impl ProviderPool {
@@ -342,6 +354,7 @@ impl ProviderPool {
             task_usage: Mutex::new(Vec::new()),
             daily_history: Mutex::new(Vec::new()),
             data_dir: data_dir.clone(),
+            task_cost_millicents: DashMap::new(),
         };
         // Load persisted usage from file if available
         if let Some(ref dir) = data_dir {
@@ -477,6 +490,34 @@ impl ProviderPool {
         )
     }
 
+    /// Select the best available provider for a model, also enforcing per-task budget.
+    ///
+    /// Like `select_provider` but additionally checks the accumulated spend for
+    /// `task_id` against the per-task limit.
+    pub fn select_provider_for_task(
+        &self,
+        model: &str,
+        task_id: &str,
+    ) -> anyhow::Result<ProviderEntry> {
+        // Check per-task budget first (applies to all candidates).
+        if !self.check_task_budget_by_id(task_id) {
+            let spent = self.get_task_spend_usd(task_id);
+            let limit = self
+                .config
+                .budget
+                .as_ref()
+                .and_then(|b| b.per_task_limit_usd)
+                .unwrap_or(0.0);
+            anyhow::bail!(
+                "Task '{}' exceeded per-task budget (${:.2} / ${:.2})",
+                task_id,
+                spent,
+                limit
+            );
+        }
+        self.select_provider(model)
+    }
+
     /// Record usage for a provider (backward-compatible: no model tracking).
     pub fn record_usage(&self, provider_name: &str, tokens: u64, cost_usd: f64) {
         self.record_usage_detailed(provider_name, tokens, 0, 0, cost_usd, None);
@@ -523,6 +564,14 @@ impl ProviderPool {
             entry.total_tokens += total_tokens;
             entry.estimated_cost_usd += cost_usd;
             entry.request_count += 1;
+        }
+
+        // Per-task cost accumulation (for budget enforcement)
+        if let Some((task_id, _, _)) = task_info {
+            self.task_cost_millicents
+                .entry(task_id.to_string())
+                .or_insert_with(|| AtomicU64::new(0))
+                .fetch_add(millicents, Ordering::Relaxed);
         }
 
         // Per-task tracking
@@ -806,6 +855,36 @@ impl ProviderPool {
         }
     }
 
+    /// Check if a running task's accumulated spend is within the per-task budget.
+    ///
+    /// Returns `true` if no per-task limit is configured, the task has no recorded
+    /// spend, or if the accumulated cost is within the limit.
+    pub fn check_task_budget_by_id(&self, task_id: &str) -> bool {
+        let budget = match &self.config.budget {
+            Some(b) => b,
+            None => return true,
+        };
+        let limit = match budget.per_task_limit_usd {
+            Some(l) => l,
+            None => return true,
+        };
+        let spent = self.get_task_spend_usd(task_id);
+        spent <= limit
+    }
+
+    /// Get accumulated spend for a specific task in USD.
+    pub fn get_task_spend_usd(&self, task_id: &str) -> f64 {
+        self.task_cost_millicents
+            .get(task_id)
+            .map(|v| v.load(Ordering::Relaxed) as f64 / 100_000.0)
+            .unwrap_or(0.0)
+    }
+
+    /// Clear per-task cost tracking for a completed task.
+    pub fn clear_task_cost(&self, task_id: &str) {
+        self.task_cost_millicents.remove(task_id);
+    }
+
     /// Update the budget configuration.
     pub fn update_budget(&mut self, budget: Option<BudgetConfig>) {
         self.config.budget = budget;
@@ -820,6 +899,7 @@ impl ProviderPool {
                     daily: None,
                     monthly: None,
                     per_task_limit_usd: None,
+                    per_task: Vec::new(),
                 }
             }
         };
@@ -832,10 +912,32 @@ impl ProviderPool {
             .monthly_limit_usd
             .map(|limit| budget_alert_detail(self.budget_tracker.monthly_spend_usd(), limit));
 
+        // Per-task alerts: check all tracked tasks against per-task limit.
+        let per_task = if let Some(limit) = budget.per_task_limit_usd {
+            self.task_cost_millicents
+                .iter()
+                .filter_map(|entry| {
+                    let spent = entry.value().load(Ordering::Relaxed) as f64 / 100_000.0;
+                    let detail = budget_alert_detail(spent, limit);
+                    if detail.level != BudgetAlertLevel::Ok {
+                        Some(TaskBudgetAlert {
+                            task_id: entry.key().clone(),
+                            detail,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         BudgetAlerts {
             daily,
             monthly,
             per_task_limit_usd: budget.per_task_limit_usd,
+            per_task,
         }
     }
 
@@ -1372,5 +1474,234 @@ mod tests {
         assert_eq!(json, "\"Warning\"");
         let parsed: BudgetAlertLevel = serde_json::from_str("\"Exceeded\"").unwrap();
         assert_eq!(parsed, BudgetAlertLevel::Exceeded);
+    }
+
+    // --- Per-task budget enforcement tests ---
+
+    #[test]
+    fn task_budget_by_id_within_limit() {
+        let pool = make_pool(
+            vec![make_provider("anthropic", ProviderKind::Anthropic, vec!["claude-sonnet-4-5"], 10)],
+            Some(BudgetConfig {
+                daily_limit_usd: None,
+                monthly_limit_usd: None,
+                per_task_limit_usd: Some(1.0),
+            }),
+        );
+        // Record some usage for task-1
+        pool.record_usage_detailed("anthropic", 500, 200, 300, 0.40, Some(("task-1", "hello", "claude-sonnet-4-5")));
+        assert!(pool.check_task_budget_by_id("task-1"));
+    }
+
+    #[test]
+    fn task_budget_by_id_exceeded() {
+        let pool = make_pool(
+            vec![make_provider("anthropic", ProviderKind::Anthropic, vec!["claude-sonnet-4-5"], 10)],
+            Some(BudgetConfig {
+                daily_limit_usd: None,
+                monthly_limit_usd: None,
+                per_task_limit_usd: Some(1.0),
+            }),
+        );
+        // Record usage that exceeds per-task limit
+        pool.record_usage_detailed("anthropic", 5000, 2000, 3000, 0.60, Some(("task-1", "hello", "claude-sonnet-4-5")));
+        pool.record_usage_detailed("anthropic", 5000, 2000, 3000, 0.60, Some(("task-1", "hello", "claude-sonnet-4-5")));
+        assert!(!pool.check_task_budget_by_id("task-1"));
+    }
+
+    #[test]
+    fn task_budget_by_id_no_limit() {
+        let pool = make_pool(
+            vec![make_provider("anthropic", ProviderKind::Anthropic, vec!["claude-sonnet-4-5"], 10)],
+            None,
+        );
+        // No budget configured — always passes.
+        pool.record_usage_detailed("anthropic", 50000, 20000, 30000, 100.0, Some(("task-1", "hello", "claude-sonnet-4-5")));
+        assert!(pool.check_task_budget_by_id("task-1"));
+    }
+
+    #[test]
+    fn task_budget_by_id_unknown_task() {
+        let pool = make_pool(
+            vec![make_provider("anthropic", ProviderKind::Anthropic, vec!["claude-sonnet-4-5"], 10)],
+            Some(BudgetConfig {
+                daily_limit_usd: None,
+                monthly_limit_usd: None,
+                per_task_limit_usd: Some(1.0),
+            }),
+        );
+        // Unknown task has 0 spend — within limit.
+        assert!(pool.check_task_budget_by_id("nonexistent-task"));
+    }
+
+    #[test]
+    fn task_budget_independent_per_task() {
+        let pool = make_pool(
+            vec![make_provider("anthropic", ProviderKind::Anthropic, vec!["claude-sonnet-4-5"], 10)],
+            Some(BudgetConfig {
+                daily_limit_usd: None,
+                monthly_limit_usd: None,
+                per_task_limit_usd: Some(1.0),
+            }),
+        );
+        // task-1 exceeds budget
+        pool.record_usage_detailed("anthropic", 5000, 2000, 3000, 1.50, Some(("task-1", "hello", "claude-sonnet-4-5")));
+        // task-2 is within budget
+        pool.record_usage_detailed("anthropic", 500, 200, 300, 0.30, Some(("task-2", "world", "claude-sonnet-4-5")));
+
+        assert!(!pool.check_task_budget_by_id("task-1"));
+        assert!(pool.check_task_budget_by_id("task-2"));
+    }
+
+    #[test]
+    fn get_task_spend_usd_accumulates() {
+        let pool = make_pool(
+            vec![make_provider("anthropic", ProviderKind::Anthropic, vec!["claude-sonnet-4-5"], 10)],
+            None,
+        );
+        pool.record_usage_detailed("anthropic", 1000, 400, 600, 0.25, Some(("task-1", "hello", "claude-sonnet-4-5")));
+        pool.record_usage_detailed("anthropic", 1000, 400, 600, 0.35, Some(("task-1", "hello", "claude-sonnet-4-5")));
+        let spend = pool.get_task_spend_usd("task-1");
+        assert!((spend - 0.60).abs() < 0.001);
+    }
+
+    #[test]
+    fn clear_task_cost_removes_tracking() {
+        let pool = make_pool(
+            vec![make_provider("anthropic", ProviderKind::Anthropic, vec!["claude-sonnet-4-5"], 10)],
+            Some(BudgetConfig {
+                daily_limit_usd: None,
+                monthly_limit_usd: None,
+                per_task_limit_usd: Some(1.0),
+            }),
+        );
+        pool.record_usage_detailed("anthropic", 5000, 2000, 3000, 1.50, Some(("task-1", "hello", "claude-sonnet-4-5")));
+        assert!(!pool.check_task_budget_by_id("task-1"));
+
+        pool.clear_task_cost("task-1");
+        assert_eq!(pool.get_task_spend_usd("task-1"), 0.0);
+        assert!(pool.check_task_budget_by_id("task-1"));
+    }
+
+    #[test]
+    fn select_provider_for_task_within_budget() {
+        let pool = make_pool(
+            vec![make_provider("anthropic", ProviderKind::Anthropic, vec!["claude-sonnet-4-5"], 10)],
+            Some(BudgetConfig {
+                daily_limit_usd: Some(100.0),
+                monthly_limit_usd: None,
+                per_task_limit_usd: Some(1.0),
+            }),
+        );
+        pool.record_usage_detailed("anthropic", 500, 200, 300, 0.30, Some(("task-1", "hello", "claude-sonnet-4-5")));
+        let result = pool.select_provider_for_task("claude-sonnet-4-5", "task-1");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().name, "anthropic");
+    }
+
+    #[test]
+    fn select_provider_for_task_exceeds_per_task_budget() {
+        let pool = make_pool(
+            vec![make_provider("anthropic", ProviderKind::Anthropic, vec!["claude-sonnet-4-5"], 10)],
+            Some(BudgetConfig {
+                daily_limit_usd: Some(100.0),
+                monthly_limit_usd: None,
+                per_task_limit_usd: Some(1.0),
+            }),
+        );
+        pool.record_usage_detailed("anthropic", 5000, 2000, 3000, 1.50, Some(("task-1", "hello", "claude-sonnet-4-5")));
+        let result = pool.select_provider_for_task("claude-sonnet-4-5", "task-1");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("per-task budget"));
+    }
+
+    // --- Per-task budget alert tests ---
+
+    #[test]
+    fn budget_alerts_include_per_task_warning() {
+        let pool = make_pool(
+            vec![make_provider("anthropic", ProviderKind::Anthropic, vec!["claude-sonnet-4-5"], 10)],
+            Some(BudgetConfig {
+                daily_limit_usd: None,
+                monthly_limit_usd: None,
+                per_task_limit_usd: Some(1.0),
+            }),
+        );
+        // 85% of $1.00 per-task limit
+        pool.record_usage_detailed("anthropic", 5000, 2000, 3000, 0.85, Some(("task-1", "hello", "claude-sonnet-4-5")));
+        let alerts = pool.get_budget_alerts();
+        assert_eq!(alerts.per_task.len(), 1);
+        assert_eq!(alerts.per_task[0].task_id, "task-1");
+        assert_eq!(alerts.per_task[0].detail.level, BudgetAlertLevel::Warning);
+    }
+
+    #[test]
+    fn budget_alerts_include_per_task_exceeded() {
+        let pool = make_pool(
+            vec![make_provider("anthropic", ProviderKind::Anthropic, vec!["claude-sonnet-4-5"], 10)],
+            Some(BudgetConfig {
+                daily_limit_usd: None,
+                monthly_limit_usd: None,
+                per_task_limit_usd: Some(1.0),
+            }),
+        );
+        pool.record_usage_detailed("anthropic", 5000, 2000, 3000, 1.50, Some(("task-1", "hello", "claude-sonnet-4-5")));
+        let alerts = pool.get_budget_alerts();
+        assert_eq!(alerts.per_task.len(), 1);
+        assert_eq!(alerts.per_task[0].detail.level, BudgetAlertLevel::Exceeded);
+    }
+
+    #[test]
+    fn budget_alerts_no_per_task_when_ok() {
+        let pool = make_pool(
+            vec![make_provider("anthropic", ProviderKind::Anthropic, vec!["claude-sonnet-4-5"], 10)],
+            Some(BudgetConfig {
+                daily_limit_usd: None,
+                monthly_limit_usd: None,
+                per_task_limit_usd: Some(1.0),
+            }),
+        );
+        // 30% of $1.00 — should not trigger alert
+        pool.record_usage_detailed("anthropic", 500, 200, 300, 0.30, Some(("task-1", "hello", "claude-sonnet-4-5")));
+        let alerts = pool.get_budget_alerts();
+        assert!(alerts.per_task.is_empty());
+    }
+
+    #[test]
+    fn monthly_reset_clears_monthly_counter() {
+        let pool = make_pool(
+            vec![make_provider("anthropic", ProviderKind::Anthropic, vec!["claude-sonnet-4-5"], 10)],
+            Some(BudgetConfig {
+                daily_limit_usd: None,
+                monthly_limit_usd: Some(50.0),
+                per_task_limit_usd: None,
+            }),
+        );
+        pool.record_usage("anthropic", 10000, 60.0);
+        assert!(!pool.check_budget()); // Over monthly limit.
+
+        // Simulate monthly reset by backdating the period start.
+        pool.budget_tracker
+            .monthly_period_start
+            .store(now_epoch_secs() - SECONDS_PER_MONTH - 1, Ordering::Relaxed);
+
+        // After reset, monthly counter should be 0 again.
+        assert!(pool.check_budget());
+    }
+
+    #[test]
+    fn budget_info_includes_per_task_alert_text() {
+        let pool = make_pool(
+            vec![make_provider("anthropic", ProviderKind::Anthropic, vec!["claude-sonnet-4-5"], 10)],
+            Some(BudgetConfig {
+                daily_limit_usd: Some(10.0),
+                monthly_limit_usd: None,
+                per_task_limit_usd: None,
+            }),
+        );
+        pool.record_usage("anthropic", 5000, 8.5);
+        let info = pool.get_budget_info();
+        assert!(!info.alerts.is_empty());
+        assert!(info.alerts[0].contains("80%") || info.alerts[0].contains("Daily"));
     }
 }

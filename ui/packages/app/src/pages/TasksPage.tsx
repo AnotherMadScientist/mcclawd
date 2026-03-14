@@ -139,11 +139,32 @@ export function TasksPage() {
         </div>
       </div>
 
-      {/* Stats row */}
+      {/* Stats row — click a card to filter by that status */}
       <div className="grid grid-cols-3 gap-4">
-        <StatCard icon={Zap} label="Running" value={running.length} color="text-blue-400" />
-        <StatCard icon={CheckCircle2} label="Completed" value={completed.length} color="text-emerald-400" />
-        <StatCard icon={Server} label="Failed" value={failed.length} color="text-red-400" />
+        <StatCard
+          icon={Zap}
+          label="Running"
+          value={running.length}
+          color="text-blue-400"
+          active={statusFilter === "Running"}
+          onClick={() => setStatusFilter(statusFilter === "Running" ? "all" : "Running")}
+        />
+        <StatCard
+          icon={CheckCircle2}
+          label="Completed"
+          value={completed.length}
+          color="text-emerald-400"
+          active={statusFilter === "Completed"}
+          onClick={() => setStatusFilter(statusFilter === "Completed" ? "all" : "Completed")}
+        />
+        <StatCard
+          icon={Server}
+          label="Failed"
+          value={failed.length}
+          color="text-red-400"
+          active={statusFilter === "Failed"}
+          onClick={() => setStatusFilter(statusFilter === "Failed" ? "all" : "Failed")}
+        />
       </div>
 
       {/* Search + Filter toolbar */}
@@ -264,11 +285,11 @@ export function TasksPage() {
       {/* Recent tasks */}
       <section>
         <h2 className="text-lg font-semibold mb-3">
-          {search || statusFilter !== "all" ? (
+          {search || statusFilter !== "all" || tagFilter ? (
             <span>
               Results{" "}
               <span className="text-muted-foreground font-normal text-sm">
-                ({filteredOther.length} task{filteredOther.length !== 1 ? "s" : ""})
+                ({filteredTasks.length} task{filteredTasks.length !== 1 ? "s" : ""})
               </span>
             </span>
           ) : (
@@ -289,8 +310,24 @@ export function TasksPage() {
               Create your first task to get started
             </p>
           </div>
+        ) : filteredOther.length === 0 && filteredRunning.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-12 text-center">
+            <Search className="w-8 h-8 text-muted-foreground mb-3" />
+            <p className="text-muted-foreground">No tasks match your filters</p>
+            <p className="text-sm text-muted-foreground mt-1">
+              Try adjusting your search or filter criteria
+            </p>
+            {(search || statusFilter !== "all" || tagFilter) && (
+              <button
+                onClick={() => { setSearch(""); setStatusFilter("all"); setTagFilter(null); }}
+                className="mt-3 text-sm text-primary hover:underline"
+              >
+                Clear all filters
+              </button>
+            )}
+          </div>
         ) : filteredOther.length === 0 ? (
-          <p className="text-muted-foreground text-sm py-4">No tasks match your filters.</p>
+          <p className="text-muted-foreground text-sm py-4">No additional tasks match your filters.</p>
         ) : (
           <div className="space-y-3">
             {filteredOther.map((t: Task) => (
@@ -308,14 +345,26 @@ function StatCard({
   label,
   value,
   color,
+  active,
+  onClick,
 }: {
   icon: React.ComponentType<{ className?: string }>;
   label: string;
   value: number;
   color: string;
+  active?: boolean;
+  onClick?: () => void;
 }) {
   return (
-    <div className="p-4 rounded-xl bg-card border border-border">
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "p-4 rounded-xl bg-card border border-border text-left w-full transition-colors",
+        onClick && "cursor-pointer hover:bg-muted/50",
+        active && "ring-2 ring-primary border-primary",
+      )}
+    >
       <div className="flex items-center gap-3">
         <Icon className={cn("w-5 h-5", color)} />
         <div>
@@ -323,6 +372,6 @@ function StatCard({
           <p className="text-xs text-muted-foreground">{label}</p>
         </div>
       </div>
-    </div>
+    </button>
   );
 }

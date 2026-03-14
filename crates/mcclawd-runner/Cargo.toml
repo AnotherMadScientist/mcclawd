@@ -7,6 +7,10 @@ version.workspace = true
 name = "agent-runner"
 path = "src/main.rs"
 
+[lib]
+name = "mcclawd_runner"
+path = "src/lib.rs"
+
 [dependencies]
 mcclawd-core = { workspace = true }
 mcclawd-agent = { workspace = true }
@@ -21,8 +25,8 @@ tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = { workspace = true }
 futures = { workspace = true }
+async-trait = { workspace = true }
+bollard = { workspace = true }
+tar = { workspace = true }
 base64 = "0.22"
 mime_guess = "2"
-
-[dev-dependencies]
-tempfile = { workspace = true }

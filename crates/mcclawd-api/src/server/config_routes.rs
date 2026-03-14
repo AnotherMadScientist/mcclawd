@@ -28,47 +28,29 @@ pub async fn put_config(
     State(state): State<AppState>,
     Json(body): Json<ConfigUpdate>,
 ) -> Result<Json<McclawdConfig>, (StatusCode, String)> {
-    // --- Validate ---
-    if let Some(ref model) = body.model {
-        if model.trim().is_empty() {
-            return Err((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "model must be a non-empty string".to_string(),
-            ));
-        }
-    }
-    if let Some(max_turns) = body.max_turns {
-        if !(1..=100).contains(&max_turns) {
-            return Err((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "max_turns must be between 1 and 100".to_string(),
-            ));
-        }
-    }
-    if let Some(ref ws) = body.default_workspace {
-        if ws.trim().is_empty() {
-            return Err((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "default_workspace must be non-empty".to_string(),
-            ));
-        }
-    }
-
-    // --- Merge into existing config ---
+    // --- Merge into a clone, validate, then commit ---
     let mut config = state.config.write().await;
+    let mut updated = config.clone();
 
     if let Some(model) = body.model {
-        config.agent.model = model;
+        updated.agent.model = model;
     }
     if let Some(max_turns) = body.max_turns {
-        config.agent.max_turns = max_turns;
+        updated.agent.max_turns = max_turns;
     }
     if let Some(ws) = body.default_workspace {
-        config.agent.default_workspace = ws;
+        updated.agent.default_workspace = ws;
     }
     if let Some(tp) = body.default_tool_profile {
-        config.agent.default_tool_profile = tp;
+        updated.agent.default_tool_profile = tp;
     }
+
+    // --- Validate merged config ---
+    updated
+        .validate()
+        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+
+    *config = updated;
 
     // --- Persist to disk ---
     if let Some(ref config_path) = state.config_path {

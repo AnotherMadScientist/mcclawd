@@ -39,6 +39,7 @@ serde_yaml = "0.9"
 
 # Config (OpenClaw-native JSON5)
 json5 = "0.4"
+toml = "0.8"
 
 # Version comparison (skill versioning)
 semver = "1"
